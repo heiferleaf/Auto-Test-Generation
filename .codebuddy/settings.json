@@ -1,3 +1,13 @@
 {
-  "outputStyle": "Explanatory"
+  "outputStyle": "Explanatory",
+  "permissions": {
+    "allow": [
+      "Bash(git worktree:*)",
+      "Bash(git:*)",
+      "Bash(rm -rf .codebuddy/worktree/*)",
+      "Bash(git worktree remove:*)",
+      "Bash(git worktree prune:*)"
+    ],
+    "ask": []
+  }
 }
