@@ -1,0 +1,13 @@
+{
+  "name": "electron-demo-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "M1.5 端到端冒烟靶机：最小 Electron 应用，开启 CDP 调试端口",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron . --remote-debugging-port=9222"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0"
+  }
+}
