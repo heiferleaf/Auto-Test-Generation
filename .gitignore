@@ -3,6 +3,9 @@ dist/
 .codebuddy/worktree/
 *.log
 
+# 集成测试真机运行生成的报告（验证产物，不入库；预期契约在 fixtures/）。
+test/reports/
+
 # docs 是指向笔记目录（D:\Harvey Note\自动化测试平台）的 symlink，
 # 文档通过笔记同步维护，不纳入 git 版本控制，避免合并时误删 symlink。
 docs
