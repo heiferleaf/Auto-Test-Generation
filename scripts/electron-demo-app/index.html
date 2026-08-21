@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Demo Login</title>
+  <style>
+    body { font-family: sans-serif; padding: 24px; }
+    .row { margin-bottom: 12px; }
+    label { display: inline-block; width: 90px; }
+    input { padding: 4px 8px; }
+    button { padding: 6px 16px; }
+    #welcome { margin-top: 16px; color: #0a0; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h2>Electron 自动化测试 Demo</h2>
+  <div class="row">
+    <label for="Username">Username</label>
+    <input type="text" name="Username" placeholder="用户名" />
+  </div>
+  <div class="row">
+    <label for="Password">Password</label>
+    <input type="password" name="Password" placeholder="密码" />
+  </div>
+  <div class="row">
+    <button role="button" name="Login" id="login">Login</button>
+  </div>
+  <div id="welcome" hidden>欢迎</div>
+
+  <script>
+    document.getElementById('login').addEventListener('click', function () {
+      document.getElementById('welcome').hidden = false;
+    });
+  </script>
+</body>
+</html>
