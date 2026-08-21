@@ -17,7 +17,8 @@ export type Locator = {
 
 export type AssertionKind =
   | 'exists' | 'visible' | 'textContains'
-  | 'titleIs' | 'urlMatches' | 'expr';
+  | 'titleIs' | 'urlMatches' | 'expr'
+  | 'elementVisibleInViewport' | 'screenshotMatches';
 
 export type Assertion = {
   kind: AssertionKind;

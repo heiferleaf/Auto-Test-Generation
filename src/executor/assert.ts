@@ -3,7 +3,9 @@
 // OCP 重构（M1.5）：以策略注册表取代 switch，新增断言 kind 只需追加一项。
 // 同时偿还 M1 占位债：visible/titleIs/urlMatches/expr 真实判定，消除"假绿"。
 
-import type { CdpAdapter } from '../cdp/adapter';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import type { CdpAdapter, VisualCapable } from '../cdp/adapter';
 import type { Assertion, AssertionKind, Locator } from '../types/step';
 
 export class AssertionError extends Error {
@@ -87,6 +89,43 @@ export const assertionHandlers: Record<AssertionKind, AssertionHandler> = {
   expr: async (adapter, assertion) => {
     const result = await adapter.eval(assertion.value ?? 'false');
     return { passed: Boolean(result) };
+  },
+
+  // 视觉断言：元素整体位于视口内且可见（M2 §3.2/§3.3）。
+  // 依赖 VisualCapable.locateVisual；非可视化 adapter 抛明确错误（ISP 兼容）。
+  elementVisibleInViewport: async (adapter, assertion) => {
+    const visual = adapter as Partial<VisualCapable>;
+    if (typeof visual.locateVisual !== 'function') {
+      throw new Error('当前适配器不支持可视化定位（需 VisualCapable）');
+    }
+    if (!assertion.locator) throw new Error('elementVisibleInViewport 缺少 locator');
+    const box = await visual.locateVisual(assertion.locator);
+    return { passed: box.visible && box.inViewport };
+  },
+
+  // 截图比对：与基线图（scripts/baselines/<name>）比对。
+  // M2 轻量实现：基线不存在则自动建立（首次运行）；存在则比对字节长度差异阈值。
+  // 真像素/结构比对可在 M4/M5 接入多模态模型增强（设计文档 §3.3）。
+  screenshotMatches: async (adapter, assertion) => {
+    const visual = adapter as Partial<VisualCapable>;
+    if (typeof visual.screenshot !== 'function') {
+      throw new Error('当前适配器不支持截图（需 VisualCapable）');
+    }
+    const name = assertion.value ?? 'default';
+    const baselinePath = `scripts/baselines/${name}.png`;
+    const buf = await visual.screenshot(
+      assertion.locator ? { element: assertion.locator } : {},
+    );
+    if (!existsSync(baselinePath)) {
+      mkdirSync(dirname(baselinePath), { recursive: true });
+      writeFileSync(baselinePath, buf);
+      // 首次运行建立基线，视为通过。
+      return { passed: true };
+    }
+    const base = readFileSync(baselinePath);
+    // 阈值：字节长度差异不超过 5%（轻量结构比对，非像素级）。
+    const diff = Math.abs(buf.length - base.length) / Math.max(base.length, 1);
+    return { passed: diff <= 0.05 };
   },
 };
 

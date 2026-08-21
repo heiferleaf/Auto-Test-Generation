@@ -26,7 +26,35 @@ export type SerializedNode = {
   testId?: string;
   enabled?: boolean;
   visible?: boolean;
+  /** 视觉 rect（M2）：渲染坐标与尺寸，DOM 树无此信息。 */
+  rect?: { x: number; y: number; width: number; height: number };
 };
+
+/** 视觉位置：基于渲染进程的 bounding box + 视口判定（M2 §3.2）。 */
+export type VisualRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  visible: boolean;
+  /** 元素整体是否落在视口内（M2 视觉断言用）。 */
+  inViewport: boolean;
+};
+
+export type ScreenshotOptions = {
+  target?: string;
+  element?: Locator;
+  fullPage?: boolean;
+};
+
+/**
+ * 可视化能力派生接口（ISP：避免让所有 CdpAdapter 强制实现截图/视觉定位）。
+ * 仅"可视化场景"的实现（如 PlaywrightCdpAdapter）实现本接口（M2 §4 偿还 ISP 债）。
+ */
+export interface VisualCapable {
+  screenshot(opts?: ScreenshotOptions): Promise<Buffer>;
+  locateVisual(loc: Locator): Promise<VisualRect>;
+}
 
 export type ConnectOptions = {
   port?: number;
@@ -62,7 +90,7 @@ export class CdpError extends Error {
   }
 }
 
-export class PlaywrightCdpAdapter implements CdpAdapter {
+export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable {
   private browser?: Browser;
   private child?: ChildProcess;
   private targets: TargetEntry[] = [];
@@ -200,6 +228,12 @@ export class PlaywrightCdpAdapter implements CdpAdapter {
           testId: he.getAttribute('data-testid') ?? undefined,
           enabled: !(he as HTMLButtonElement).disabled,
           visible: rect.width > 0 && rect.height > 0,
+          rect: {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          },
         });
       }
       return out;
@@ -209,6 +243,62 @@ export class PlaywrightCdpAdapter implements CdpAdapter {
   /** 返回首个匹配的 ElementHandle，未命中返回 null。 */
   async query(loc: Locator): Promise<unknown> {
     return resolveLocator(this.scope(), loc).first().elementHandle();
+  }
+
+  /** 截图：整窗 / 指定 webview(target) / 指定元素(element) 三种粒度（M2 §3.1）。 */
+  async screenshot(opts: ScreenshotOptions = {}): Promise<Buffer> {
+    const scope = this.scopeFor(opts.target);
+    if (opts.element) {
+      const handle = resolveLocator(scope, opts.element).first();
+      try {
+        return (await handle.screenshot()) as Buffer;
+      } catch (err) {
+        throw new CdpError('CDP_SCREENSHOT_ELEMENT', '元素截图失败（可能不可见或不在 DOM）', err);
+      }
+    }
+    try {
+      return (await scope.screenshot(opts.fullPage ? { fullPage: true } : {})) as Buffer;
+    } catch (err) {
+      throw new CdpError('CDP_SCREENSHOT_FAILED', '整窗/视口截图失败', err);
+    }
+  }
+
+  /** 视觉定位：取元素 bounding box + 视口内判定（M2 §3.2）。 */
+  async locateVisual(loc: Locator): Promise<VisualRect> {
+    const scope = this.scope();
+    const box = await resolveLocator(scope, loc)
+      .first()
+      .boundingBox()
+      .catch(() => null);
+    if (!box) {
+      return { x: 0, y: 0, width: 0, height: 0, visible: false, inViewport: false };
+    }
+    // 视口判定：元素四角均落在 window 视口范围内。
+    const vp = await scope
+      .evaluate(() => ({ w: window.innerWidth, h: window.innerHeight }))
+      .catch(() => ({ w: 0, h: 0 }));
+    const inViewport =
+      box.x >= 0 &&
+      box.y >= 0 &&
+      box.x + box.width <= vp.w &&
+      box.y + box.height <= vp.h;
+    const visible = box.width > 0 && box.height > 0;
+    return { x: box.x, y: box.y, width: box.width, height: box.height, visible, inViewport };
+  }
+
+  /** 按 target 选作用域：指定 webview 时切到对应 target，否则用当前作用域。 */
+  private scopeFor(target?: string): Page | Frame {
+    if (target) {
+      const found = findTarget(this.targets, target);
+      if (!found) {
+        throw new CdpError(
+          'CDP_TARGET_NOT_FOUND',
+          `截图指定目标 ${target} 未找到；可用：${this.targets.map((t) => t.info.id).join(', ') || '(空)'}`,
+        );
+      }
+      return found.frame ?? found.page;
+    }
+    return this.scope();
   }
 
   // ---- 内部辅助 ----
