@@ -1,0 +1,33 @@
+---
+name: test-first-dev
+description: 测试先行开发技能——接到实现任务时，先产出测试方案/测试代码，再实现并以通过测试为迭代目标。落地 CODEBUDDY.md §5 与 rules/test-first.md。
+type: skill
+---
+
+# 测试先行开发技能
+
+适用于本项目所有实现任务，强制"先测试，后实现"。
+
+## 何时使用
+- 任何实现/修复任务动手前。
+- 评估一个任务是否"完成"时。
+
+## 步骤
+1. **先定测试**：在 `docs/实施计划.md` 对应阶段补充测试方案，或直接在 `test/` 写测试骨架（可先失败）。
+2. **再写实现**：实现以满足测试为第一目标，反复迭代。
+3. **过测试才算完成**：`npm test` 全绿；未通过不得合并、不得声称完成。
+4. **双角色校验**：完成后交 test 角色（确认测试通过）与 code-review 角色（确认符合约定）。
+
+## 测试类型约定
+- 单测：`vitest`（步骤模型、断言引擎、脚本 IO、执行器 mock 驱动）。
+- 集成/端到端：Playwright Test 或自研执行器驱动 **示例 Electron App**（启动时加 `--remote-debugging-port=9222`）。
+
+## 示例（M1）
+- `test/model.test.ts`：步骤模型与脚本 IO 往返。
+- `test/cdp.test.ts`：mock CDP 行为 + 真实连接冒烟。
+- `test/executor.test.ts` / `test/assert.test.ts`：执行器与断言各分支。
+- `test/cli.test.ts`：全流程跑通与失败路径。
+
+## 注意
+- 测试代码与实现可在同一 worktree 同一 Agent 完成，但校验角色须独立。
+- 拒绝"只留自然语言日志"式实现；必须有可执行、可断言的测试。
