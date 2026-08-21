@@ -1,6 +1,6 @@
 ---
 name: code-review-standard
-description: code-review 角色执行标准——除语法与设计文档对齐外，必查 SOLID、GoF 设计模式恰当性、可扩展性与适配性，保证系统稳定可靠、易扩展。
+description: 当你需要审查本项目代码（作为 code-review 校验角色，或对刚完成的实现做自审）时加载。提供一套检查清单：除语法与设计文档对齐外，必查 SOLID 五原则、GoF 设计模式恰当性、可扩展性与适配性，以及错误处理与资源生命周期，确保系统稳定可靠、易扩展、符合 CODEBUDDY.md §4 基线。
 type: skill
 ---
 

@@ -1,13 +1,20 @@
 {
   "outputStyle": "Explanatory",
   "permissions": {
+    "defaultMode": "acceptEdits",
     "allow": [
-      "Bash(git worktree:*)",
-      "Bash(git:*)",
-      "Bash(rm -rf .codebuddy/worktree/*)",
-      "Bash(git worktree remove:*)",
-      "Bash(git worktree prune:*)"
+      "Read",
+      "Edit",
+      "Write",
+      "WebFetch",
+      "Bash(*)"
     ],
-    "ask": []
+    "ask": [],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Read(./config/credentials.json)"
+    ]
   }
 }
