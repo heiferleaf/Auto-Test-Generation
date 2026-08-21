@@ -32,3 +32,21 @@ type: skill
 - worktree 目录已被 `.gitignore` 忽略，不会误提交。
 - 并行任务各自独立 worktree，避免共享文件冲突。
 - 主树始终保持可编译/可测试基线。
+
+## ⚠️ 避坑：交互确认卡死（本仓库反复踩过的坑）
+
+**问题**：在 Windows（Git Bash）下执行 `git worktree remove` / `git merge` 等命令时，常因以下原因卡在交互确认，导致命令长时间挂起甚至被超时杀掉：
+1. `git worktree remove` 删除目录时遇 Windows 文件锁（npm/tsc 进程占用），会提示 `Deletion of directory ... failed. Should I try again? (y/n)`。
+2. `git merge` 带 `--no-ff` 可能弹出编辑器或确认。
+3. `npx <pkg>` 未安装时会提示 `Need to install ... Ok to proceed? (y)`。
+
+**正确做法（务必遵守）**：
+- 合并用非交互 + 超时保护：`timeout 60 git merge feat/<name> --no-ff -m "merge(...)"`。
+- 删除 worktree 前先 `git worktree prune`，再用 `printf 'y\n' | git worktree remove .codebuddy/worktree/<name> --force`（喂入 y 跳过确认）。
+- 删分支：`git branch -d feat/<name>`（已 prune 后才可删被 worktree 引用的分支）。
+- 跑测试装依赖用 `npm install --silent` 或 `npx --yes vitest run`，避免 npx 交互询问。
+- 若命令返回 "Running in background" 且长时间无输出，多半是卡在交互提示——用 TaskStop 终止，改用上述非交互写法重跑，**不要反复在原命令上等待**。
+
+**Windows 文件锁残留**：被占用的 worktree 物理目录（如 `.codebuddy/worktree/m1-exec`）无法 `rm -rf` 删除，需重启 shell/进程释放句柄；但 `git worktree prune` 已将其从 git 元数据移除，不影响 git 操作，仅磁盘残留，可忽略或重启后清理。
+
+**权限**：`.codebuddy/settings.json` 已对 `git worktree:*` 与 `git:*` 设 `permissions.allow`，跳过权限申请弹窗。
