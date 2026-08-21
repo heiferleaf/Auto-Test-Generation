@@ -1,0 +1,12 @@
+{
+  "schema": "electron-auto-test/step/v1",
+  "app": { "name": "demo", "version": "1.0.0" },
+  "createdAt": "2026-08-21",
+  "note": "M1 验收：模拟登录流程，用于端到端/人工演示脚本稳定控目标 App。",
+  "steps": [
+    { "id": "s1", "type": "fill", "locator": { "name": "Username" }, "params": { "value": "admin" }, "source": "manual" },
+    { "id": "s2", "type": "fill", "locator": { "name": "Password" }, "params": { "value": "password" }, "source": "manual" },
+    { "id": "s3", "type": "click", "locator": { "role": "button", "name": "Login" }, "source": "manual" },
+    { "id": "s4", "type": "assert", "expect": { "kind": "textContains", "value": "欢迎" }, "source": "manual" }
+  ]
+}
