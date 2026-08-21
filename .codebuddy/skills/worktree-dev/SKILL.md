@@ -50,3 +50,20 @@ type: skill
 **Windows 文件锁残留**：被占用的 worktree 物理目录（如 `.codebuddy/worktree/m1-exec`）无法 `rm -rf` 删除，需重启 shell/进程释放句柄；但 `git worktree prune` 已将其从 git 元数据移除，不影响 git 操作，仅磁盘残留，可忽略或重启后清理。
 
 **权限**：`.codebuddy/settings.json` 已对 `git worktree:*` 与 `git:*` 设 `permissions.allow`，跳过权限申请弹窗。
+
+## ⚠️ 避坑：docs 是 symlink，合并会误删
+
+**背景**：本仓库 `docs/` 是指向笔记目录（`D:\Harvey Note\自动化测试平台`）的 **symlink**，只通过笔记同步维护，**不纳入 git 版本控制**（已在 `.gitignore` 忽略）。
+
+**问题**：若 worktree 内曾对 `docs` 做过 `rm -rf docs` 或提交过删除 symlink 的操作，合并回 master 时 git 会把 master 上的 `docs` symlink 一并删掉（显示为 `delete mode 120000 docs`），导致本地文档入口丢失。
+
+**正确做法（务必遵守）**：
+- `docs` 已在 `.gitignore` 中忽略，正常情况下 master 合并不会触碰它；但不要在任何 worktree 里提交对 `docs` 的增删。
+- 若合并后误删了 symlink，用 **PowerShell** 重建（Git Bash 的 `ln -s` 在 Windows 上常退化成建目录而非真 symlink）：
+  ```powershell
+  Set-Location "D:\project\自动化测试"
+  if (Test-Path docs) { Remove-Item -Recurse -Force docs }
+  New-Item -ItemType SymbolicLink -Path "D:\project\自动化测试\docs" -Target "D:\Harvey Note\自动化测试平台"
+  ```
+- 验证：`ls -ld docs` 应显示 `docs -> /d/Harvey Note/自动化测试平台`，且 `git status` 中 `docs` 应为 `?? docs`（被 gitignore 忽略的未跟踪项），而非被跟踪或被删除。
+- **绝不要用 `git checkout master -- docs`** 来恢复 symlink——master HEAD 已不含 docs，该命令无效。
