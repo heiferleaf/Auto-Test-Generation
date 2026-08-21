@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { PlaywrightCdpAdapter } from '../src/cdp/adapter';
-import type { CdpAdapter } from '../src/cdp/adapter';
+import type { CdpAdapter, Locator } from '../src/cdp/adapter';
 
 const LIVE = process.env.CODEBUDDY_LIVE === '1';
 const EXE = 'C:\\Users\\harveyhfye\\AppData\\Local\\Programs\\CodeBuddy CN\\CodeBuddy CN.exe';
@@ -34,21 +34,24 @@ function writeReport(lines: string[]) {
 
 const live = LIVE ? describe : describe.skip;
 
+// 模块级共享：两个 live describe 块（靶机 + 可视化）共用同一连接与报告。
+let adapter: CdpAdapter;
+const report: string[] = [];
+
+// 模块级 beforeAll/afterAll：整个测试文件只连一次、最后才断，
+// 避免靶机块 afterAll 断开后可视化块无连接可用。
+beforeAll(async () => {
+  adapter = new PlaywrightCdpAdapter();
+  await adapter.connect({ port: PORT });
+}, 30_000);
+
+afterAll(async () => {
+  const f = writeReport(report);
+  report.push(`\n报告已生成: ${f}`);
+  await (adapter as PlaywrightCdpAdapter).disconnect().catch(() => undefined);
+});
+
 live('CodeBuddy 真实靶机集成测试', () => {
-  let adapter: CdpAdapter;
-  const report: string[] = [];
-
-  beforeAll(async () => {
-    adapter = new PlaywrightCdpAdapter();
-    await adapter.connect({ port: PORT });
-  }, 30_000);
-
-  afterAll(async () => {
-    const f = writeReport(report);
-    report.push(`\n报告已生成: ${f}`);
-    await (adapter as PlaywrightCdpAdapter).disconnect().catch(() => undefined);
-  });
-
   it('步骤1：连接成功且枚举多 webview', async () => {
     const targets = adapter.listTargets();
     report.push(`- listTargets 返回 ${targets.length} 个目标`);
@@ -73,17 +76,22 @@ live('CodeBuddy 真实靶机集成测试', () => {
   });
 });
 
-// M2 可视化能力（screenshot / locateVisual / 视觉断言）实现前 skip。
-// 待 M2 在 adapter 增加 screenshot 与 locateVisual、并在 assertionHandlers 注册
-// screenshotMatches / elementVisibleInViewport 后，移除此 skip 并补全断言。
-describe.skip('CodeBuddy 可视化测试（M2 实现后启用）', () => {
+// M2 可视化能力（screenshot / locateVisual / 视觉断言）已实现，真机路径启用。
+// 同样受 LIVE 控制：无 CODEBUDDY_LIVE 时整体 skip（安全：默认不碰生产包）。
+const liveVisual = LIVE ? describe : describe.skip;
+liveVisual('CodeBuddy 可视化测试（M2 实现）', () => {
   it('步骤4：截图主窗口非空白', async () => {
-    // const buf = await adapter.screenshot();
-    // expect(buf.length).toBeGreaterThan(0);
+    const buf = await (adapter as unknown as { screenshot: () => Promise<Buffer> }).screenshot();
+    report.push(`- 主窗口截图字节数: ${buf.length}`);
+    expect(buf.length).toBeGreaterThan(0);
   });
   it('步骤5：侧栏可见且在视口内', async () => {
-    // const box = await adapter.locateVisual({ name: '侧栏' });
-    // expect(box.visible).toBe(true);
+    const box = await (
+      adapter as unknown as { locateVisual: (l: Locator) => Promise<{ visible: boolean; inViewport: boolean }> }
+    ).locateVisual({ name: '侧栏' });
+    report.push(`- 侧栏视觉位置 visible=${box.visible}, inViewport=${box.inViewport}`);
+    expect(box.visible).toBe(true);
+    expect(box.inViewport).toBe(true);
   });
 });
 
