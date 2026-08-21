@@ -1,6 +1,6 @@
 ---
 name: worktree-dev
-description: 在本项目用 git worktree 开展实现任务的技能——创建独立工作树、开发自测、合并清理。复用 CODEBUDDY.md §3 与 rules/worktree-workflow.md。
+description: 在本项目用 git worktree 开展实现任务的技能——创建独立工作树、开发自测、合并清理。复用 CODEBUDDY.md §3（工作流规则）。
 type: skill
 ---
 

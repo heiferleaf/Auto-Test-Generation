@@ -90,15 +90,22 @@ git worktree remove .codebuddy/worktree/m1-cdp
 
 ---
 
-## 6 知识沉淀：skills 与 rules
+## 6 纪律与规则的单一真相源
 
-- 重复要执行的任务、特定任务开发要求 → 总结为 **`.codebuddy/skills/`** 下的技能文档。
-- 工作流/纪律性约束（worktree、测试先行、并行协作校验）→ 维护为 **`.codebuddy/rules/`** 下的规则文档。
-- 任何新沉淀都要可被后续 Agent 直接读取复用，避免重复探索。
+> **CLI 模式不加载 `.codebuddy/rules/`。** 因此所有工作流与纪律性约束（worktree、测试先行、并行协作校验、知识沉淀）**统一在本 CODEBUDDY.md 维护**，不另设 `.codebuddy/rules/`，避免双源漂移。
+> 本文件各节即"规则"：§3 工作流规则、§4 协作校验规则、§5 测试先行规则。
 
 ---
 
-## 7 约定速查
+## 7 知识沉淀：skills
+
+- 重复要执行的任务、特定任务开发要求 → 总结为 **`.codebuddy/skills/`** 下的技能文档（如 `worktree-dev`、`test-first-dev`）。
+- skills 文档用 frontmatter（`name`/`description`/`type`）标注，便于索引；任何新沉淀都要可被后续 Agent 直接读取复用。
+- 当某技能过时，及时更新或删除，保持知识库有效。
+
+---
+
+## 8 约定速查
 
 | 主题 | 规定 |
 |---|---|
@@ -107,4 +114,5 @@ git worktree remove .codebuddy/worktree/m1-cdp
 | 实现顺序 | 先测试（方案/代码）→ 再实现 → 过测试 |
 | 完成标准 | 测试通过 + code-review 通过 |
 | 并行 | 多 Agent/team + 每任务带 test & review 角色 |
-| 沉淀 | 重复任务→skills，纪律→rules，偏好→本文件 |
+| 纪律归属 | 统一在 CODEBUDDY.md（CLI 不读 `.codebuddy/rules/`） |
+| 沉淀 | 重复任务→skills（`.codebuddy/skills/`），偏好/纪律→本文件 |

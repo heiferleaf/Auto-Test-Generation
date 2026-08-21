@@ -1,6 +1,6 @@
 ---
 name: test-first-dev
-description: 测试先行开发技能——接到实现任务时，先产出测试方案/测试代码，再实现并以通过测试为迭代目标。落地 CODEBUDDY.md §5 与 rules/test-first.md。
+description: 测试先行开发技能——接到实现任务时，先产出测试方案/测试代码，再实现并以通过测试为迭代目标。落地 CODEBUDDY.md §5（测试先行规则）。
 type: skill
 ---
 
