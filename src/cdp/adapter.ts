@@ -67,9 +67,11 @@ export class PlaywrightCdpAdapter implements CdpAdapter {
   private child?: ChildProcess;
   private targets: TargetEntry[] = [];
   private current?: TargetEntry;
+  private port = DEFAULT_CDP_PORT;
 
   async connect(opts: ConnectOptions = {}): Promise<void> {
     const port = opts.port ?? DEFAULT_CDP_PORT;
+    this.port = port;
 
     if (opts.appPath) {
       this.child = this.launchApp(opts.appPath, port, opts.launchArgs);
@@ -125,11 +127,22 @@ export class PlaywrightCdpAdapter implements CdpAdapter {
   /** 重新枚举目标（窗口/webview 可能动态增减）。 */
   async refreshTargets(): Promise<TargetInfo[]> {
     const browser = this.requireBrowser();
-    this.targets = await enumerateTargets(browser);
+    const raw = await this.fetchRawTargets().catch(() => undefined);
+    this.targets = await enumerateTargets(browser, raw);
     if (this.current && !findTarget(this.targets, this.current.info.id)) {
       this.current = mainTarget(this.targets);
     }
     return this.listTargets();
+  }
+
+  /** 从 CDP /json 拉取原始 target 列表（保留 iframe 等真实类型）。 */
+  private async fetchRawTargets(): Promise<import('./targets.js').RawCdpTarget[]> {
+    const port = this.port;
+    if (!port) return [];
+    const res = await fetch(`http://localhost:${port}/json`);
+    if (!res.ok) return [];
+    const list = (await res.json()) as import('./targets.js').RawCdpTarget[];
+    return Array.isArray(list) ? list : [];
   }
 
   async click(loc: Locator): Promise<void> {
