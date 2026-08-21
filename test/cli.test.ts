@@ -2,7 +2,8 @@
 // 目标：CLI 跑通 demo 脚本全流程，失败路径输出结构化错误（M1 验收 §8-3,§8-5）。
 
 import { describe, it, expect } from 'vitest';
-import type { CdpAdapter, Script } from '../src/types/step';
+import type { CdpAdapter } from '../src/cdp/adapter';
+import type { Script } from '../src/types/step';
 import { runCli } from '../src/cli';
 
 function stubAdapter(opts: { failAt?: string } = {}): CdpAdapter {
