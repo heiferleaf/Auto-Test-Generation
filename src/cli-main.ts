@@ -1,5 +1,5 @@
 // 命令行真实连接入口（M1.5）：解析参数 → 启动 PlaywrightCdpAdapter → runCli。
-// 设计依据：docs/设计文档.md §8-5（失败路径输出明确错误）。
+// 设计依据：docs/design/design.md §8-5（失败路径输出明确错误）。
 
 import { readFileSync } from 'node:fs';
 import { PlaywrightCdpAdapter, CdpError } from './cdp/adapter';

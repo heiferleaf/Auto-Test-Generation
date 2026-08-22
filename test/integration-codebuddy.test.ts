@@ -12,7 +12,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { PlaywrightCdpAdapter } from '../src/cdp/adapter';
-import type { CdpAdapter, Locator } from '../src/cdp/adapter';
+import type { CdpAdapter, VisualCapable } from '../src/cdp/adapter';
+
+// 靶机连接同时具备基础 CDP 能力与可视化能力（PlaywrightCdpAdapter 实现两者）。
+type Target = CdpAdapter & VisualCapable;
 
 const LIVE = process.env.CODEBUDDY_LIVE === '1';
 const EXE = 'C:\\Users\\harveyhfye\\AppData\\Local\\Programs\\CodeBuddy CN\\CodeBuddy CN.exe';
@@ -35,17 +38,21 @@ function writeReport(lines: string[]) {
 const live = LIVE ? describe : describe.skip;
 
 // 模块级共享：两个 live describe 块（靶机 + 可视化）共用同一连接与报告。
-let adapter: CdpAdapter;
+let adapter: Target;
 const report: string[] = [];
 
 // 模块级 beforeAll/afterAll：整个测试文件只连一次、最后才断，
 // 避免靶机块 afterAll 断开后可视化块无连接可用。
+// 注意：describe.skip 不会拦住顶层钩子，故显式按 LIVE 守卫，
+// 无真机时直接 return，避免去连 9222 端口。
 beforeAll(async () => {
+  if (!LIVE) return;
   adapter = new PlaywrightCdpAdapter();
   await adapter.connect({ port: PORT });
 }, 30_000);
 
 afterAll(async () => {
+  if (!LIVE) return;
   const f = writeReport(report);
   report.push(`\n报告已生成: ${f}`);
   await (adapter as PlaywrightCdpAdapter).disconnect().catch(() => undefined);
@@ -80,15 +87,15 @@ live('CodeBuddy 真实靶机集成测试', () => {
 // 同样受 LIVE 控制：无 CODEBUDDY_LIVE 时整体 skip（安全：默认不碰生产包）。
 const liveVisual = LIVE ? describe : describe.skip;
 liveVisual('CodeBuddy 可视化测试（M2 实现）', () => {
-  it('步骤4：截图主窗口非空白', async () => {
-    const buf = await (adapter as unknown as { screenshot: () => Promise<Buffer> }).screenshot();
-    report.push(`- 主窗口截图字节数: ${buf.length}`);
+  it('步骤4：截图主窗口非空白且落盘可验证', async () => {
+    const savePath = new URL('./reports/codebuddy-main.png', import.meta.url).pathname;
+    const buf = await adapter.screenshot({ savePath });
+    report.push(`- 主窗口截图字节数: ${buf.length}, 落盘: ${savePath}`);
     expect(buf.length).toBeGreaterThan(0);
+    expect(existsSync(savePath)).toBe(true);
   });
   it('步骤5：侧栏可见且在视口内', async () => {
-    const box = await (
-      adapter as unknown as { locateVisual: (l: Locator) => Promise<{ visible: boolean; inViewport: boolean }> }
-    ).locateVisual({ name: '侧栏' });
+    const box = await adapter.locateVisual({ name: '侧栏' });
     report.push(`- 侧栏视觉位置 visible=${box.visible}, inViewport=${box.inViewport}`);
     expect(box.visible).toBe(true);
     expect(box.inViewport).toBe(true);

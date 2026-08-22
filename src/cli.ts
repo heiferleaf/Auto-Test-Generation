@@ -1,5 +1,5 @@
 // CLI 入口（M1-D）：编排 adapter.connect + runScript，对外返回结构化结果。
-// 设计依据：docs/设计文档.md §8；失败路径需暴露 failedStepId（§8-5）。
+// 设计依据：docs/design/design.md §8；失败路径需暴露 failedStepId（§8-5）。
 
 import type { CdpAdapter, ConnectOptions } from './cdp/adapter';
 import type { Script } from './types/step';

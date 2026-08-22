@@ -1,4 +1,4 @@
-// 统一步骤模型（M1 设计文档 §4）
+// 统一步骤模型（M1 design.md §4）
 // 录制 / Agent 轨迹 / 导入导出 / MCP Tool / 执行器 共用此结构。
 
 export type StepType =

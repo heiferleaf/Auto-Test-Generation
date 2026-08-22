@@ -1,0 +1,18 @@
+{
+  "targets": [
+    {
+      "name": "codebuddy",
+      "label": "CodeBuddy CN",
+      "exe": "C:\\Users\\harveyhfye\\AppData\\Local\\Programs\\CodeBuddy CN\\CodeBuddy CN.exe",
+      "port": 9222,
+      "launchScript": "scripts/launch-codebuddy.cmd"
+    },
+    {
+      "name": "workbuddy",
+      "label": "WorkBuddy",
+      "exe": "C:\\Users\\harveyhfye\\AppData\\Local\\Programs\\WorkBuddy\\WorkBuddy.exe",
+      "port": 9233,
+      "launchScript": "scripts/launch-workbuddy.cmd"
+    }
+  ]
+}

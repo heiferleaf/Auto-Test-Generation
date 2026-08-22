@@ -4,7 +4,7 @@
 // 维护 execution contexts，并把 evaluate/fill 转发到内层 UI context。
 //
 // 设计：Adapter（原生 CDP → 统一 CdpTarget 接口）+ 内部 context 策略选择。
-// 依据：design/m2-webview-cdp.md §3。
+// 依据：docs/design/m2-webview-cdp.md §3。
 
 import WebSocket from 'ws';
 import type { TargetType } from './targets';

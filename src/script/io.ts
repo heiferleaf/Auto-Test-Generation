@@ -1,4 +1,4 @@
-// 脚本导入/导出（M1 设计文档 §7）
+// 脚本导入/导出（M1 design.md §7）
 // 与 MCP Tool（script.import / script.export）语义一致。
 
 import { SCRIPT_SCHEMA, type Script } from '../types/step';

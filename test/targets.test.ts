@@ -2,7 +2,7 @@
 // 在 CDP /json 中以 type="iframe" 出现，而非 "webview"。
 // 本测试断言：原始 CDP type 到本项目 TargetType 的分类能正确把 iframe 归为 webview。
 //
-// 设计基线：docs/设计文档.md §5；修正依据 test/reports 真机报告（webview:0 实为 iframe 漏识）。
+// 设计基线：docs/design/design.md §5；修正依据 test/reports 真机报告（webview:0 实为 iframe 漏识）。
 
 import { describe, it, expect } from 'vitest';
 import { classifyTargetType, type RawCdpTarget } from '../src/cdp/targets';

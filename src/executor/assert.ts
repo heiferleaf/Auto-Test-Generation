@@ -1,5 +1,5 @@
 // 断言引擎（M1.5）：执行单条断言，返回是否通过。
-// 设计依据：docs/设计文档.md §6；错误需带明确信息，不静默通过（§8-5）。
+// 设计依据：docs/design/design.md §6；错误需带明确信息，不静默通过（§8-5）。
 // OCP 重构（M1.5）：以策略注册表取代 switch，新增断言 kind 只需追加一项。
 // 同时偿还 M1 占位债：visible/titleIs/urlMatches/expr 真实判定，消除"假绿"。
 
@@ -105,7 +105,7 @@ export const assertionHandlers: Record<AssertionKind, AssertionHandler> = {
 
   // 截图比对：与基线图（scripts/baselines/<name>）比对。
   // M2 轻量实现：基线不存在则自动建立（首次运行）；存在则比对字节长度差异阈值。
-  // 真像素/结构比对可在 M4/M5 接入多模态模型增强（设计文档 §3.3）。
+  // 真像素/结构比对可在 M4/M5 接入多模态模型增强（design.md §3.3）。
   screenshotMatches: async (adapter, assertion) => {
     const visual = adapter as Partial<VisualCapable>;
     if (typeof visual.screenshot !== 'function') {
