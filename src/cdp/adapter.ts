@@ -5,6 +5,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { chromium, type Browser, type Frame, type Page } from 'playwright';
+import WebSocket from 'ws';
 import type { Locator } from '../types/step';
 export type { Locator } from '../types/step';
 import type { InteractionEvent } from '../recorder/recorder';
@@ -122,6 +123,10 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   // M3 录制：累积当前 target 捕获的交互事件（仅在 startRecording 后生效）。
   private recording = false;
   private recorded: InteractionEvent[] = [];
+  /** 浏览器级 CDP 会话（监听 Target.targetCreated，捕捉录制中途动态新增的 webview）。 */
+  private recordBrowserWs?: WebSocket;
+  /** 本轮录制已注入监听器的 target id 集合，避免重复注入。 */
+  private injectedTargets = new Set<string>();
 
   async connect(opts: ConnectOptions = {}): Promise<void> {
     const port = opts.port ?? DEFAULT_CDP_PORT;
@@ -164,6 +169,7 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     this.current = undefined;
     this.recording = false;
     this.recorded = [];
+    this.stopTargetWatch();
     await this.killChild();
   }
 
@@ -186,8 +192,14 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   async refreshTargets(): Promise<TargetInfo[]> {
     const browser = this.requireBrowser();
     const raw = await this.fetchRawTargets().catch(() => undefined);
+    const prevId = this.current?.info.id;
     this.targets = await enumerateTargets(browser, raw);
-    if (this.current && !findTarget(this.targets, this.current.info.id)) {
+    // 重新枚举会产生全新的 TargetEntry 对象；把 this.current 重新指向同 id 的新条目，
+    // 避免其悬空在旧列表上（录制中途 refresh 若悬空，后续 fill/click 会作用于失效目标）。
+    if (prevId) {
+      const same = findTarget(this.targets, prevId);
+      this.current = same ?? mainTarget(this.targets);
+    } else {
       this.current = mainTarget(this.targets);
     }
     return this.listTargets();
@@ -276,22 +288,28 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   /**
    * M3 录制：对所有已枚举 target（主 page + 每个 webview）注入交互监听器。
    * 事件累积在各自的 window.__recBuf；webview 内层通过 CdpTarget.evaluate 的 ctxId 注入。
+   * 同时开启浏览器级 Target 监听，录制中途动态新增的 webview 也会被自动注入。
    */
   startRecording(): void {
+    // 先清理可能残留的监听 ws（防止连续两次 startRecording 未 stop 时句柄泄漏）。
+    this.stopTargetWatch();
     this.recording = true;
     this.recorded = [];
+    this.injectedTargets.clear();
+    // 会话开始：先排空所有 target 的残留缓冲（监听器常驻，跨会话可能已累积），
+    // 再注入录制脚本。后续 refreshTargets 触发的重复注入只注入不排空，避免清掉已捕获事件。
     for (const t of this.targets) {
-      // 先排空上一轮残留的事件缓冲（监听器常驻，会话之间可能已累积事件），
-      // 保证本轮录制从干净状态开始，避免跨用例的事件串扰。
       void t.target.evaluate(RECORD_DRAIN).catch(() => undefined);
-      // 仅依赖 CdpTarget.evaluate 注入（保持抽象一致，不引入 exposeFunction）。
-      void t.target.evaluate(RECORD_INJECT).catch(() => undefined);
     }
+    this.injectRecorderIntoTargets();
+    // 再开启动态监听：中途新开的 webview 也能被录到。
+    this.startTargetWatch();
   }
 
   /** M3 录制：停止监听并异步取回所有 target 累积的 InteractionEvent[]（按 target 标注）。 */
   async stopRecording(): Promise<InteractionEvent[]> {
     this.recording = false;
+    this.stopTargetWatch();
     const out: InteractionEvent[] = [];
     for (const t of this.targets) {
       const buf = await t.target.evaluate<any[]>(RECORD_DRAIN).catch(() => []);
@@ -301,6 +319,103 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     }
     this.recorded = out;
     return out;
+  }
+
+  /**
+   * 把录制监听器注入到「本轮尚未注入」的 target（page + webview）。
+   * 注意：本方法只注入，不排空缓冲——排空只在 startRecording 会话开始时做一次，
+   * 否则录制中途 refreshTargets 触发的重复注入会清空已捕获的事件（见 targetCreated 处理）。
+   * 仅依赖 CdpTarget.evaluate（保持抽象一致，不引入 exposeFunction）。
+   */
+  private injectRecorderIntoTargets(): void {
+    for (const t of this.targets) {
+      if (this.injectedTargets.has(t.info.id)) continue;
+      void t.target.evaluate(RECORD_INJECT).catch(() => undefined);
+      this.injectedTargets.add(t.info.id);
+    }
+  }
+
+  /**
+   * 开启浏览器级 CDP 监听：录制中途若应用动态新增 webview（Target.targetCreated），
+   * 重新枚举并自动注入录制监听器。这样「操作触发新开 webview」的用例也能录到。
+   * 仅监听事件、不改动核心录制逻辑（OCP）。静默容错：建连/订阅失败不影响既有录制。
+   */
+  private startTargetWatch(): void {
+    // 先清理可能残留的监听 ws（防止连续两次 startRecording 未 stop 时句柄泄漏）。
+    this.stopTargetWatch();
+    const port = this.port;
+    if (!port) return;
+    try {
+      // 浏览器级 CDP 端点不在根路径，需从 /json/version 取 webSocketDebuggerUrl。
+      void fetch(`http://localhost:${port}/json/version`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((v: any) => {
+          const wsUrl: string | undefined = v?.webSocketDebuggerUrl;
+          if (!wsUrl) return; // 取不到则不开启动态监听，降级为仅录制已枚举 target。
+          this.openTargetWatch(wsUrl);
+        })
+        .catch(() => undefined);
+    } catch {
+      // 取端点失败：降级为仅录制已枚举 target，不阻断录制。
+    }
+  }
+
+  /** 用浏览器级 webSocketDebuggerUrl 建立 CDP 会话并监听 Target.targetCreated。 */
+  private openTargetWatch(wsUrl: string): void {
+    try {
+      const ws = new WebSocket(wsUrl, { perMessageDeflate: false });
+      this.recordBrowserWs = ws;
+      ws.on('open', () => {
+        // 启用 Target 域以接收 targetCreated 事件。
+        ws.send(JSON.stringify({ id: 1, method: 'Target.setDiscoverTargets', params: { discover: true } }));
+      });
+      ws.on('message', (data: WebSocket.RawData) => {
+        let m: any;
+        try {
+          m = JSON.parse(data.toString());
+        } catch {
+          return;
+        }
+        // 仅关心新 target 创建事件；其余（含自身响应）忽略。
+        if (m.method !== 'Target.targetCreated') return;
+        const info = m.params?.targetInfo;
+        if (!info || (info.type !== 'page' && info.type !== 'iframe' && info.type !== 'webview')) {
+          return;
+        }
+        // 重新枚举（新 target 此刻通常已出现在 /json，含 webSocketDebuggerUrl）。
+        // 注入可能短暂失败（ws 未就绪），用几次重试兜底。
+        void this.refreshTargets()
+          .then(() => this.injectRecorderIntoTargets())
+          .catch(() => undefined);
+        // 若首次刷新时 ws url 尚未就绪，稍后重试补齐（最多 5 次，间隔 300ms）。
+        const newId = info.targetId as string;
+        for (let i = 1; i <= 5; i++) {
+          setTimeout(() => {
+            if (!this.recording) return;
+            if (this.injectedTargets.has(newId)) return;
+            void this.refreshTargets()
+              .then(() => this.injectRecorderIntoTargets())
+              .catch(() => undefined);
+          }, i * 300);
+        }
+      });
+      ws.on('error', () => {
+        // 浏览器级监听不可用：既有录制不受影响，仅失去动态 webview 自动注入能力。
+      });
+    } catch {
+      // 创建 ws 失败：降级为「仅录制已枚举 target」，不阻断录制。
+    }
+  }
+
+  /** 关闭浏览器级 Target 监听（停止录制 / 断开时调用）。 */
+  private stopTargetWatch(): void {
+    try {
+      this.recordBrowserWs?.close();
+    } catch {
+      /* 已关闭 */
+    }
+    this.recordBrowserWs = undefined;
+    this.injectedTargets.clear();
   }
 
   /** Locator 转 querySelector/Document.evaluate 调用表达式（供 evaluate 内使用）。 */
