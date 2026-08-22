@@ -31,3 +31,4 @@ type: skill
 ## 注意
 - 测试代码与实现可在同一 worktree 同一 Agent 完成，但校验角色须独立。
 - 拒绝"只留自然语言日志"式实现；必须有可执行、可断言的测试。
+- **worktree 不自动删除**：实现合并回 master 后保留 worktree 与分支，等用户明确要求才清理（见 `worktree-dev` skill）。
