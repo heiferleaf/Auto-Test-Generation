@@ -101,6 +101,19 @@ git worktree remove .codebuddy/worktree/m1-cdp
 2. 实现代码以满足测试为第一目标，反复迭代直至测试通过。
 3. 提交时测试须为通过态；CI/本地 `npm test` 全绿才允许合并。
 
+## 5.1 架构方案同步（强制）
+
+> **当实现影响了既有架构、或新增/变更了架构方案（如新增 Target 类型、引入新的传输层/协议、改变模块职责边界、新增 Adapter/工厂分支等）时，必须同步更新 `docs/方案.md`（技术选型与架构方案）。**
+
+理由：
+- `docs/方案.md` 是架构决策的单一真相源，下游（MCP Tool 接入、Agent 驱动、回放脚本、新成员 onboarding）都依赖它与代码保持一致。
+- 架构漂移（代码已改、文档未动）会让后续任务基于错误前提设计，代价远高于同步成本。
+
+落地方式：
+1. 实现涉及架构变更 → 在实现/合并前或同时，更新 `docs/方案.md` 对应章节（新增小节或修订图示/职责表）。
+2. 若变更较大，同步在 `docs/设计文档.md` 或 `design/` 下补设计说明（如已落地 `design/m2-webview-cdp.md` 模式）。
+3. code-review 角色须检查：本次改动若触及架构，是否已有对应 `docs/方案.md` 更新；缺失则 review 不通过。
+
 ---
 
 ## 6 纪律与规则的单一真相源
@@ -126,6 +139,7 @@ git worktree remove .codebuddy/worktree/m1-cdp
 | 仓库 | git，worktree 在 `.codebuddy/worktree` |
 | 实现顺序 | 先测试（方案/代码）→ 再实现 → 过测试 |
 | 完成标准 | 测试通过 + code-review 通过 |
+| 架构同步 | 影响/新增架构方案时须同步 `docs/方案.md`（见 §5.1） |
 | 并行 | 多 Agent/team + 每任务带 test & review 角色 |
 | 纪律归属 | 统一在 CODEBUDDY.md（CLI 不读 `.codebuddy/rules/`） |
 | 沉淀 | 重复任务→skills（`.codebuddy/skills/`），偏好/纪律→本文件 |
