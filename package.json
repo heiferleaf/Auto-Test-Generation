@@ -9,7 +9,8 @@
     "test:watch": "vitest",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "run": "tsx src/cli-main.ts"
+    "run": "tsx src/cli-main.ts",
+    "cli": "tsx src/cli-main.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.44.0",
