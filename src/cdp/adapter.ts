@@ -4,11 +4,13 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { chromium, type Browser, type Frame, type Page } from 'playwright';
 import type { Locator } from '../types/step';
+export type { Locator } from '../types/step';
 import {
   enumerateTargets,
   findTarget,
   mainTarget,
   resolveLocator,
+  locatorToSelector,
   type TargetEntry,
   type TargetInfo,
 } from './targets.js';
@@ -131,6 +133,8 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable {
     } catch {
       // 关闭失败不应掩盖主流程结果。
     }
+    // 释放 webview 的独立 CDP 会话（native WebSocket）。
+    for (const t of this.targets) t.target.dispose?.();
     this.browser = undefined;
     this.targets = [];
     this.current = undefined;
@@ -174,32 +178,52 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable {
   }
 
   async click(loc: Locator): Promise<void> {
-    await resolveLocator(this.scope(), loc).click();
+    const sel = locatorToSelector(loc);
+    await this.currentTarget().evaluate(
+      `(() => { const e = ${this.queryExpr(sel)}; if(!e) throw new Error('CLICK: 未找到元素'); e.click(); })()`,
+    );
   }
 
   async fill(loc: Locator, value: string): Promise<void> {
-    await resolveLocator(this.scope(), loc).fill(value);
+    const sel = locatorToSelector(loc);
+    await this.currentTarget().fill(this.selectorString(sel), value);
   }
 
   async select(loc: Locator, option: string): Promise<void> {
-    await resolveLocator(this.scope(), loc).selectOption(option);
+    const sel = locatorToSelector(loc);
+    await this.currentTarget().evaluate(
+      `(() => {
+        const e = ${this.queryExpr(sel)};
+        if(!e) throw new Error('SELECT: 未找到元素');
+        const setter = Object.getOwnPropertyDescriptor(e.constructor.prototype,'value').set;
+        setter.call(e, ${JSON.stringify(option)});
+        e.dispatchEvent(new Event('change',{bubbles:true}));
+      })()`,
+    );
   }
 
   async hover(loc: Locator): Promise<void> {
-    await resolveLocator(this.scope(), loc).hover();
+    const sel = locatorToSelector(loc);
+    await this.currentTarget().evaluate(
+      `(() => { const e = ${this.queryExpr(sel)}; if(!e) throw new Error('HOVER: 未找到元素'); e.dispatchEvent(new MouseEvent('mouseover',{bubbles:true})); e.dispatchEvent(new MouseEvent('mouseenter',{bubbles:true})); })()`,
+    );
   }
 
   async wait(opts: { text?: string; durationMs?: number }): Promise<void> {
     if (opts.text !== undefined) {
-      const scope = this.scope();
-      await scope.getByText(opts.text).first().waitFor({
-        state: 'visible',
-        ...(opts.durationMs !== undefined ? { timeout: opts.durationMs } : {}),
-      });
-      return;
+      const target = this.currentTarget();
+      const deadline = Date.now() + (opts.durationMs ?? 10_000);
+      for (;;) {
+        const found = await target.evaluate<boolean>(
+          `(() => { const els=[...document.querySelectorAll('*')]; return els.some(e=>(e.innerText||'').includes(${JSON.stringify(opts.text)})); })()`,
+        ).catch(() => false);
+        if (found) return;
+        if (Date.now() > deadline) throw new CdpError('CDP_WAIT_TIMEOUT', `等待文本「${opts.text}」超时`);
+        await new Promise((r) => setTimeout(r, 200));
+      }
     }
     if (opts.durationMs !== undefined) {
-      await this.page().waitForTimeout(opts.durationMs);
+      await new Promise((r) => setTimeout(r, opts.durationMs));
       return;
     }
     throw new CdpError('CDP_WAIT_INVALID', 'wait 需提供 text 或 durationMs');
@@ -207,47 +231,37 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable {
 
   async eval(code: string): Promise<unknown> {
     // 以表达式求值语义执行，贴合 assertion 的 expr 用法。
-    return this.scope().evaluate(`(() => (${code}))()`);
+    return this.currentTarget().evaluate(`(() => (${code}))()`);
   }
 
   async snapshot(): Promise<SerializedNode[]> {
-    return this.scope().evaluate(() => {
-      const SELECTOR = 'a,button,input,select,textarea,[role],[data-testid],[onclick]';
-      const out: Array<Record<string, unknown>> = [];
-      for (const el of Array.from(document.querySelectorAll(SELECTOR))) {
-        const he = el as HTMLElement;
-        const rect = he.getBoundingClientRect();
-        out.push({
-          role: he.getAttribute('role') ?? undefined,
-          name:
-            he.getAttribute('aria-label') ??
-            he.getAttribute('name') ??
-            undefined,
-          text: (he.innerText ?? he.textContent ?? '').trim().slice(0, 200),
-          tag: he.tagName.toLowerCase(),
-          testId: he.getAttribute('data-testid') ?? undefined,
-          enabled: !(he as HTMLButtonElement).disabled,
-          visible: rect.width > 0 && rect.height > 0,
-          rect: {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-          },
-        });
-      }
-      return out;
-    }) as Promise<SerializedNode[]>;
+    return this.currentTarget().snapshot();
   }
 
   /** 返回首个匹配的 ElementHandle，未命中返回 null。 */
   async query(loc: Locator): Promise<unknown> {
-    return resolveLocator(this.scope(), loc).first().elementHandle();
+    const sel = locatorToSelector(loc);
+    const found = await this.currentTarget().evaluate<boolean>(
+      `(() => !!${this.queryExpr(sel)})()`,
+    );
+    return found ? { selector: this.selectorString(sel) } : null;
+  }
+
+  /** Locator 转 querySelector/Document.evaluate 调用表达式（供 evaluate 内使用）。 */
+  private queryExpr(sel: { selector: string; useXpath: boolean }): string {
+    if (sel.useXpath) {
+      return `document.evaluate(${JSON.stringify(sel.selector)}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue`;
+    }
+    return `document.querySelector(${JSON.stringify(sel.selector)})`;
+  }
+
+  private selectorString(sel: { selector: string; useXpath: boolean }): string {
+    return sel.selector;
   }
 
   /** 截图：整窗 / 指定 webview(target) / 指定元素(element) 三种粒度（M2 §3.1）。 */
   async screenshot(opts: ScreenshotOptions = {}): Promise<Buffer> {
-    const scope = this.scopeFor(opts.target);
+    const scope = this.scopeFor(opts.target) as Page;
     if (opts.element) {
       const handle = resolveLocator(scope, opts.element).first();
       try {
@@ -263,9 +277,9 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable {
     }
   }
 
-  /** 视觉定位：取元素 bounding box + 视口内判定（M2 §3.2）。 */
+  /** 视觉定位：取元素 bounding box + 视口内判定（M2 §3.2，作用于 Playwright Page）。 */
   async locateVisual(loc: Locator): Promise<VisualRect> {
-    const scope = this.scope();
+    const scope = this.page();
     const box = await resolveLocator(scope, loc)
       .first()
       .boundingBox()
@@ -286,7 +300,7 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable {
     return { x: box.x, y: box.y, width: box.width, height: box.height, visible, inViewport };
   }
 
-  /** 按 target 选作用域：指定 webview 时切到对应 target，否则用当前作用域。 */
+  /** 按 target 选作用域：截图/locateVisual 作用于 Playwright Page（主窗口路径）。 */
   private scopeFor(target?: string): Page | Frame {
     if (target) {
       const found = findTarget(this.targets, target);
@@ -296,9 +310,15 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable {
           `截图指定目标 ${target} 未找到；可用：${this.targets.map((t) => t.info.id).join(', ') || '(空)'}`,
         );
       }
-      return found.frame ?? found.page;
+      if (!found.page) {
+        throw new CdpError(
+          'CDP_SCREENSHOT_WEBVIEW_UNSUPPORTED',
+          `webview 目标 ${target} 暂不支持 Playwright 截图（方案 C 下截图走 CDP，后续扩展）`,
+        );
+      }
+      return found.page;
     }
-    return this.scope();
+    return this.page();
   }
 
   // ---- 内部辅助 ----
@@ -310,14 +330,13 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable {
     return this.browser;
   }
 
-  /** 当前操作作用域：webview 目标用其 frame，否则用 page。 */
-  private scope(): Page | Frame {
-    this.requireBrowser();
+  /** 当前操作的统一 CdpTarget（page 或 webview）。 */
+  private currentTarget(): import('./webview-session').CdpTarget {
     const target = this.current ?? mainTarget(this.targets);
     if (!target) {
       throw new CdpError('CDP_NO_TARGET', '无当前目标，请先 connect()/selectTarget()');
     }
-    return target.frame ?? target.page;
+    return target.target;
   }
 
   private page(): Page {
@@ -325,6 +344,9 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable {
     const target = this.current ?? mainTarget(this.targets);
     if (!target) {
       throw new CdpError('CDP_NO_TARGET', '无当前目标，请先 connect()/selectTarget()');
+    }
+    if (!target.page) {
+      throw new CdpError('CDP_PAGE_ONLY', '该操作仅适用于 page 目标（webview 走 CdpTarget）');
     }
     return target.page;
   }
