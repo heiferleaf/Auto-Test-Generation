@@ -14,25 +14,31 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { PlaywrightCdpAdapter } from '../src/cdp/adapter';
 import type { CdpAdapter, VisualCapable } from '../src/cdp/adapter';
+import { resolveAssetPath } from '../src/util/path';
 
 // 靶机连接同时具备基础 CDP 能力与可视化能力（PlaywrightCdpAdapter 实现两者）。
 type Target = CdpAdapter & VisualCapable;
+
+// 将相对路径解析为标准绝对路径（Windows 安全，见 src/util/path.ts）。
+function resolvePath(rel: string): string {
+  return resolveAssetPath(rel, import.meta.url);
+}
 
 const LIVE = process.env.WORKBUDDY_LIVE === '1';
 const EXE = 'C:\\Users\\harveyhfye\\AppData\\Local\\Programs\\WorkBuddy\\WorkBuddy.exe';
 const PORT = 9233;
 
-const expectedPath = new URL('./fixtures/workbuddy-expected.md', import.meta.url);
+const expectedPath = resolvePath('./fixtures/workbuddy-expected.md');
 const expectedDoc = existsSync(expectedPath) ? readFileSync(expectedPath, 'utf-8') : '';
 
 function writeReport(lines: string[]) {
-  const dir = new URL('./reports/', import.meta.url);
+  const dir = resolvePath('./reports/');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const file = new URL(`./reports/workbuddy-run-${ts}.md`, import.meta.url);
+  const file = resolvePath(`./reports/workbuddy-run-${ts}.md`);
   const header = `# WorkBuddy 集成测试报告\n\n## 预期结果契约（来自 fixtures/workbuddy-expected.md）\n${expectedDoc}\n\n## 实际结果\n`;
   writeFileSync(file, header + lines.join('\n') + '\n');
-  return file.pathname;
+  return file;
 }
 
 const live = LIVE ? describe : describe.skip;
@@ -67,7 +73,7 @@ live('WorkBuddy 真实靶机集成测试（方案 C 通用性验证）', () => {
   });
 
   it('步骤2：截图主窗口非空白且落盘可验证', async () => {
-    const savePath = new URL('./reports/workbuddy-main.png', import.meta.url).pathname;
+    const savePath = resolvePath('./reports/workbuddy-main.png');
     const buf = await adapter.screenshot({ savePath });
     report.push(`- 主窗口截图字节数: ${buf.length}, 落盘: ${savePath}`);
     expect(buf.length).toBeGreaterThan(0);

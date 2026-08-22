@@ -13,26 +13,32 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { PlaywrightCdpAdapter } from '../src/cdp/adapter';
 import type { CdpAdapter, VisualCapable } from '../src/cdp/adapter';
+import { resolveAssetPath } from '../src/util/path';
 
 // 靶机连接同时具备基础 CDP 能力与可视化能力（PlaywrightCdpAdapter 实现两者）。
 type Target = CdpAdapter & VisualCapable;
+
+// 将相对路径解析为标准绝对路径（Windows 安全，见 src/util/path.ts）。
+function resolvePath(rel: string): string {
+  return resolveAssetPath(rel, import.meta.url);
+}
 
 const LIVE = process.env.CODEBUDDY_LIVE === '1';
 const EXE = 'C:\\Users\\harveyhfye\\AppData\\Local\\Programs\\CodeBuddy CN\\CodeBuddy CN.exe';
 const PORT = 9222;
 
 // 读取"预期结果说明文件"（测试先行：预期以文件形式声明）。
-const expectedPath = new URL('./fixtures/codebuddy-expected.md', import.meta.url);
+const expectedPath = resolvePath('./fixtures/codebuddy-expected.md');
 const expectedDoc = existsSync(expectedPath) ? readFileSync(expectedPath, 'utf-8') : '';
 
 function writeReport(lines: string[]) {
-  const dir = new URL('./reports/', import.meta.url);
+  const dir = resolvePath('./reports/');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const file = new URL(`./reports/codebuddy-run-${ts}.md`, import.meta.url);
+  const file = resolvePath(`./reports/codebuddy-run-${ts}.md`);
   const header = `# CodeBuddy 集成测试报告\n\n## 预期结果契约（来自 fixtures/codebuddy-expected.md）\n${expectedDoc}\n\n## 实际结果\n`;
   writeFileSync(file, header + lines.join('\n') + '\n');
-  return file.pathname;
+  return file;
 }
 
 const live = LIVE ? describe : describe.skip;
@@ -88,7 +94,7 @@ live('CodeBuddy 真实靶机集成测试', () => {
 const liveVisual = LIVE ? describe : describe.skip;
 liveVisual('CodeBuddy 可视化测试（M2 实现）', () => {
   it('步骤4：截图主窗口非空白且落盘可验证', async () => {
-    const savePath = new URL('./reports/codebuddy-main.png', import.meta.url).pathname;
+    const savePath = resolvePath('./reports/codebuddy-main.png');
     const buf = await adapter.screenshot({ savePath });
     report.push(`- 主窗口截图字节数: ${buf.length}, 落盘: ${savePath}`);
     expect(buf.length).toBeGreaterThan(0);
