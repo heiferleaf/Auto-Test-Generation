@@ -71,8 +71,12 @@ export class WsKernel implements UiKernel {
 
   // ---- VisualCapable ----
   screenshot(opts?: unknown): Promise<Buffer> {
-    // 桥端返回 base64；浏览器侧无 Buffer，包装为带标记对象供演示使用。
-    return this.call<{ __base64: string }>('screenshot', opts).then((r) => r as unknown as Buffer);
+    // 桥端（Node）把 Buffer 序列化为 { __base64: string }；此处还原为 base64 字符串。
+    // 浏览器无 Buffer，故以字符串伪装：shell.captureFrame 的 buf.toString('base64')
+    // 作用在字符串上会返回字符串自身，从而正确构造 data:image/png;base64,...。
+    return this.call<{ __base64: string }>('screenshot', opts).then((r) =>
+      (r?.__base64 ?? '') as unknown as Buffer,
+    );
   }
   locateVisual(loc: Locator): Promise<VisualRect> { return this.call('locateVisual', loc); }
 

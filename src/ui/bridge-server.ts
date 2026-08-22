@@ -14,6 +14,21 @@ import type { Script, Locator } from '../types/step';
 type RpcReq = { id: number; method: keyof UiKernel; args: unknown[] };
 type RpcRes = { id: number; ok: true; result?: unknown } | { id: number; ok: false; error: string };
 
+/** 把结果中的 Node Buffer 递归转为 base64 字符串（跨 WS 序列化安全）。 */
+function serializeBuffers(v: unknown): unknown {
+  if (v == null) return v;
+  if (Buffer.isBuffer(v)) return { __base64: v.toString('base64') };
+  if (Array.isArray(v)) return v.map(serializeBuffers);
+  if (typeof v === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      out[k] = serializeBuffers(val);
+    }
+    return out;
+  }
+  return v;
+}
+
 /** 在已有 http server 上升级出 /kernel-ws 端点，桥接真机 adapter。 */
 export function attachKernelBridge(
   server: import('node:http').Server,
@@ -67,7 +82,10 @@ export function attachKernelBridge(
           return;
         }
         const result = await fn.apply(adapter, req.args as unknown[]);
-        send({ id: req.id, ok: true, result });
+        // 跨进程序列化：Node Buffer 经 JSON.stringify 会变成 {type:'Buffer',data:[...]}，
+        // 浏览器无法解码为 PNG。故在桥端（Node 侧）把 Buffer 转 base64 字符串，
+        // ws-kernel 端再还原为浏览器可用的 base64，供截图流渲染。
+        send({ id: req.id, ok: true, result: serializeBuffers(result) });
       } catch (err) {
         send({ id: req.id, ok: false, error: (err as Error).message });
       }

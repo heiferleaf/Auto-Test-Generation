@@ -5,13 +5,12 @@
 //
 // 关于真机连接（重要架构说明）：
 //   PlaywrightCdpAdapter 依赖 Node 原生模块（playwright/ws/child_process/fs），
-//   无法在浏览器页面内运行。因此「页面直接连真机」架构上不成立。
-//   M3 真机链路通过 CLI + LIVE 测试验证（test/ui-shell-live.test.ts / system-record-replay.test.ts，
-//   均连真实 CODEBUDDY 9222 端口并跑通录制→回放）。
-//   后续 UI 壳接真机需经 WebSocket 桥（页面 ↔ Node 宿主持有 adapter），留作 M3.3-LIVE 扩展点
-//   （见 test/visual-overlay-ui.md §4 的 "📋 待补/扩展点"）。
+//   无法在浏览器页面内运行。因此页面经 WebSocket 桥接真机：
+//   WsKernel（浏览器侧 UiKernel 代理）↔ /kernel-ws ↔ bridge-server（Node 侧持有 PlaywrightCdpAdapter）。
+//   `?live=1` 即走此真机链路，已验证可枚举目标、录制、截图流、回放（见 scripts/verify-ui-live.mjs）。
+//   演示模式（默认）用 DemoKernel，无需真机即可查看完整交互形态。
 
-import { UiShell, type UiKernel } from './shell';
+import { UiShell, type UiKernel, ASSERTION_KINDS } from './shell';
 import type { Locator } from '../cdp/adapter';
 import { WsKernel } from './ws-kernel';
 
@@ -70,69 +69,109 @@ function boot() {
 
   const shell = new UiShell({ kernel, mount });
 
-  // 真机模式：自动连接靶机（桥端持有 adapter，按 UI_PORT→CDP_PORT 默认 9222 连接）
+  // 真机模式：自动连接靶机并启动截图流（让中间区看到软件画面）
   if (live) {
-    shell.connect({ port: 9222 }).catch((e) => alert(`连接失败: ${(e as Error).message}`));
+    shell.connect({ port: 9222 })
+      .then(() => { shell.startFrameStream(1000); refreshHeader(); })
+      .catch((e) => alert(`连接失败: ${(e as Error).message}`));
   }
 
   // 先渲染骨架
   shell.render();
 
-  // 顶部状态栏增加录制指示灯
-  // （UiShell.render 已输出 header，这里追加交互按钮到 actions 区）
+  // 初始示例脚本，便于直接看到列表形态
+  shell.insertStep({ id: 'seed-1', type: 'click', source: 'manual', locator: { role: 'button', name: '打开设置' } });
+  shell.insertStep({ id: 'seed-2', type: 'fill', source: 'manual', locator: { testId: 'search' }, params: { value: '关键词' } });
 
-  const actions = document.createElement('div');
-  actions.className = 'ui-shell-actions';
-  actions.setAttribute('data-actions', 'true');
+  // ---- 事件委托：驱动 shell.render 输出的所有 [data-action] 按钮 ----
+  mount.addEventListener('click', async (e) => {
+    const el = (e.target as HTMLElement).closest('[data-action]') as HTMLElement | null;
+    if (!el) return;
+    const action = el.getAttribute('data-action')!;
+    const stepId = el.getAttribute('data-step-id') ?? undefined;
 
-  const btn = (label: string, cls: string, fn: () => void) => {
-    const b = document.createElement('button');
-    b.className = cls;
-    b.textContent = label;
-    b.addEventListener('click', fn);
-    actions.appendChild(b);
-    return b;
-  };
-
-  btn('连接', 'primary', async () => { await shell.connect({ port: 9222 }); refreshHeader(); });
-  const recBtn = btn('开始录制', '', () => {
-    if (shell.isRecording()) {
-      shell.stopRecording().then(() => { recBtn.textContent = '开始录制'; refreshHeader(); });
-    } else {
-      shell.startRecording();
-      recBtn.textContent = '停止录制';
-      refreshHeader();
+    switch (action) {
+      case 'insert': {
+        const type = prompt('步骤类型 (click/fill/select/hover/wait/eval/snapshot)', 'click') as any;
+        if (!type) break;
+        shell.insertStep({
+          id: `manual-${Date.now().toString(36)}`,
+          type,
+          source: 'manual',
+          locator: { role: 'button', name: '请指定元素' },
+          params: type === 'fill' ? { value: '值' } : undefined,
+        });
+        break;
+      }
+      case 'add-assert': {
+        // 断言类型菜单从单一真相源 ASSERTION_KINDS 派生（新增类型无需改此处）
+        const menu = ASSERTION_KINDS
+          .map((k, i) => `${i + 1}=${k.label}(${k.kind})`)
+          .join('\n');
+        const pick = prompt(`断言类型：\n${menu}`, '1');
+        if (!pick) break;
+        const idx = Number(pick) - 1;
+        const entry = ASSERTION_KINDS[idx];
+        if (!entry) break;
+        const k = entry.kind;
+        const locStr = prompt('定位（如 role=button,name=登录状态）', 'role=status') ?? '';
+        const locator = parseLocator(locStr);
+        const value = entry.needsValue ? (prompt('期望内容', '登录成功') ?? undefined) : undefined;
+        const waitMs = Number(prompt('检测前等待毫秒（Agent 推理留时，0=不等待）', '0')) || 0;
+        shell.insertAssertion(k, locator, value, waitMs);
+        break;
+      }
+      case 'toggle-record': {
+        if (shell.isRecording()) {
+          await shell.stopRecording();
+        } else {
+          shell.startRecording();
+        }
+        refreshHeader();
+        break;
+      }
+      case 'playback': {
+        const r = await shell.playback();
+        alert(r.ok ? '回放成功' : `回放失败: ${r.failedStepId ?? ''}`);
+        break;
+      }
+      case 'highlight': {
+        const rect = await shell.highlight({ role: 'button', name: '高亮我' });
+        drawHighlight(rect);
+        break;
+      }
+      case 'export': {
+        const json = shell.exportScript();
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'script.json'; a.click();
+        URL.revokeObjectURL(url);
+        break;
+      }
+      case 'clear': {
+        [...shell.getScript().steps].forEach((st) => shell.removeStep(st.id));
+        break;
+      }
+      case 'up': if (stepId) shell.moveStep(stepId, Math.max(0, stepIndex(shell, stepId) - 1)); break;
+      case 'down': if (stepId) shell.moveStep(stepId, stepIndex(shell, stepId) + 1); break;
+      case 'edit': if (stepId) alert('编辑：' + JSON.stringify(findStep(shell, stepId), null, 2)); break;
+      case 'remove': if (stepId) shell.removeStep(stepId); break;
+      case 'select-target': {
+        const sel = el as HTMLSelectElement;
+        shell.selectTarget(sel.value);
+        break;
+      }
     }
   });
-  btn('回放', '', async () => { const r = await shell.playback(); alert(r.ok ? '回放成功' : `回放失败: ${r.failedStepId ?? ''}`); });
-  btn('高亮示例', '', async () => {
-    const rect = await shell.highlight({ role: 'button', name: '高亮我' });
-    drawHighlight(rect);
-  });
-  btn('导出', '', () => {
-    const json = shell.exportScript();
-    // 简单演示：写入下载
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'script.json'; a.click();
-    URL.revokeObjectURL(url);
-  });
-  btn('清空', 'danger', () => {
-    const s = shell.getScript();
-    [...s.steps].forEach((st) => shell.removeStep(st.id));
-    refreshHeader();
-  });
 
-  mount.appendChild(actions);
-
-  // 侧边步骤项点击 → 高亮其在视图中的位置（演示）
+  // 步骤项点击 → 高亮其在视图中的位置
   mount.addEventListener('click', (e) => {
     const item = (e.target as HTMLElement).closest('[data-step-item]');
-    if (item) {
-      const loc = demoLocFor(item.getAttribute('data-step-id')!);
-      if (loc) shell.highlight(loc).then(drawHighlight);
-    }
+    if (!item) return;
+    if ((e.target as HTMLElement).closest('[data-action]')) return; // 操作按钮不触发高亮
+    const loc = demoLocFor(item.getAttribute('data-step-id')!);
+    if (loc) shell.highlight(loc).then(drawHighlight);
   });
 
   function demoLocFor(_id: string): Locator | undefined {
@@ -151,16 +190,25 @@ function boot() {
   }
 
   function refreshHeader() {
-    const header = mount.querySelector('.ui-shell-header') as HTMLElement | null;
-    if (header) {
-      const dot = header.querySelector('.rec-dot') as HTMLElement | null;
-      if (dot) dot.classList.toggle('on', shell.isRecording());
-    }
+    const dot = mount.querySelector('.ui-shell-header .rec-dot') as HTMLElement | null;
+    if (dot) dot.classList.toggle('on', shell.isRecording());
   }
+}
 
-  // 初始示例脚本，便于直接看到列表形态
-  shell.insertStep({ id: 'seed-1', type: 'click', source: 'manual', locator: { role: 'button', name: '打开设置' } });
-  shell.insertStep({ id: 'seed-2', type: 'fill', source: 'manual', locator: { testId: 'search' }, params: { value: '关键词' } });
+// ---- 小工具 ----
+function stepIndex(shell: UiShell, id: string): number {
+  return shell.getScript().steps.findIndex((s) => s.id === id);
+}
+function findStep(shell: UiShell, id: string) {
+  return shell.getScript().steps.find((s) => s.id === id);
+}
+function parseLocator(input: string): Locator {
+  const loc: Locator = {};
+  input.split(',').forEach((kv) => {
+    const [k, v] = kv.split('=').map((s) => s.trim());
+    if (k && v) (loc as any)[k] = v;
+  });
+  return loc;
 }
 
 if (document.readyState === 'loading') {
