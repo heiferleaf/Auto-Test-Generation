@@ -275,8 +275,9 @@ export class UiShell {
           }
           img.src = `data:image/png;base64,${b64}`;
         }
-      } catch {
-        // 截图失败（如未连接）静默跳过，下一周期重试
+      } catch (err) {
+        // 截图失败（如未连接/目标失效）静默跳过，下一周期重试；仅在控制台留痕便于排查。
+        console.warn('[UiShell] 截图流单帧失败，重试中:', err instanceof Error ? err.message : err);
       }
     };
     // 立即先取一帧，再周期性

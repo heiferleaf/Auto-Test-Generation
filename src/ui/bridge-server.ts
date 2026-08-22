@@ -81,7 +81,13 @@ export function attachKernelBridge(
           send({ id: req.id, ok: false, error: `未知方法: ${String(method)}` });
           return;
         }
-        const result = await fn.apply(adapter, req.args as unknown[]);
+        let result: unknown;
+        try {
+          result = await fn.apply(adapter, req.args as unknown[]);
+        } catch (err) {
+          send({ id: req.id, ok: false, error: (err as Error).message });
+          return;
+        }
         // 跨进程序列化：Node Buffer 经 JSON.stringify 会变成 {type:'Buffer',data:[...]}，
         // 浏览器无法解码为 PNG。故在桥端（Node 侧）把 Buffer 转 base64 字符串，
         // ws-kernel 端再还原为浏览器可用的 base64，供截图流渲染。
