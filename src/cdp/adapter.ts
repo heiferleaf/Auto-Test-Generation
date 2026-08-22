@@ -7,6 +7,7 @@ import { dirname } from 'node:path';
 import { chromium, type Browser, type Frame, type Page } from 'playwright';
 import type { Locator } from '../types/step';
 export type { Locator } from '../types/step';
+import type { InteractionEvent } from '../recorder/recorder';
 import {
   enumerateTargets,
   findTarget,
@@ -65,6 +66,17 @@ export interface VisualCapable {
   locateVisual(loc: Locator): Promise<VisualRect>;
 }
 
+/**
+ * 录制能力派生接口（ISP：仅"录制场景"的实现才需具备）。
+ * M3 可视化 UI 编辑壳的内置录制功能依赖此能力；非录制适配器无需实现。
+ */
+export interface Recordable {
+  /** 在当前 target 注入交互监听，开始捕获用户操作。 */
+  startRecording(): void;
+  /** 停止监听并异步收集期间捕获的交互事件（抽象 InteractionEvent，与具体事件源解耦）。 */
+  stopRecording(): Promise<InteractionEvent[]>;
+}
+
 export type ConnectOptions = {
   port?: number;
   appPath?: string;
@@ -99,12 +111,16 @@ export class CdpError extends Error {
   }
 }
 
-export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable {
+export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordable {
   private browser?: Browser;
   private child?: ChildProcess;
   private targets: TargetEntry[] = [];
   private current?: TargetEntry;
   private port = DEFAULT_CDP_PORT;
+
+  // M3 录制：累积当前 target 捕获的交互事件（仅在 startRecording 后生效）。
+  private recording = false;
+  private recorded: InteractionEvent[] = [];
 
   async connect(opts: ConnectOptions = {}): Promise<void> {
     const port = opts.port ?? DEFAULT_CDP_PORT;
@@ -145,6 +161,8 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable {
     this.browser = undefined;
     this.targets = [];
     this.current = undefined;
+    this.recording = false;
+    this.recorded = [];
     await this.killChild();
   }
 
@@ -252,6 +270,50 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable {
       `(() => !!${this.queryExpr(sel)})()`,
     );
     return found ? { selector: this.selectorString(sel) } : null;
+  }
+
+  /** M3 录制：在当前 target 注入交互监听器（click/input/change/submit）。 */
+  startRecording(): void {
+    const target = this.currentTarget();
+    this.recording = true;
+    this.recorded = [];
+    // 仅依赖 CdpTarget.evaluate 注入监听，事件累积在 window.__recBuf（避免 exposeFunction，保持抽象一致）。
+    const inject = `(() => {
+      window.__recBuf = window.__recBuf || [];
+      if (window.__recInstalled) return;
+      window.__recInstalled = true;
+      const emit = (ev) => {
+        try {
+          const el = ev.target;
+          if (!(el instanceof Element)) return;
+          const loc = {
+            role: el.getAttribute('role') || undefined,
+            name: el.getAttribute('aria-label') || el.getAttribute('name') || el.getAttribute('data-testid') || (el.textContent||'').trim().slice(0, 40) || undefined,
+            testId: el.getAttribute('data-testid') || undefined,
+          };
+          const e = { type: ev.type, locator: loc };
+          if (ev.type === 'input' || ev.type === 'change') {
+            e.type = 'fill';
+            e.params = { value: el.value ?? '' };
+          }
+          window.__recBuf.push(e);
+        } catch (_) {}
+      };
+      ['click','input','change','submit'].forEach((t) =>
+        document.addEventListener(t, emit, true));
+    })()`;
+    void target.evaluate(inject).catch(() => undefined);
+  }
+
+  /** M3 录制：停止监听并异步取回累积的 InteractionEvent[]（读 window.__recBuf 后清空）。 */
+  async stopRecording(): Promise<InteractionEvent[]> {
+    this.recording = false;
+    const target = this.currentTarget();
+    const buf = await target.evaluate<any[]>('window.__recBuf || []').catch(() => []);
+    void target.evaluate('window.__recBuf = []').catch(() => undefined);
+    const out = (Array.isArray(buf) ? buf : []) as InteractionEvent[];
+    this.recorded = out;
+    return out;
   }
 
   /** Locator 转 querySelector/Document.evaluate 调用表达式（供 evaluate 内使用）。 */
