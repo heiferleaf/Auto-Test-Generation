@@ -1,5 +1,5 @@
 // 目标（window/webview）枚举与选择，以及 Locator → Playwright 定位解析。
-// 设计依据：docs/设计文档.md §5（target 选择、Locator 优先级）。
+// 设计依据：docs/design/design.md §5（target 选择、Locator 优先级）。
 
 import type { Browser, Frame, Locator as PwLocator, Page } from 'playwright';
 import type { WebSocket as WsType } from 'ws';
@@ -155,7 +155,7 @@ export function mainTarget(entries: TargetEntry[]): TargetEntry | undefined {
 
 /**
  * 将 Locator 解析为 Playwright Locator。
- * 优先级（设计文档 §5）：role/name/text/testId → css → xpath。
+ * 优先级（design.md §5）：role/name/text/testId → css → xpath。
  */
 export function resolveLocator(scope: Page | Frame, loc: Locator): PwLocator {
   // 1) 语义优先：role（可带 name）

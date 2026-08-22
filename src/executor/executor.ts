@@ -1,5 +1,5 @@
 // 步骤执行器（M1-C）：按 Script.steps 顺序驱动 CdpAdapter 执行操作与断言。
-// 设计依据：docs/设计文档.md §6；错误需带 stepId，便于 CLI 输出结构化错误（§8-5）。
+// 设计依据：docs/design/design.md §6；错误需带 stepId，便于 CLI 输出结构化错误（§8-5）。
 
 import type { CdpAdapter } from '../cdp/adapter';
 import type { Script, Step, Locator } from '../types/step';

@@ -1,7 +1,9 @@
 // CDP 适配层：基于 Playwright connectOverCDP 控制 Electron 应用。
-// 设计依据：docs/设计文档.md §5；错误需带明确错误码，不静默崩溃（§8-5）。
+// 设计依据：docs/design/design.md §5；错误需带明确错误码，不静默崩溃（§8-5）。
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { chromium, type Browser, type Frame, type Page } from 'playwright';
 import type { Locator } from '../types/step';
 export type { Locator } from '../types/step';
@@ -47,6 +49,11 @@ export type ScreenshotOptions = {
   target?: string;
   element?: Locator;
   fullPage?: boolean;
+  /**
+   * 落盘路径（可选）：提供则将截图写入该文件并返回其路径（除 Buffer 外）。
+   * 不提供则仅返回 Buffer。用于人工验证（见 test/reports/ 或自定义目录）。
+   */
+  savePath?: string;
 };
 
 /**
@@ -80,7 +87,7 @@ export interface CdpAdapter {
   query(loc: Locator): Promise<unknown>;
 }
 
-/** 带错误码的适配层异常，便于上层区分处理（设计文档 §8-5）。 */
+/** 带错误码的适配层异常，便于上层区分处理（design.md §8-5）。 */
 export class CdpError extends Error {
   constructor(
     public readonly code: string,
@@ -259,22 +266,35 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable {
     return sel.selector;
   }
 
-  /** 截图：整窗 / 指定 webview(target) / 指定元素(element) 三种粒度（M2 §3.1）。 */
+  /**
+   * 截图：整窗 / 指定 webview(target) / 指定元素(element) 三种粒度（M2 §3.1）。
+   * 若提供 opts.savePath，则额外把 PNG 写入该路径（用于人工验证），文件已存在则覆盖。
+   */
   async screenshot(opts: ScreenshotOptions = {}): Promise<Buffer> {
+    let buf: Buffer;
     const scope = this.scopeFor(opts.target) as Page;
     if (opts.element) {
       const handle = resolveLocator(scope, opts.element).first();
       try {
-        return (await handle.screenshot()) as Buffer;
+        buf = (await handle.screenshot()) as Buffer;
       } catch (err) {
         throw new CdpError('CDP_SCREENSHOT_ELEMENT', '元素截图失败（可能不可见或不在 DOM）', err);
       }
+    } else {
+      try {
+        buf = (await scope.screenshot(opts.fullPage ? { fullPage: true } : {})) as Buffer;
+      } catch (err) {
+        throw new CdpError('CDP_SCREENSHOT_FAILED', '整窗/视口截图失败', err);
+      }
     }
-    try {
-      return (await scope.screenshot(opts.fullPage ? { fullPage: true } : {})) as Buffer;
-    } catch (err) {
-      throw new CdpError('CDP_SCREENSHOT_FAILED', '整窗/视口截图失败', err);
+
+    // 落盘（可选）：让截图可被人工打开验证（test/reports/ 已被 gitignore）。
+    if (opts.savePath) {
+      const dir = dirname(opts.savePath);
+      if (dir) mkdirSync(dir, { recursive: true });
+      writeFileSync(opts.savePath, buf);
     }
+    return buf;
   }
 
   /** 视觉定位：取元素 bounding box + 视口内判定（M2 §3.2，作用于 Playwright Page）。 */

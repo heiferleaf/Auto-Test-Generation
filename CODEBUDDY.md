@@ -9,10 +9,10 @@
 面向 **Electron 桌面客户端** 的「可录制、可生成、可润色、可在版本更新后自动执行」的测试/操作自动化平台。
 底层用 **CDP** 控制应用，对外以 **Skill + MCP** 提供能力，支持 **Agent 驱动** 与 **脚本回放** 双模式且互通。
 
-- 产品需求：`docs/需求.md`
-- 技术选型：`docs/方案.md`
-- M1 设计：`docs/设计文档.md`
-- 总体实施计划：`docs/实施计划.md`
+- 产品需求：`docs/requirements/requirements.md`
+- 技术选型：`docs/architecture/architecture.md`
+- M1 设计：`docs/design/design.md`
+- 总体实施计划：`docs/plan/plan.md`
 
 ---
 
@@ -22,7 +22,7 @@
 |---|---|
 | 主语言 | **TypeScript**（与 Playwright / MCP 生态一致，方案.md 首选） |
 | 应用控制 | **CDP + Playwright**（`connectOverCDP` / `_electron`），调试端口默认 `9222` |
-| MCP | 自研 MCP Server（M3 接入），Tool 语义对齐 `docs/设计文档.md §6` |
+| MCP | 自研 MCP Server（M3 接入），Tool 语义对齐 `docs/design/design.md §6` |
 | 测试 | 单测用 `vitest`；集成/端到端用 Playwright Test 或自研执行器驱动真实/示例 Electron App |
 | 包管理 | `npm`（或 `pnpm`，二者择一，默认 npm） |
 | 运行时 | Node.js 18+ |
@@ -97,9 +97,22 @@ git worktree remove .codebuddy/worktree/m1-cdp
 > **实现之后以「通过测试」为迭代目标，未通过测试不得视为完成。**
 
 落地方式：
-1. 接到实现任务 → 先写/更新 `docs/实施计划.md` 中该阶段的**测试方案**，或直接在 `test/` 下落地**测试代码骨架**。
+1. 接到实现任务 → 先写/更新 `docs/plan/plan.md` 中该阶段的**测试方案**，或直接在 `test/` 下落地**测试代码骨架**。
 2. 实现代码以满足测试为第一目标，反复迭代直至测试通过。
 3. 提交时测试须为通过态；CI/本地 `npm test` 全绿才允许合并。
+
+## 5.1 架构方案同步（强制）
+
+> **当实现影响了既有架构、或新增/变更了架构方案（如新增 Target 类型、引入新的传输层/协议、改变模块职责边界、新增 Adapter/工厂分支等）时，必须同步更新 `docs/architecture/architecture.md`（技术选型与架构方案）。**
+
+理由：
+- `docs/architecture/architecture.md` 是架构决策的单一真相源，下游（MCP Tool 接入、Agent 驱动、回放脚本、新成员 onboarding）都依赖它与代码保持一致。
+- 架构漂移（代码已改、文档未动）会让后续任务基于错误前提设计，代价远高于同步成本。
+
+落地方式：
+1. 实现涉及架构变更 → 在实现/合并前或同时，更新 `docs/architecture/architecture.md` 对应章节（新增小节或修订图示/职责表）。
+2. 若变更较大，同步在 `docs/design/design.md` 或 `docs/design/` 下补设计说明（如已落地 `docs/design/m2-webview-cdp.md` 模式）。
+3. code-review 角色须检查：本次改动若触及架构，是否已有对应 `docs/architecture/architecture.md` 更新；缺失则 review 不通过。
 
 ---
 
@@ -127,5 +140,6 @@ git worktree remove .codebuddy/worktree/m1-cdp
 | 实现顺序 | 先测试（方案/代码）→ 再实现 → 过测试 |
 | 完成标准 | 测试通过 + code-review 通过 |
 | 并行 | 多 Agent/team + 每任务带 test & review 角色 |
+| 架构同步 | 影响/新增架构方案时须同步 `docs/architecture/architecture.md`（见 §5.1） |
 | 纪律归属 | 统一在 CODEBUDDY.md（CLI 不读 `.codebuddy/rules/`） |
 | 沉淀 | 重复任务→skills（`.codebuddy/skills/`），偏好/纪律→本文件 |
