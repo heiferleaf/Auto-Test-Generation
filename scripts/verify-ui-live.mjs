@@ -38,6 +38,15 @@ async function main() {
   targets.slice(0, 5).forEach((t) => console.log(`    - ${t.type} | ${t.title?.slice(0, 30)} | ${t.url?.slice(0, 40)}`));
   if (targets.length === 0) throw new Error('未枚举到任何目标');
 
+  console.log('[2.5] 截图流数据路径验证（蒙版"看不到软件页面"根因回归）');
+  const shot = await call('screenshot');
+  // 桥端把 Buffer 序列化为 { __base64: string }
+  const b64 = shot?.__base64 ?? (typeof shot === 'string' ? shot : '');
+  if (!b64 || typeof b64 !== 'string' || b64.length < 1000) {
+    throw new Error('截图流返回无效 PNG（base64 过短或缺失），蒙版仍看不到页面');
+  }
+  console.log(`    ✓ 收到真实截图 base64（长度 ${b64.length}），可渲染到舞台 <img>`);
+
   console.log('[3] 注入受控元素（真实页面）');
   await call('eval', `(() => {
     const d = document.createElement('div');

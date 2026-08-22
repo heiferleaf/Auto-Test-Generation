@@ -6,7 +6,7 @@
 // 因此单测可注入 MockKernel 完整驱动：连接 / 录制 / 编辑 / 回放 / 高亮 / 导入导出。
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { UiShell } from '../src/ui/shell';
+import { UiShell, assertionKindLabel } from '../src/ui/shell';
 import { SCRIPT_SCHEMA, type Script, type Step, type Locator } from '../src/types/step';
 
 // ---- Mock Kernel：同时实现三大抽象接口，并记录调用 ----
@@ -29,6 +29,7 @@ type AnyKernel = {
   startRecording: ReturnType<typeof vi.fn>;
   stopRecording: ReturnType<typeof vi.fn>;
   playback: ReturnType<typeof vi.fn>;
+  captureFrame: ReturnType<typeof vi.fn>;
   calls: string[];
 };
 
@@ -321,5 +322,108 @@ describe('导入 / 导出', () => {
     const k = makeMockKernel();
     const shell = new UiShell({ kernel: k as any, mount: document.createElement('div') });
     expect(() => shell.importScript(JSON.stringify({ schema: 'wrong', steps: [] }))).toThrow();
+  });
+});
+
+// ---- 新增 UI 组件（M3 补全）：目标选择 / 步骤编辑按钮 / 断言封装 / 截图流 ----
+
+describe('目标选择', () => {
+  it('listTargets 代理内核并返回目标列表', () => {
+    const k = makeMockKernel();
+    const shell = new UiShell({ kernel: k as any, mount: document.createElement('div') });
+    const ts = shell.listTargets();
+    expect(k.listTargets).toHaveBeenCalledTimes(1);
+    expect(ts.length).toBe(2);
+  });
+
+  it('selectTarget 委托内核并记录当前目标', () => {
+    const k = makeMockKernel();
+    const shell = new UiShell({ kernel: k as any, mount: document.createElement('div') });
+    shell.selectTarget('wv1');
+    expect(k.selectTarget).toHaveBeenCalledWith('wv1');
+    expect(shell.getCurrentTarget()).toBe('wv1');
+  });
+});
+
+describe('步骤编辑组件（UI 渲染）', () => {
+  it('render 时每条步骤含 删除/上移/下移 按钮', () => {
+    const k = makeMockKernel();
+    const s = emptyScript();
+    s.steps = [makeStep('click'), makeStep('fill')];
+    const mount = document.createElement('div');
+    const shell = new UiShell({ kernel: k as any, mount, script: s });
+    shell.render();
+    const items = mount.querySelectorAll('[data-step-item]');
+    expect(items.length).toBe(2);
+    // 每条至少 3 个操作按钮
+    const btns = items[0].querySelectorAll('button[data-action]');
+    const acts = Array.from(btns).map((b) => b.getAttribute('data-action'));
+    expect(acts).toContain('remove');
+    expect(acts).toContain('up');
+    expect(acts).toContain('down');
+  });
+
+  it('顶部含 插入 与 加断言 入口', () => {
+    const k = makeMockKernel();
+    const mount = document.createElement('div');
+    const shell = new UiShell({ kernel: k as any, mount });
+    shell.render();
+    const actions = Array.from(mount.querySelectorAll('[data-action]')).map((b) => b.getAttribute('data-action'));
+    expect(actions).toContain('insert');
+    expect(actions).toContain('add-assert');
+  });
+
+  it('点击删除按钮移除对应步骤（委托 removeStep）', () => {
+    const k = makeMockKernel();
+    const s = emptyScript();
+    const st = makeStep('click');
+    s.steps = [st, makeStep('fill')];
+    const mount = document.createElement('div');
+    const shell = new UiShell({ kernel: k as any, mount, script: s });
+    shell.render();
+    // 模拟点击第一条的删除
+    const del = mount.querySelector('[data-step-item] button[data-action="remove"]') as HTMLButtonElement;
+    del.click();
+    expect(shell.getScript().steps.find((x) => x.id === st.id)).toBeUndefined();
+    expect(shell.getScript().steps.length).toBe(1);
+  });
+});
+
+describe('断言友好封装', () => {
+  it('insertAssertion 生成 assert 步骤，含 kind/locator/waitMs', () => {
+    const k = makeMockKernel();
+    const shell = new UiShell({ kernel: k as any, mount: document.createElement('div') });
+    shell.insertAssertion('textContains', { role: 'status' }, '登录成功', 3000);
+    const steps = shell.getScript().steps;
+    expect(steps.length).toBe(1);
+    const a = steps[0];
+    expect(a.type).toBe('assert');
+    expect(a.params?.assertion?.kind).toBe('textContains');
+    expect(a.params?.assertion?.value).toBe('登录成功');
+    expect(a.params?.assertion?.waitMs).toBe(3000);
+    expect(a.params?.assertion?.locator).toMatchObject({ role: 'status' });
+  });
+
+  it('断言 kind 映射到用户友好标签', () => {
+    expect(assertionKindLabel('exists')).toBe('出现新元素');
+    expect(assertionKindLabel('textContains')).toBe('值包含内容');
+    expect(assertionKindLabel('titleIs')).toBe('值等于特定值');
+  });
+});
+
+describe('截图流', () => {
+  it('startFrameStream 启动定时器并周期性调用 captureFrame（内核 screenshot）渲染到舞台区', async () => {
+    vi.useFakeTimers();
+    const k = makeMockKernel();
+    let calls = 0;
+    (k.screenshot as any) = vi.fn(async () => { calls++; return Buffer.from('png'); });
+    const mount = document.createElement('div');
+    const shell = new UiShell({ kernel: k as any, mount });
+    shell.startFrameStream(100);
+    // 推进两个周期（含首帧 1 + 周期 2 = ≥3 次，至少 2 次）
+    await vi.advanceTimersByTimeAsync(250);
+    expect(calls).toBeGreaterThanOrEqual(2);
+    shell.stopFrameStream();
+    vi.useRealTimers();
   });
 });

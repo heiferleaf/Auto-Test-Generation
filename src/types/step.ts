@@ -24,6 +24,8 @@ export type Assertion = {
   kind: AssertionKind;
   locator?: Locator;   // exists/visible/textContains 用
   value?: string;      // textContains/titleIs/urlMatches/expr 用
+  /** 检测前等待毫秒数（供 Agent 推理/异步渲染留时间，如"等待 N 秒后检测元素值"）。 */
+  waitMs?: number;
 };
 
 export type StepSource = 'manual' | 'agent' | 'repaired' | 'recorded';

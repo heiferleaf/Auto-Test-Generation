@@ -29,12 +29,16 @@ export class WsKernel implements UiKernel {
       this.ws.onopen = () => resolve();
       this.ws.onerror = (e: Event) => reject(new Error(`WS 连接失败: ${(e as ErrorEvent).message}`));
       this.ws.onmessage = (ev: MessageEvent) => {
-        const res = JSON.parse(ev.data as string) as RpcRes;
-        const p = this.pending.get(res.id);
-        if (!p) return;
-        this.pending.delete(res.id);
-        if (res.ok) p.resolve(res.result);
-        else p.reject(new Error(res.error));
+        try {
+          const res = JSON.parse(ev.data as string) as RpcRes;
+          const p = this.pending.get(res.id);
+          if (!p) return;
+          this.pending.delete(res.id);
+          if (res.ok) p.resolve(res.result);
+          else p.reject(new Error(res.error));
+        } catch {
+          // 单条消息异常不应中断整个 WS 连接
+        }
       };
     });
   }
@@ -71,8 +75,14 @@ export class WsKernel implements UiKernel {
 
   // ---- VisualCapable ----
   screenshot(opts?: unknown): Promise<Buffer> {
-    // 桥端返回 base64；浏览器侧无 Buffer，包装为带标记对象供演示使用。
-    return this.call<{ __base64: string }>('screenshot', opts).then((r) => r as unknown as Buffer);
+    // 桥端（Node）把 Buffer 序列化为 { __base64: string }；此处还原为 base64 字符串。
+    // 浏览器无 Buffer，故以字符串伪装：shell.captureFrame 的 buf.toString('base64')
+    // 作用在字符串上会返回字符串自身，从而正确构造 data:image/png;base64,...。
+    // 不传 undefined 参数（JSON 会序列化为 null，使服务端默认参数失效）。
+    const args = opts === undefined ? [] : [opts];
+    return this.call<{ __base64: string }>('screenshot', ...args).then((r) =>
+      (r?.__base64 ?? '') as unknown as Buffer,
+    );
   }
   locateVisual(loc: Locator): Promise<VisualRect> { return this.call('locateVisual', loc); }
 

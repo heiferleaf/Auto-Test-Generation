@@ -443,11 +443,14 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
    * 截图：整窗 / 指定 webview(target) / 指定元素(element) 三种粒度（M2 §3.1）。
    * 若提供 opts.savePath，则额外把 PNG 写入该路径（用于人工验证），文件已存在则覆盖。
    */
-  async screenshot(opts: ScreenshotOptions = {}): Promise<Buffer> {
+  async screenshot(opts?: ScreenshotOptions): Promise<Buffer> {
+    // 注意：经 WS 桥调用时，undefined 参数会被 JSON 序列化为 null，导致默认参数 = {} 失效。
+    // 故不能用默认参数，而要在函数体内兜底（opts 可能为 null/undefined）。
+    const o = opts ?? {};
     let buf: Buffer;
-    const scope = this.scopeFor(opts.target) as Page;
-    if (opts.element) {
-      const handle = resolveLocator(scope, opts.element).first();
+    const scope = this.scopeFor(o.target) as Page;
+    if (o.element) {
+      const handle = resolveLocator(scope, o.element).first();
       try {
         buf = (await handle.screenshot()) as Buffer;
       } catch (err) {
@@ -455,17 +458,17 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
       }
     } else {
       try {
-        buf = (await scope.screenshot(opts.fullPage ? { fullPage: true } : {})) as Buffer;
+        buf = (await scope.screenshot(o.fullPage ? { fullPage: true } : {})) as Buffer;
       } catch (err) {
         throw new CdpError('CDP_SCREENSHOT_FAILED', '整窗/视口截图失败', err);
       }
     }
 
     // 落盘（可选）：让截图可被人工打开验证（test/reports/ 已被 gitignore）。
-    if (opts.savePath) {
-      const dir = dirname(opts.savePath);
+    if (o.savePath) {
+      const dir = dirname(o.savePath);
       if (dir) mkdirSync(dir, { recursive: true });
-      writeFileSync(opts.savePath, buf);
+      writeFileSync(o.savePath, buf);
     }
     return buf;
   }

@@ -10,7 +10,7 @@
 // 设计依据：docs/plan/plan.md §M3.3；docs/test/visual-overlay-ui.md（UI 规格）。
 
 import type { CdpAdapter, VisualCapable, Recordable, ConnectOptions, Locator, VisualRect } from '../cdp/adapter';
-import type { Script, Step, StepType } from '../types/step';
+import type { Script, Step, StepType, Assertion, AssertionKind } from '../types/step';
 import { Recorder } from '../recorder/recorder';
 import { ScriptEditor } from '../editor/editor';
 import { SCRIPT_SCHEMA } from '../types/step';
@@ -61,12 +61,41 @@ function describeStep(step: Step): string {
   const verb = TYPE_LABEL[step.type] ?? step.type;
   const target = step.target ? ` @${step.target}` : '';
   const loc = describeLocator(step.locator);
-  const param =
-    step.params?.value !== undefined ? ` → "${step.params.value}"`
-    : step.params?.optionText !== undefined ? ` → "${step.params.optionText}"`
-    : step.params?.durationMs !== undefined ? ` ${step.params.durationMs}ms`
-    : '';
+  let param = '';
+  if (step.type === 'assert' && step.params?.assertion) {
+    const a = step.params.assertion;
+    const kind = assertionKindLabel(a.kind);
+    const val = a.value !== undefined ? ` "${a.value}"` : '';
+    const wait = a.waitMs ? ` (等${a.waitMs}ms)` : '';
+    param = ` ${kind}${val}${wait}`;
+  } else {
+    param =
+      step.params?.value !== undefined ? ` → "${step.params.value}"`
+      : step.params?.optionText !== undefined ? ` → "${step.params.optionText}"`
+      : step.params?.durationMs !== undefined ? ` ${step.params.durationMs}ms`
+      : '';
+  }
   return `${verb} ${loc}${param}${target}`.trim();
+}
+
+/** 断言序号计数器（生成稳定唯一 id）。 */
+let assertSeq = 0;
+
+/** 断言 kind 全集（单一真相源）：新增断言类型只改这里，标签与选择菜单同步。OCP：扩展而非修改核心逻辑。 */
+export const ASSERTION_KINDS: { kind: AssertionKind; label: string; needsValue: boolean }[] = [
+  { kind: 'exists', label: '出现新元素', needsValue: false },
+  { kind: 'visible', label: '元素可见', needsValue: false },
+  { kind: 'textContains', label: '值包含内容', needsValue: true },
+  { kind: 'titleIs', label: '值等于特定值', needsValue: true },
+  { kind: 'urlMatches', label: 'URL 匹配', needsValue: true },
+  { kind: 'elementVisibleInViewport', label: '元素在视口内可见', needsValue: false },
+  { kind: 'screenshotMatches', label: '截图匹配', needsValue: false },
+  { kind: 'expr', label: '表达式成立', needsValue: true },
+];
+
+/** 断言 kind → 用户友好标签（M3 补全：把内核断言语义翻译为产品语言）。 */
+export function assertionKindLabel(kind: AssertionKind): string {
+  return ASSERTION_KINDS.find((k) => k.kind === kind)?.label ?? kind;
 }
 
 export class UiShell {
@@ -76,6 +105,10 @@ export class UiShell {
   private connected = false;
   private recording = false;
   private recorder = new Recorder();
+  /** 当前选中的目标（窗口/webview）；缺省=主目标。 */
+  private currentTargetId?: string;
+  /** 截图流定时器句柄（Node 用 Timeout，浏览器用 number；用 any 兼容二者）。 */
+  private frameTimer: any = undefined;
 
   constructor(opts: UiShellOptions) {
     this.kernel = opts.kernel;
@@ -137,6 +170,24 @@ export class UiShell {
     this.render();
   }
 
+  // ---- 目标（窗口 / webview）选择 ----
+
+  /** 枚举可用目标（代理内核）。 */
+  listTargets() {
+    return this.kernel.listTargets();
+  }
+
+  /** 选中目标（委托内核 selectTarget，并记录当前目标）。 */
+  selectTarget(id: string): void {
+    this.kernel.selectTarget(id);
+    this.currentTargetId = id;
+    this.render();
+  }
+
+  getCurrentTarget(): string | undefined {
+    return this.currentTargetId;
+  }
+
   removeStep(stepId: string): void {
     this.script = ScriptEditor.remove(this.script, stepId);
     this.render();
@@ -150,6 +201,38 @@ export class UiShell {
   moveStep(stepId: string, toIndex: number): void {
     this.script = ScriptEditor.move(this.script, stepId, toIndex);
     this.render();
+  }
+
+  /** 编辑钩子：由宿主（app.ts）注入弹窗；默认无操作。点击步骤 ✎ 时触发。 */
+  onEditStep?: (step: Step) => void;
+
+  editStep(stepId: string): void {
+    const step = this.script.steps.find((s) => s.id === stepId);
+    if (step && this.onEditStep) this.onEditStep(step);
+  }
+
+  /**
+   * 断言友好封装（M3 补全核心）：在某步骤后插入一条断言步骤。
+   * kind 映射到用户友好语义（见 assertionKindLabel）；waitMs 为"检测前等待"，
+   * 供 Agent 推理或异步渲染留时间（如"等待 N 秒后检测元素值"）。
+   */
+  insertAssertion(
+    kind: AssertionKind,
+    locator: Locator,
+    value?: string,
+    waitMs = 0,
+  ): void {
+    const assertion: Assertion = { kind, locator: { ...locator } };
+    if (value !== undefined) assertion.value = value;
+    if (waitMs > 0) assertion.waitMs = waitMs;
+    const step: Step = {
+      id: `assert-${Date.now().toString(36)}-${++assertSeq}`,
+      type: 'assert',
+      source: 'manual',
+      params: { assertion },
+    };
+    if (this.currentTargetId) step.target = this.currentTargetId;
+    this.insertStep(step);
   }
 
   // ---- 回放 ----
@@ -168,6 +251,45 @@ export class UiShell {
 
   async captureFrame(): Promise<Buffer> {
     return this.kernel.screenshot();
+  }
+
+  /**
+   * 启动截图流：定时拉取被测软件截图并渲染到舞台区（解决"看不到软件页面"）。
+   * 演示内核截图为空，仅真机（WsKernel/PlaywrightCdpAdapter）有实际画面。
+   * 渲染为 dataURL <img> 叠加在舞台区，高亮框叠加其上。
+   */
+  startFrameStream(intervalMs = 1000): void {
+    this.stopFrameStream();
+    const tick = async () => {
+      try {
+        const buf = await this.captureFrame();
+        const b64 = buf.toString('base64');
+        const stage = this.mount.querySelector('[data-stage]') as HTMLElement | null;
+        if (stage) {
+          let img = stage.querySelector('img.ui-shell-frame-img') as HTMLImageElement | null;
+          if (!img) {
+            img = document.createElement('img');
+            img.className = 'ui-shell-frame-img';
+            img.style.cssText = 'width:100%;height:100%;object-fit:contain;';
+            stage.prepend(img);
+          }
+          img.src = `data:image/png;base64,${b64}`;
+        }
+      } catch (err) {
+        // 截图失败（如未连接/目标失效）静默跳过，下一周期重试；仅在控制台留痕便于排查。
+        console.warn('[UiShell] 截图流单帧失败，重试中:', err instanceof Error ? err.message : err);
+      }
+    };
+    // 立即先取一帧，再周期性
+    tick();
+    this.frameTimer = setInterval(tick, intervalMs);
+  }
+
+  stopFrameStream(): void {
+    if (this.frameTimer !== undefined) {
+      clearInterval(this.frameTimer);
+      this.frameTimer = undefined;
+    }
   }
 
   // ---- 导入 / 导出 ----
@@ -189,21 +311,66 @@ export class UiShell {
 
     const header = document.createElement('div');
     header.className = 'ui-shell-header';
-    header.textContent = `可视化蒙版 · ${this.script.app.name} · ${this.connected ? '已连接' : '未连接'}${this.recording ? ' · 录制中' : ''}`;
+    header.innerHTML = '';
+
+    const titleText = document.createElement('span');
+    titleText.textContent = `可视化蒙版 · ${this.script.app.name} · ${this.connected ? '已连接' : '未连接'}${this.recording ? ' · 录制中' : ''}`;
+    header.appendChild(titleText);
+
+    // 录制指示灯
+    const dot = document.createElement('span');
+    dot.className = 'rec-dot' + (this.recording ? ' on' : '');
+    header.appendChild(dot);
+
+    // 目标选择下拉（窗口/webview）
+    const targets = this.listTargets();
+    if (this.connected && targets.length > 0) {
+      const sel = document.createElement('select');
+      sel.className = 'ui-shell-target-select';
+      sel.setAttribute('data-action', 'select-target');
+      targets.forEach((t) => {
+        const opt = document.createElement('option');
+        opt.value = t.id;
+        opt.textContent = `${t.title ?? t.id} (${t.type})`;
+        if (t.id === this.currentTargetId) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      header.appendChild(sel);
+    }
     root.appendChild(header);
 
-    // 中间：被测软件视图（截图流占位 + 高亮层）
+    // 顶部操作栏
+    const actions = document.createElement('div');
+    actions.className = 'ui-shell-actions';
+    actions.setAttribute('data-actions', 'true');
+    const addBtn = (label: string, action: string, cls = '') => {
+      const b = document.createElement('button');
+      b.className = cls;
+      b.textContent = label;
+      b.setAttribute('data-action', action);
+      actions.appendChild(b);
+    };
+    addBtn('插入步骤', 'insert', 'primary');
+    addBtn('加断言', 'add-assert');
+    addBtn('开始录制', 'toggle-record');
+    addBtn('回放', 'playback');
+    addBtn('高亮示例', 'highlight');
+    addBtn('导出', 'export');
+    addBtn('清空', 'clear', 'danger');
+    root.appendChild(actions);
+
+    // 中间：被测软件视图（截图流 <img> + 高亮层）
     const stage = document.createElement('div');
     stage.className = 'ui-shell-stage';
     stage.setAttribute('data-stage', 'true');
-    const frame = document.createElement('div');
-    frame.className = 'ui-shell-frame';
-    frame.setAttribute('data-frame', 'true');
-    frame.textContent = '[ 被测软件视图：截图流将在此渲染，坐标高亮叠加于其上 ]';
-    stage.appendChild(frame);
+    const frameHint = document.createElement('div');
+    frameHint.className = 'ui-shell-frame';
+    frameHint.setAttribute('data-frame', 'true');
+    frameHint.textContent = '[ 被测软件视图：连接后自动拉取截图流 ]';
+    stage.appendChild(frameHint);
     root.appendChild(stage);
 
-    // 侧边：步骤列表（用户友好形式）
+    // 侧边：步骤列表（用户友好形式，每条带操作按钮）
     const side = document.createElement('div');
     side.className = 'ui-shell-steps';
     side.setAttribute('data-steps', 'true');
@@ -221,6 +388,24 @@ export class UiShell {
       desc.className = 'ui-shell-step-desc';
       desc.textContent = `${idx + 1}. ${describeStep(step)}`;
       item.appendChild(desc);
+
+      const ops = document.createElement('span');
+      ops.className = 'ui-shell-step-ops';
+      const mkOp = (label: string, action: string, handler: () => void) => {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.setAttribute('data-action', action);
+        b.setAttribute('data-step-id', step.id);
+        b.addEventListener('click', handler);
+        ops.appendChild(b);
+      };
+      // 每条步骤自带操作按钮，shell 自包含处理（不依赖外部委托），便于单元验证
+      mkOp('↑', 'up', () => this.moveStep(step.id, Math.max(0, idx - 1)));
+      mkOp('↓', 'down', () => this.moveStep(step.id, idx + 1));
+      mkOp('✎', 'edit', () => this.editStep(step.id));
+      mkOp('✕', 'remove', () => this.removeStep(step.id));
+      item.appendChild(ops);
+
       side.appendChild(item);
     });
 
