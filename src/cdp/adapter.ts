@@ -6,7 +6,8 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { chromium, type Browser, type Frame, type Page } from 'playwright';
 import WebSocket from 'ws';
-import type { Locator } from '../types/step';
+import type { Locator, Script } from '../types/step';
+import { runCli } from '../cli';
 export type { Locator } from '../types/step';
 import type { InteractionEvent } from '../recorder/recorder';
 import { RECORD_INJECT, RECORD_DRAIN } from '../recorder/inject';
@@ -137,7 +138,7 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
       await this.waitForPort(port);
     }
 
-    const endpoint = `http://localhost:${port}`;
+    const endpoint = `http://127.0.0.1:${port}`;
     try {
       this.browser = await chromium.connectOverCDP(endpoint);
     } catch (err) {
@@ -171,6 +172,14 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     this.recorded = [];
     this.stopTargetWatch();
     await this.killChild();
+  }
+
+  /**
+   * 回放能力（UiKernel.playback）：编排 runCli 按脚本驱动本适配器。
+   * UI 壳只调用此方法，不直接依赖执行器/playwright 链（DIP）。
+   */
+  async playback(script: Script): Promise<{ ok: boolean; failedStepId?: string }> {
+    return runCli({ adapter: this, script });
   }
 
   listTargets(): TargetInfo[] {
@@ -209,7 +218,7 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   private async fetchRawTargets(): Promise<import('./targets.js').RawCdpTarget[]> {
     const port = this.port;
     if (!port) return [];
-    const res = await fetch(`http://localhost:${port}/json`);
+    const res = await fetch(`http://127.0.0.1:${port}/json`);
     if (!res.ok) return [];
     const list = (await res.json()) as import('./targets.js').RawCdpTarget[];
     return Array.isArray(list) ? list : [];
@@ -347,7 +356,7 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     if (!port) return;
     try {
       // 浏览器级 CDP 端点不在根路径，需从 /json/version 取 webSocketDebuggerUrl。
-      void fetch(`http://localhost:${port}/json/version`)
+      void fetch(`http://127.0.0.1:${port}/json/version`)
         .then((r) => (r.ok ? r.json() : null))
         .then((v: any) => {
           const wsUrl: string | undefined = v?.webSocketDebuggerUrl;
@@ -552,7 +561,7 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     let lastErr: unknown;
     while (Date.now() < deadline) {
       try {
-        const res = await fetch(`http://localhost:${port}/json/version`);
+        const res = await fetch(`http://127.0.0.1:${port}/json/version`);
         if (res.ok) return;
         lastErr = new Error(`HTTP ${res.status}`);
       } catch (err) {

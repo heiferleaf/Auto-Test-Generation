@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>可视化蒙版 · 自动化测试控制台</title>
+  <style>
+    /* 控制台样式骨架：供 UI 设计师在此外观基础上重构，不绑定业务逻辑。 */
+    :root {
+      --bg: #1e1e2e; --panel: #27293d; --line: #3a3d57;
+      --text: #e6e6f0; --muted: #9a9cb8; --accent: #6c8cff; --ok: #4ec9a8; --warn: #e5c07b;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); }
+    #app { display: flex; flex-direction: column; height: 100vh; }
+
+    .ui-shell-header {
+      display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+      background: var(--panel); border-bottom: 1px solid var(--line); font-size: 14px;
+    }
+    .ui-shell-header .badge { color: var(--muted); font-size: 12px; }
+    .ui-shell-header .rec-dot { width: 9px; height: 9px; border-radius: 50%; background: #555; }
+    .ui-shell-header .rec-dot.on { background: #ff5f56; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+    .ui-shell-body { flex: 1; display: flex; min-height: 0; }
+
+    /* 中间：被测软件视图（截图流 + 高亮层叠加） */
+    .ui-shell-stage {
+      position: relative; flex: 1; margin: 12px; border: 1px solid var(--line);
+      border-radius: 8px; overflow: hidden; background: #11111b;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .ui-shell-frame {
+      width: 100%; height: 100%; color: var(--muted); font-size: 13px;
+      display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px;
+    }
+    .ui-shell-highlight {
+      position: absolute; border: 2px solid var(--accent); background: rgba(108,140,255,.15);
+      pointer-events: none; transition: all .15s ease; border-radius: 3px;
+    }
+
+    /* 侧边：步骤列表（用户友好形式） */
+    .ui-shell-steps {
+      width: 340px; border-left: 1px solid var(--line); background: var(--panel);
+      display: flex; flex-direction: column; min-height: 0;
+    }
+    .ui-shell-steps-title { padding: 10px 14px; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--line); }
+    .ui-shell-steps-list { flex: 1; overflow-y: auto; padding: 8px; }
+    .ui-shell-step-item {
+      display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin-bottom: 6px;
+      background: #2f3147; border: 1px solid transparent; border-radius: 6px; font-size: 13px; cursor: pointer;
+    }
+    .ui-shell-step-item:hover { border-color: var(--accent); }
+    .ui-shell-step-idx { color: var(--muted); width: 20px; text-align: right; flex: none; }
+    .ui-shell-step-desc { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* 底部：操作栏 */
+    .ui-shell-actions { display: flex; gap: 8px; padding: 10px 16px; background: var(--panel); border-top: 1px solid var(--line); flex-wrap: wrap; }
+    .ui-shell-actions button {
+      background: #34374f; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+      padding: 7px 14px; font-size: 13px; cursor: pointer;
+    }
+    .ui-shell-actions button:hover { border-color: var(--accent); }
+    .ui-shell-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .ui-shell-actions button.danger { color: #ff8b82; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <!-- 浏览器入口：实例化 UiShell 并绑定交互（演示模式下用 mock 内核） -->
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
