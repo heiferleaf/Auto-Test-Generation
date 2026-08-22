@@ -101,6 +101,74 @@ git worktree remove .codebuddy/worktree/m1-cdp
 2. 实现代码以满足测试为第一目标，反复迭代直至测试通过。
 3. 提交时测试须为通过态；CI/本地 `npm test` 全绿才允许合并。
 
+## 5.2 测试命令与执行（固定命令 + 参数控制）
+
+> **核心约束：测试命令本身保持固定不变，用参数/环境变量控制「跑哪些、是否真机」，禁止为不同测试项另起新命令。**
+
+### 固定命令
+
+| 命令 | 作用 | 是否变化 |
+|---|---|---|
+| `npm test` | 运行全部测试（`vitest run`） | **永远不变** |
+| `npm run typecheck` | 类型检查（`tsc --noEmit`） | **永远不变** |
+
+### 用参数控制测试项（命令不变，只加参数）
+
+`npm test` 后加 `--` 把参数透传给 vitest，按文件 / 名称 / 标签筛选：
+
+```bash
+# 1) 只跑某个测试文件
+npm test -- test/cdp.test.ts
+
+# 2) 按用例名筛选（匹配标题含 "webview" 的 it）
+npm test -- -t "webview"
+
+# 3) 跑某目录下全部（vitest 接收目录）
+npm test -- test/
+
+# 4) 只看失败（不新增命令，用 vitest 自带参数）
+npm test -- --reporter=verbose
+```
+
+### 真机集成测试的门控（参数 = 环境变量）
+
+日常 `npm test`（不带环境变量）时，真机用例**自动 skip**：
+
+- `test/integration-codebuddy.test.ts`（靶机：CodeBuddy CN，端口 9222）
+- `test/integration-workbuddy.test.ts`（靶机：WorkBuddy，端口 9233）
+
+要触发真机，先启动靶机调试端口，再用环境变量开启（命令本身不变）：
+
+```bash
+# 启动靶机调试端口（以管理员运行对应 cmd）
+scripts/launch-codebuddy.cmd      # 开启 9222
+scripts/launch-workbuddy.cmd      # 开启 9233
+
+# 启用真机后跑（命令仍是 npm test，仅多一个环境变量）
+set CODEBUDDY_LIVE=1 && npm test -- test/integration-codebuddy.test.ts
+set WORKBUDDY_LIVE=1 && npm test -- test/integration-workbuddy.test.ts
+```
+
+### M2 完成后需要你（人工）执行的测试
+
+M2（方案 C：沙箱 webview 可达 + 截图落盘）已合入，但**真机验证必须由你触发**——CI/默认跑不到真机。请按以下顺序人工验证：
+
+1. **CodeBuddy 真机回归**
+   - 双击 `scripts/launch-codebuddy.cmd` 拉起 CodeBuddy（端口 9222）。
+   - 浏览器打开 `http://localhost:9222/json` 确认目标列表可见。
+   - 运行 `set CODEBUDDY_LIVE=1 && npm test -- test/integration-codebuddy.test.ts`。
+   - 关注：枚举出 page + webview；`reports/codebuddy-main.png` 已生成且非空白；侧栏 `locateVisual` 可见且在视口内。
+2. **WorkBuddy 通用性验证（方案 C 跨应用）**
+   - 双击 `scripts/launch-workbuddy.cmd` 拉起 WorkBuddy（端口 9233）。
+   - `http://localhost:9233/json` 确认可见。
+   - 运行 `set WORKBUDDY_LIVE=1 && npm test -- test/integration-workbuddy.test.ts`。
+   - 关注：含 `[role=textbox]` 的 webview 能被定位（证明方案 C 不绑定具体应用）。
+3. **人工核对截图产物**
+   - 打开 `./reports/*.png` 与 `./reports/*-run-*.md`，对照 `test/fixtures/*-expected.md` 预期契约，确认 UI 表现符合预期。
+4. **日常提交前**：直接 `npm test` + `npm run typecheck` 全绿即可，无需真机。
+
+> 以上人工步骤无法通过默认 `npm test` 自动覆盖，是 M2 完成后的必做验证项；未做真机验证不得视为 M2 已"端到端验证通过"。
+
 ## 5.1 架构方案同步（强制）
 
 > **当实现影响了既有架构、或新增/变更了架构方案（如新增 Target 类型、引入新的传输层/协议、改变模块职责边界、新增 Adapter/工厂分支等）时，必须同步更新 `docs/architecture/architecture.md`（技术选型与架构方案）。**
@@ -138,8 +206,9 @@ git worktree remove .codebuddy/worktree/m1-cdp
 | 主栈 | TypeScript + Playwright CDP |
 | 仓库 | git，worktree 在 `.codebuddy/worktree` |
 | 实现顺序 | 先测试（方案/代码）→ 再实现 → 过测试 |
+| 测试命令 | 固定 `npm test`（全量）/ `npm run typecheck`；用 `--` 参数或 `CODEBUDDY_LIVE`/`WORKBUDDY_LIVE` 环境变量控制测试项（命令不变） |
 | 完成标准 | 测试通过 + code-review 通过 |
-| 架构同步 | 影响/新增架构方案时须同步 `docs/方案.md`（见 §5.1） |
+| 架构同步 | 影响/新增架构方案时须同步 `docs/architecture/architecture.md`（见 §5.1） |
 | 并行 | 多 Agent/team + 每任务带 test & review 角色 |
 | 架构同步 | 影响/新增架构方案时须同步 `docs/architecture/architecture.md`（见 §5.1） |
 | 纪律归属 | 统一在 CODEBUDDY.md（CLI 不读 `.codebuddy/rules/`） |
