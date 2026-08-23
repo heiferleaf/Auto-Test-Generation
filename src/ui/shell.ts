@@ -11,7 +11,7 @@
 
 import type { CdpAdapter, VisualCapable, Recordable, ConnectOptions, Locator, VisualRect } from '../cdp/adapter';
 import type { Script, Step, StepType, Assertion, AssertionKind } from '../types/step';
-import { Recorder } from '../recorder/recorder';
+import { Recorder, type InteractionEvent } from '../recorder/recorder';
 import { ScriptEditor } from '../editor/editor';
 import { SCRIPT_SCHEMA } from '../types/step';
 
@@ -111,6 +111,8 @@ export class UiShell {
   private currentTargetId?: string;
   /** 截图流定时器句柄（Node 用 Timeout，浏览器用 number；用 any 兼容二者）。 */
   private frameTimer: any = undefined;
+  /** 步骤列表容器缓存（增量 append 用，避免录制高频全量重渲染）。 */
+  private stepsEl?: HTMLElement;
 
   constructor(opts: UiShellOptions) {
     this.kernel = opts.kernel;
@@ -144,11 +146,31 @@ export class UiShell {
 
   // ---- 录制 ----
 
+  /** 实时录制事件指纹缓存（去重用，避免 stopRecording 拉回与实时推送重复插入）。
+   * 用事件内容指纹而非 step.id：实时 emit 与 stop 拉回的同源事件 id 不同但内容一致。 */
+  private recordedKeys = new Set<string>();
+  private eventKey(ev: InteractionEvent): string {
+    return JSON.stringify({ t: ev.type, l: ev.locator, p: ev.params, tg: ev.target });
+  }
+
   startRecording(): void {
     this.recorder.reset();
+    this.recordedKeys.clear();
     this.kernel.startRecording();
     this.recording = true;
+    // 订阅服务端实时推送：每捕获一个交互即增量生成步骤（边操作边长步骤）。
+    this.kernel.on?.('recording', (ev) => this.onRecordingEvent(ev as InteractionEvent));
     this.render();
+  }
+
+  /** 实时事件回调：转 Step 并增量插入脚本与 DOM（不重渲染全列表）。 */
+  private onRecordingEvent(ev: InteractionEvent): void {
+    const key = this.eventKey(ev);
+    if (this.recordedKeys.has(key)) return; // 去重
+    this.recordedKeys.add(key);
+    const step = this.recorder.toSingleStep(ev);
+    this.script = ScriptEditor.insert(this.script, step);
+    this.appendStepEl(step);
   }
 
   async stopRecording(): Promise<void> {
@@ -158,11 +180,15 @@ export class UiShell {
     // 仅当确实处于录制态才消费事件，避免脏数据（如 __recBuf 残留、
     // 或误调用 stop 而内核恰好返回缓存事件）被误插入脚本。
     if (wasRecording && events.length > 0) {
-      for (const ev of events) this.recorder.record(ev);
-      const steps = this.recorder.toSteps();
-      for (const s of steps) this.script = ScriptEditor.insert(this.script, s);
+      for (const ev of events) {
+        const key = this.eventKey(ev);
+        if (this.recordedKeys.has(key)) continue; // 实时已插入的跳过
+        this.recordedKeys.add(key);
+        const step = this.recorder.toSingleStep(ev);
+        this.script = ScriptEditor.insert(this.script, step);
+      }
     }
-    this.render();
+    this.render(); // 停止后全量刷新，保证一致
   }
 
   // ---- 编辑（不可变，委托 ScriptEditor）----
@@ -382,35 +408,51 @@ export class UiShell {
     side.appendChild(title);
 
     this.script.steps.forEach((step, idx) => {
-      const item = document.createElement('div');
-      item.className = 'ui-shell-step-item';
-      item.setAttribute('data-step-item', String(idx));
-      item.setAttribute('data-step-id', step.id);
-      const desc = document.createElement('span');
-      desc.className = 'ui-shell-step-desc';
-      desc.textContent = `${idx + 1}. ${describeStep(step)}`;
-      item.appendChild(desc);
-
-      const ops = document.createElement('span');
-      ops.className = 'ui-shell-step-ops';
-      const mkOp = (label: string, action: string, handler: () => void) => {
-        const b = document.createElement('button');
-        b.textContent = label;
-        b.setAttribute('data-action', action);
-        b.setAttribute('data-step-id', step.id);
-        b.addEventListener('click', handler);
-        ops.appendChild(b);
-      };
-      // 每条步骤自带操作按钮，shell 自包含处理（不依赖外部委托），便于单元验证
-      mkOp('↑', 'up', () => this.moveStep(step.id, Math.max(0, idx - 1)));
-      mkOp('↓', 'down', () => this.moveStep(step.id, idx + 1));
-      mkOp('✎', 'edit', () => this.editStep(step.id));
-      mkOp('✕', 'remove', () => this.removeStep(step.id));
-      item.appendChild(ops);
-
-      side.appendChild(item);
+      side.appendChild(this.buildStepItem(step, idx));
     });
 
+    this.stepsEl = side;
     root.appendChild(side);
+  }
+
+  /** 构造单条步骤 DOM 项（render 与增量 append 复用）。 */
+  private buildStepItem(step: Step, idx: number): HTMLElement {
+    const item = document.createElement('div');
+    item.className = 'ui-shell-step-item';
+    item.setAttribute('data-step-item', String(idx));
+    item.setAttribute('data-step-id', step.id);
+    const desc = document.createElement('span');
+    desc.className = 'ui-shell-step-desc';
+    desc.textContent = `${idx + 1}. ${describeStep(step)}`;
+    item.appendChild(desc);
+
+    const ops = document.createElement('span');
+    ops.className = 'ui-shell-step-ops';
+    const mkOp = (label: string, action: string, handler: () => void) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.setAttribute('data-action', action);
+      b.setAttribute('data-step-id', step.id);
+      b.addEventListener('click', handler);
+      ops.appendChild(b);
+    };
+    // 每条步骤自带操作按钮，shell 自包含处理（不依赖外部委托），便于单元验证
+    mkOp('↑', 'up', () => this.moveStep(step.id, Math.max(0, idx - 1)));
+    mkOp('↓', 'down', () => this.moveStep(step.id, idx + 1));
+    mkOp('✎', 'edit', () => this.editStep(step.id));
+    mkOp('✕', 'remove', () => this.removeStep(step.id));
+    item.appendChild(ops);
+    return item;
+  }
+
+  /** 增量追加一个步骤 DOM（录制实时生成用，避免全列表重渲染）。 */
+  private appendStepEl(step: Step): void {
+    if (!this.stepsEl) {
+      this.render();
+      return;
+    }
+    this.stepsEl.appendChild(this.buildStepItem(step, this.script.steps.length - 1));
+    const title = this.stepsEl.querySelector('.ui-shell-steps-title');
+    if (title) title.textContent = `步骤 (${this.script.steps.length})`;
   }
 }
