@@ -45,6 +45,17 @@ export type Step = {
   };
   expect?: Assertion;          // 步骤级可选期望
   source: StepSource;
+  // ── M3-R0 CFG 扩展（加法式，向后兼容 v1 扁平脚本）──
+  /** 递归子步骤：控制流节点（sequence/if/while）携带，叶子步骤可省略。 */
+  children?: Step[];
+  /** 控制结构：顺序/选择/循环。叶子步骤省略此字段。 */
+  control?: {
+    kind: 'sequence' | 'if' | 'while';
+    /** if 分支的判断条件（复用 Assertion）。 */
+    condition?: Assertion;
+    /** while 循环的重复次数。 */
+    loopCount?: number;
+  };
   meta?: {
     window?: string;
     timestamp?: string;
@@ -53,7 +64,7 @@ export type Step = {
 };
 
 export type Script = {
-  schema: 'electron-auto-test/step/v1';
+  schema: 'electron-auto-test/step/v1' | 'electron-auto-test/step/v2';
   app: { name: string; version?: string };
   steps: Step[];
   createdAt?: string;
@@ -61,3 +72,5 @@ export type Script = {
 };
 
 export const SCRIPT_SCHEMA = 'electron-auto-test/step/v1';
+export const SCRIPT_SCHEMA_V2 = 'electron-auto-test/step/v2';
+export const SCRIPT_SCHEMAS = [SCRIPT_SCHEMA, SCRIPT_SCHEMA_V2] as const;
