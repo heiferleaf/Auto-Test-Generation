@@ -78,9 +78,37 @@ UI 壳是「人操作界面」，与内核（CDP 适配层 / 录制 / 执行器�
 - `runScript` 改为对每元素调用新增递归 `runNode(node)`：sequence 遍历 children、if 求值 `condition` 后分支、while 按 `loopCount` 回退 children。
 - 单叶子步骤逻辑（`selectTarget` + 断言/动作分发）原样复用；`actions.ts`/`assert.ts` 注册表不动（OCP）。
 
-**WS 桥主动推送通道（§2.3 关键设施）**
-- 当前 `bridge-server.ts` 为纯 req/res；需新增服务端主动推送消息类型（区分 req/res/event），供"录制增量事件"与"运行逐步进度"下发。
-- 边界兜底：除已修的 `screenshot` 外，桥端反射转发 `fn.apply(adapter, req.args)` 须对每方法入参做 `arg ?? {}`（尤其 `wait`），杜绝 `null` 陷阱（CODEBUDDY.md §4.1）。
+**WS 桥主动推送通道（§2.3 关键设施）— 已实现（R1 录制增量 / R3 运行进度）**
+
+`bridge-server.ts` 原为纯 req/res，现已新增服务端主动推送消息类型 `{ type:'event', event, data }`（与 req/res 同信道但可区分），由 `pushEvent(event, data)` 向全部已连接客户端广播；浏览器侧 `ws-kernel.ts` 以 `on(event, cb)` / `off(event, cb)` 订阅退订。两类事件已落地：
+
+| 事件 | 产生方 | 用途 | 阶段 |
+|---|---|---|---|
+| `recording` | `adapter.startRecording(onEvent)` 增量回调 | 边操作边追加步骤（实时生成） | R1 |
+| `step-progress` | 执行器 `runScript(…, onStep)` 逐叶子上报 | 运行全部时逐步 running/pass/fail 回显 + 高亮跟随 | R3 |
+
+**关键架构约束：进度源必须在 Node 进程内产生，`UiKernel.playback` 必须保持单参数。**
+`UiKernel` 有跨 WebSocket 实现（`WsKernel`），**函数无法 JSON 序列化** —— 若把进度回调放进 `playback(script, cb)` 的参数位，真机上回调 100% 丢失，且 `tsc` 与单测（Mock 内核不过 WS）全绿，属 CODEBUDDY.md §4.1 盲区（R3 首版曾因此被打回）。故数据流固定为**单向下行**：
+
+```
+executor.runScript(adapter, script, onStep)   ← 进度在 Node 进程内产生（进程内传函数合法）
+  → cli.runCli({ onStep })
+  → adapter.playback(script, onStep)
+  → bridge-server 的 playback 专用分支注册回调
+  → pushEvent('step-progress', { stepId, status })   ← 跨 WS 只传可序列化数据
+  → ws-kernel.on('step-progress')
+  → UiShell.runAll() 消费（更新步骤态 + 高亮跟随）
+```
+
+- **`playback` 走专用分支**（同 `startRecording`），不落通用反射转发 `fn.apply`，因需在桥端注册进度回调。
+- **运行态不入 `Step` 模型**：`StepRunStatus`（pending/running/pass/fail）存于 `UiShell` 内的 `Map<stepId, StatusI>`。理由 SRP —— `Step` 会被持久化（导出 / 版本 diff），运行态是瞬时 UI 态，混入会污染脚本产物。
+- **向后兼容（OCP）**：老内核不发 `step-progress` 时，`runAll` 依 `{ok, failedStepId}` 回填状态（`backfillStatus`），行为不退化。
+- **边界兜底**：桥端反射转发 `fn.apply(adapter, sanitizeArgs(req.args))`，`sanitizeArgs` 把 JSON 产生的 `null` 还原为 `undefined`，杜绝服务端默认参数失效的 `null` 陷阱（§4.1）。
+- **跨 WS 脚本递归深度校验**：`assertRunnableScript` 在桥边界（不可信 JSON 的唯一入口）一次性递归校验 steps 及每层 `children`（元素形状 / `id` / `type` / `control.kind`），错误带 `steps[i].children[j]` 路径。不校验时坏数据会在执行器抛不带 stepId 的 TypeError，被 `runCli` 吞成 `failedStepId:undefined`，UI 只能显示"(未知)"——静默误提示比崩溃更难排查。执行器 `childrenOf` 作双保险（覆盖 CLI 文件导入 / 未来 MCP Tool 等非 WS 入口）。
+- **`StepType` / `ControlKind` 单一真相源**：以 `src/types/step.ts` 的运行时常量数组 `STEP_TYPES` / `CONTROL_KINDS` 为准，类型由 `typeof ARR[number]` 反推。因 TS 联合类型在运行时不存在，而边界校验必须有运行时值可查；若两处各自列举则新增类型时必然漂移（OCP 风险）。
+- **桥的 adapter 可注入（DIP）**：`attachKernelBridge(server, port, adapter?)` 第三参可注入，缺省构造 `PlaywrightCdpAdapter`。此前桥内部直接 `new`，导致「真实 WS 线路」必须有 9222 靶机才能测，`step-progress` 跨 WS 这段（恰是 §4.1 出事点）长期无测试覆盖 —— 不可测本身即设计缺陷，故开放注入点，由 `test/bridge-ws-progress.test.ts` 以真 http server + 真 WS 守住该线路。
+
+**已知限制（P3，M4 修）**：`pushEvent` 向所有客户端广播，无 runId/客户端过滤。多标签页同时运行会串扰（各自看到对方进度）。M3 单客户端场景可接受，已记于 `docs/plan/plan.md`。
 
 **Git 式版本层（与 CFG 融合）**
 - **版本节点 = 最外层顺序组**（Sequential Group），非单个 Step；仅最外层顺序组支持切分支（选择/循环组内不可切，保控制流合法）。
@@ -96,15 +124,17 @@ UI 壳是「人操作界面」，与内核（CDP 适配层 / 录制 / 执行器�
 
 | 模块 | 文件 | 职责 | 本次改动 |
 |---|---|---|---|
-| 步骤类型 | `src/types/step.ts` | CFG 递归字段 + v2 schema | 加法扩展（兼容 v1） |
-| 执行器 | `src/executor/executor.ts` | 线性→递归 `runNode` | 新增递归调度，复用 `runStep` |
+| 步骤类型 | `src/types/step.ts` | CFG 递归字段 + v2 schema | 加法扩展（兼容 v1）；**R3**：`STEP_TYPES`/`CONTROL_KINDS` 改为运行时常量，类型由其反推（单一真相源） |
+| 执行器 | `src/executor/executor.ts` | 线性→递归 `runNode` | 新增递归调度，复用 `runStep`；**R3**：新增 `StepProgress` 逐叶子进度上报（控制流节点自身不报）+ `childrenOf` 坏子节点守卫 |
+| CLI | `src/cli.ts` | 汇总运行结果 | **R3**：`onStep` 透传给 `runScript` |
+| CDP 适配层 | `src/cdp/adapter.ts` | 真机控制 | **R3**：`playback(script, onStep?)` 进程内可选进度回调（跨 WS 不传，函数不可序列化） |
 | 脚本 IO | `src/script/io.ts` | schema 校验 + 往返 | 增 v2 常量、children 浅校验 |
 | 录制内核 | `src/recorder/recorder.ts` + `inject.ts` | 产出扁平叶子 | 不改（仍产叶子）；增量推送在桥/UI 层 |
-| UI 壳 | `src/ui/shell.ts` | 编排 + 增量渲染 | 增量 append + 步骤态 + CFG 视图挂载 |
+| UI 壳 | `src/ui/shell.ts` | 编排 + 增量渲染 | 增量 append + CFG 视图挂载；**R3**：`runAll()` + 运行态 `Map`（不入 Step 模型）+ 高亮跟随 + generation token 作废迟到定位 |
 | CFG 视图 | `src/ui/cfg-view.ts`（新） | 图形化控制流 | 新增组件（SRP） |
 | 版本面板 | `src/ui/version-panel.ts`（新） | Git 式版本操作 | 新增组件（SRP） |
-| WS 桥 | `src/ui/bridge-server.ts` + `ws-kernel.ts` | RPC + 推送 | 加 event/push 消息类型 + 全方法 `?? {}` 兜底 |
-| 页面 | `src/ui/index.html` | 四区→加 cfg/version 区 | CSS 扩展 |
+| WS 桥 | `src/ui/bridge-server.ts` + `ws-kernel.ts` | RPC + 推送 | 加 event/push 消息类型 + `sanitizeArgs` 兜底；**R3**：`playback` 专用分支 + `pushEvent('step-progress')` + `assertRunnableScript` 递归深度校验 + adapter 可注入（DIP，使 WS 线路可测） |
+| 页面 | `src/ui/index.html` | 四区→加 cfg/version 区 | CSS 扩展；**R3**：步骤运行态 class + 失败提示 + 待定位高亮样式 |
 
 **依赖方向**（DIP 不变）：`cfg-view` / `version-panel` / `shell` 仅依赖 `UiKernel` 抽象与 `Script`/`Step` 类型，不 import 执行器/playwright。
 

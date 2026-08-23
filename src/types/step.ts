@@ -1,9 +1,17 @@
 // 统一步骤模型（M1 design.md §4）
 // 录制 / Agent 轨迹 / 导入导出 / MCP Tool / 执行器 共用此结构。
 
-export type StepType =
-  | 'click' | 'fill' | 'select' | 'wait'
-  | 'assert' | 'hover' | 'eval' | 'snapshot';
+// 运行时常量为唯一真相源，类型由其反推（`typeof ARR[number]`）。
+// 理由：TS 联合类型在运行时不存在，跨进程边界校验（bridge-server）必须有运行时值可查。
+// 若各自维护"联合类型 + 校验用字面量数组"，新增类型时极易只改一处而漂移（OCP 风险）。
+export const STEP_TYPES = [
+  'click', 'fill', 'select', 'wait',
+  'assert', 'hover', 'eval', 'snapshot',
+] as const;
+export type StepType = typeof STEP_TYPES[number];
+
+export const CONTROL_KINDS = ['sequence', 'if', 'while'] as const;
+export type ControlKind = typeof CONTROL_KINDS[number];
 
 export type Locator = {
   role?: string;       // 语义角色，如 'button'
@@ -50,7 +58,7 @@ export type Step = {
   children?: Step[];
   /** 控制结构：顺序/选择/循环。叶子步骤省略此字段。 */
   control?: {
-    kind: 'sequence' | 'if' | 'while';
+    kind: ControlKind;
     /** if 分支的判断条件（复用 Assertion）。 */
     condition?: Assertion;
     /** while 循环的重复次数。 */

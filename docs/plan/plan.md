@@ -211,8 +211,8 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 | M3-R0 CFG 步骤模型 | ✅ 已合并 | `feat/cfg-step-model` | `00895da` | `test/cfg-step.test.ts` 9 通过 |
 | M3-R1 WS 推送通道 | ✅ 已合并 | `feat/ws-push-channel` | `bc13d86` | `test/bridge-push.test.ts` 6 通过 |
 | M3-R2 嵌入实时录制 | ✅ 已合并 | `feat/ws-push-channel` | `a654faa` | `test/ui-shell-live-recording.test.ts` 4 通过 |
-| M3-R3 运行全部 + 步骤态 + 高亮跟随 | ⏳ 进行中 | `feat/run-all` | — | 测试先写中 |
-| M3-R4 CFG 图形化视图 | ⬜ 未开始 | `feat/cfg-view` | — | — |
+| M3-R3 运行全部 + 步骤态 + 高亮跟随 | ✅ 已合并 | `feat/run-all` | 见合并记录 | `ui-shell-run-all` 22 + `executor-progress` 11 + `bridge-ws-progress` 7（真 WS）+ `bridge-push` 25 通过 |
+| M3-R4 CFG 图形化视图 | ⏳ 进行中 | `feat/cfg-view` | — | 测试先写 |
 | M3-R5 Git 式版本层 | ⬜ 未开始 | `feat/git-version` | — | — |
 
 > **测试代码权威性纪律（新增，因本轮违规而补）**：既有测试文件（含其 mock 基建，如 `test/ui-shell.test.ts` 的 `makeMockKernel`）**不得为迁就新实现而修改**。新能力需要新的 mock 行为时，新建独立测试文件并自带 mock，不动既有基建。
@@ -237,11 +237,27 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 - **实现**：`shell.ts` 增 `appendStep(ev)` 增量路径（录制中每事件 `ScriptEditor.insert` + 增量 DOM 更新，非全量 render）；`bridge-server.ts`/`ws-kernel.ts` 复用 R1 推送把录制事件流下发；`app.ts` 录制开关默认边录边显。
 - **校验**：runtime-runnability 真机冒烟（真实靶机操作→列表实时增长）；高频重渲染优化（增量更新，CODEBUDDY.md §4.1 清单 7）。
 
-### 阶段 M3-R3：运行全部 + 步骤态 + 高亮跟随（P1）— ⏳ 进行中
+### 阶段 M3-R3：运行全部 + 步骤态 + 高亮跟随（P1）— ✅ 已完成
 - **worktree**：`feat/run-all`
-- **测试先行**：**新建** `test/ui-shell-run-all.test.ts`（jsdom + 自带 mock kernel，不动既有基建），断言：逐步 `status` 流转 pending→running→pass、失败步标 fail 且后续不再执行、失败提醒可见、running 步自动高亮且上一步高亮清除、`playback` 无 `onStepResult` 时兼容旧行为。
-- **实现**：操作栏加"运行全部"按钮；`Step` 加运行时 `status: pending|running|pass|fail`；`render` 据态加 class；高亮自动跟随当前步（P1）；`playback` 签名扩展流式但兼容旧。
-- **校验**：runtime-runnability 真机跑"运行全部"闭环 + 中途失败提醒。
+- **测试先行**（均为新建/追加，未改既有测试断言与 mock 基建）：
+  - `test/ui-shell-run-all.test.ts`（22 例，jsdom + 自带 `makeRunAllKernel`）：按钮改名、状态流转 pending→running→pass/fail、running 中间态可观测、重跑重置、状态 CSS class、失败提示带步骤描述、高亮跟随 running 步并在结束后清理、无 locator 步跳过定位、`locateVisual` 抛错不中断、老内核无进度事件时回填（OCP）、**`playback` 单参调用回归守卫**、generation token 竞态（慢定位 vs 快速后续步、幽灵高亮框）、CFG children 命中、订阅解绑、畸形载荷忽略。
+  - `test/executor-progress.test.ts`（11 例）：`runScript`/`runCli` 进度钩子（进程内函数传递合法）+ `runNode` 坏子节点守卫。
+  - `test/bridge-ws-progress.test.ts`（7 例，**真 http server + 真 WebSocket**）：`step-progress` 经真实 WS 端到端送达、失败步 `failedStepId` 不为 undefined、CFG 循环按真实次数上报、载荷跨 JSON 往返完好、`null` script 与 `children:[null]` 被桥端拦截且不进执行器、多次运行不串台。
+  - `test/bridge-push.test.ts`：**仅追加** `assertRunnableScript` 递归深度校验用例（共 25 例）。
+- **实现（最终架构，与首版不同 — 见下方踩坑）**：
+  - 按钮"回放"→**"运行全部"**（`app.ts` action `run-all` → `shell.runAll()`）。
+  - 运行态 `StepRunStatus` 存 `UiShell` 内 `Map<stepId, status>`，**不入 `Step` 模型**（SRP：`Step` 要持久化，运行态是瞬时 UI 态）。
+  - 进度通道：`executor.runScript(…, onStep)` 逐叶子上报 → `cli.runCli` 透传 → `adapter.playback(script, onStep?)` → `bridge-server` 的 `playback` 专用分支 → `pushEvent('step-progress')` → `ws-kernel.on/off` → `shell.runAll()` 消费。**`UiKernel.playback` 保持单参**。
+  - 高亮跟随用 generation token（`highlightGen`）作废迟到/乱序的 `locateVisual` 结果；`runIndex` 一次性 Map 化避免每步 `flattenSteps()` 的 O(n²)。
+  - 边界：`assertRunnableScript` 递归深度校验（含 children 各层）+ 执行器 `childrenOf` 双保险；`STEP_TYPES`/`CONTROL_KINDS` 收敛为 `types/step.ts` 运行时常量单一真相源；`attachKernelBridge` 第三参可注入 adapter（DIP，使 WS 线路可测）。
+- **踩坑记录（4 轮可运行性打回 + 1 轮 code-review 打回，全部为 §4.1 同族问题）**：
+  1. **首版把进度回调放进 `playback(script, cb)` 参数位** —— `UiKernel` 有跨 WS 实现，函数不可 JSON 序列化，真机回调 100% 丢失，而 `tsc` + 单测（Mock 不过 WS）全绿。裁定重构为事件推送通道（进度源必须在 Node 进程内）。
+  2. 桥端 `req.args[0] as Script` 无守卫 → `playback(null)` 崩在 `null.steps`，被 `runCli` 吞成 `failedStepId:undefined` → UI 显示"(未知)"，静默误提示。
+  3. 只校验 `steps` 是数组不够 → `steps:[null]` 仍崩。
+  4. **`children:[null]` 与 `steps:[null]` 是同源递归缺陷** —— 只补顶层是治症不治因。收口为一次性递归深度校验，错误带 `steps[i].children[j]` 路径。
+  5. code-review 打回：①架构文档未同步（§5.2 阻断）；②`STEP_TYPES`/`CONTROL_KINDS` 在 bridge-server 重复列举，与 `types/step.ts` 双源漂移（OCP）；③`step-progress` 经真实 WS 这段无测试（只测了两岸未测桥），而这正是 §4.1 出事点 —— 根因是 `attachKernelBridge` 内部直接 `new PlaywrightCdpAdapter()` 使其不可测，**不可测本身即设计缺陷**，故开放注入点。
+- **校验**：`npm test` 164 通过 / 17 跳过；`npm run typecheck` 干净；runtime-runnability 第 5 轮**通过**（含 8 类坏数据实测 + 4 突变点）；test 角色**通过**（4/4 突变被捕获，无假绿；确认既有测试为纯追加）；code-review 3 项已修。
+- **未做**：真机端到端冒烟（需 9222 靶机）—— 见下方待办。
 
 ### 阶段 M3-R4：CFG 图形化视图（§2.7）
 - **worktree**：`feat/cfg-view`

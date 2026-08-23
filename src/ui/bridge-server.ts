@@ -8,8 +8,11 @@
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { IncomingMessage } from 'node:http';
 import { PlaywrightCdpAdapter } from '../cdp/adapter';
+import type { CdpAdapter, VisualRect } from '../cdp/adapter';
+import type { StepProgress } from '../executor/executor';
 import type { UiKernel } from './shell';
 import type { Script, Locator } from '../types/step';
+import { STEP_TYPES, CONTROL_KINDS } from '../types/step';
 
 type RpcReq = { id: number; method: keyof UiKernel; args: unknown[] };
 type RpcRes = { id: number; ok: true; result?: unknown } | { id: number; ok: false; error: string };
@@ -38,12 +41,119 @@ export function sanitizeArgs(args: unknown[]): unknown[] {
   return (args ?? []).map((a) => (a === null ? undefined : a));
 }
 
-/** 在已有 http server 上升级出 /kernel-ws 端点，桥接真机 adapter。 */
+// 校验用集合从 types/step.ts 的运行时常量派生（单一真相源）：
+// 新增 StepType / ControlKind 时只改 types/step.ts 一处，此处自动跟随，不会漂移。
+const STEP_TYPE_SET: ReadonlySet<string> = new Set<string>(STEP_TYPES);
+const CONTROL_KIND_SET: ReadonlySet<string> = new Set<string>(CONTROL_KINDS);
+
+const describeValue = (v: unknown): string =>
+  v === null ? 'null' : v === undefined ? 'undefined' : typeof v;
+
+/**
+ * 递归校验单个步骤节点。`path` 形如 `steps[1].children[0]`，用于把错误定位到具体坏数据。
+ *
+ * 为何要递归到 children：`steps:[null]` 与 `children:[null]` 是**同源缺陷** ——
+ * 执行器 runNode 递归调度 children 时同样读 `child.control`，
+ * 只补顶层等于治症不治因（可运行性审查第 3→4 轮正是被这一层复发打回）。
+ */
+function assertStepNode(node: unknown, path: string): void {
+  if (node == null || typeof node !== 'object') {
+    throw new Error(`playback 的 script.${path} 不是合法 step 对象（实际: ${describeValue(node)}）`);
+  }
+  const s = node as Record<string, unknown>;
+
+  // id 必须是字符串：进度事件以 stepId 为键回传给 UI，非字符串会让 UI 匹配不到步骤，
+  // 表现为"运行了但状态不更新"，同属静默失效。
+  if (typeof s.id !== 'string' || s.id === '') {
+    throw new Error(`playback 的 script.${path}.id 必须是非空字符串（实际: ${describeValue(s.id)}）`);
+  }
+
+  // type 必须在已知集合内：未知 type 会一路流到 invokeAction 才崩在动作分发层。
+  if (typeof s.type !== 'string' || !STEP_TYPE_SET.has(s.type)) {
+    throw new Error(
+      `playback 的 script.${path}.type 不是已知步骤类型（实际: ${String(s.type)}）；` +
+      `合法值: ${STEP_TYPES.join('/')}`,
+    );
+  }
+
+  // control 可省略（叶子步骤）；给了就必须是合法控制结构。
+  // 未知 kind 会被 runNode 的 switch 静默跳过 —— 步骤"看起来通过了"其实没执行，比崩溃更危险。
+  if (s.control !== undefined) {
+    const ctrl = s.control;
+    if (ctrl === null || typeof ctrl !== 'object') {
+      throw new Error(
+        `playback 的 script.${path}.control 必须是对象（实际: ${describeValue(ctrl)}）`,
+      );
+    }
+    const kind = (ctrl as { kind?: unknown }).kind;
+    if (typeof kind !== 'string' || !CONTROL_KIND_SET.has(kind)) {
+      throw new Error(
+        `playback 的 script.${path}.control.kind 不是已知控制流类型（实际: ${String(kind)}）；` +
+        `合法值: ${CONTROL_KINDS.join('/')}`,
+      );
+    }
+  }
+
+  // children 可省略；给了就必须是数组，且每个元素递归合法。
+  if (s.children !== undefined) {
+    if (!Array.isArray(s.children)) {
+      throw new Error(
+        `playback 的 script.${path}.children 必须是数组（实际: ${describeValue(s.children)}）`,
+      );
+    }
+    for (let j = 0; j < s.children.length; j++) {
+      assertStepNode(s.children[j], `${path}.children[${j}]`);
+    }
+  }
+}
+
+/**
+ * 校验跨 WS 送来的 script 可被执行（§4.1 清单 1）。
+ *
+ * 不加此校验时：`adapter.playback(null)` → `runScript` 读 `null.steps` 抛 TypeError
+ * → 被 `runCli` catch 吞成 `{ ok:false, failedStepId:undefined }`
+ * → UI 弹"运行中断于步骤:(未知)"，问题被静默掩盖、无从排查。
+ * 故在桥边界（不可信 JSON 的唯一入口）一次性递归收口，并回带路径的明确错误。
+ */
+export function assertRunnableScript(v: unknown): Script {
+  if (v == null || typeof v !== 'object') {
+    throw new Error(`playback 需要 script 对象，实际收到: ${describeValue(v)}`);
+  }
+  const steps = (v as { steps?: unknown }).steps;
+  if (!Array.isArray(steps)) {
+    throw new Error('playback 的 script.steps 必须是数组');
+  }
+  for (let i = 0; i < steps.length; i++) {
+    assertStepNode(steps[i], `steps[${i}]`);
+  }
+  return v as Script;
+}
+
+/** 桥端所需的 adapter 能力（DIP：桥只依赖此抽象，不绑定 Playwright 实现）。 */
+export type BridgeAdapter = CdpAdapter & {
+  screenshot(opts?: unknown): Promise<Buffer>;
+  locateVisual(loc: Locator): Promise<VisualRect>;
+  startRecording(onEvent?: (ev: unknown) => void): void;
+  stopRecording(): Promise<unknown[]>;
+  playback(script: Script, onStep?: StepProgress): Promise<{ ok: boolean; failedStepId?: string }>;
+};
+
+/**
+ * 在已有 http server 上升级出 /kernel-ws 端点，桥接真机 adapter。
+ *
+ * @param adapter 可选注入（DIP）。缺省构造 `PlaywrightCdpAdapter`，生产调用方
+ *   （`src/ui/serve.ts`）无需改动。开放此参数是为了让「真实 WS 线路」可被测试覆盖 ——
+ *   此前桥内部直接 `new PlaywrightCdpAdapter()`，导致 WS 线路必须有 9222 靶机才能测，
+ *   于是 `step-progress` 跨 WS 传输这段（恰是 CODEBUDDY.md §4.1 的出事点）长期无测试。
+ *   不可测本身即是设计缺陷，故在此收口。
+ */
 export function attachKernelBridge(
   server: import('node:http').Server,
   port = 9222,
+  // 直接赋值（不用 as unknown as 强转）：若将来 BridgeAdapter 收窄而
+  // PlaywrightCdpAdapter 未跟上，此处会**编译期报错**，而非被强转静默掩盖。
+  adapter: BridgeAdapter = new PlaywrightCdpAdapter(),
 ): { close: () => Promise<void> } {
-  const adapter = new PlaywrightCdpAdapter();
   let connected = false;
   const clients = new Set<WebSocket>();
 
@@ -98,6 +208,19 @@ export function attachKernelBridge(
           // 注册实时回调：录制中每捕获一个交互即广播给所有客户端（边操作边长步骤）。
           adapter.startRecording((ev) => pushEvent('recording', ev));
           send({ id: req.id, ok: true, result: undefined });
+          return;
+        }
+        if (method === 'playback') {
+          // 运行全部（R3）：函数不可跨 WS 传递，故在桥端注册进度回调，
+          // 用 R1 的单向推送通道把每步 running/pass/fail 下发给浏览器端。
+          // 必须走专门分支（同 startRecording），不能落到下方通用 fn.apply。
+          // 边界校验：null/undefined/缺 steps 直接回明确错误，
+          // 不让它流到 runScript 里变成 "failedStepId:undefined" 的静默误提示。
+          const script = assertRunnableScript(sanitizeArgs(req.args as unknown[])[0]);
+          const res = await adapter.playback(script, (stepId, status) =>
+            pushEvent('step-progress', { stepId, status }),
+          );
+          send({ id: req.id, ok: true, result: res });
           return;
         }
         const fn = (adapter as unknown as Record<string, (...a: unknown[]) => unknown>)[method];

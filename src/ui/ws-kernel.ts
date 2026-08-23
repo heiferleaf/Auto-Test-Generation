@@ -53,10 +53,15 @@ export class WsKernel implements UiKernel {
     });
   }
 
-  /** 订阅服务端主动推送的事件（如 'recording' 增量步骤）。 */
+  /** 订阅服务端主动推送的事件（如 'recording' 增量步骤、'step-progress' 运行进度）。 */
   on(event: string, cb: (data: unknown) => void): void {
     if (!this.eventListeners.has(event)) this.eventListeners.set(event, new Set());
     this.eventListeners.get(event)!.add(cb);
+  }
+
+  /** 退订：一次性订阅（如单次运行的进度）必须在结束时退订，否则多次运行回调叠加。 */
+  off(event: string, cb: (data: unknown) => void): void {
+    this.eventListeners.get(event)?.delete(cb);
   }
 
   private call<T>(method: string, ...args: unknown[]): Promise<T> {

@@ -3,7 +3,7 @@
 
 import type { CdpAdapter, ConnectOptions } from './cdp/adapter';
 import type { Script } from './types/step';
-import { runScript } from './executor/executor';
+import { runScript, type StepProgress } from './executor/executor';
 
 export type CliResult = { ok: boolean; failedStepId?: string };
 
@@ -12,6 +12,8 @@ export type RunCliOpts = {
   script: Script;
   /** 可选连接参数；注入已连接的 adapter 时可省略（如测试桩）。 */
   connectOpts?: ConnectOptions;
+  /** 可选逐步进度回调（M3-R3），透传给 runScript；仅进程内有效。 */
+  onStep?: StepProgress;
 };
 
 /**
@@ -21,12 +23,12 @@ export type RunCliOpts = {
  *   failedStepId 来自错误上的 stepId 字段（executor 已为普通 Error 追加 stepId）。
  */
 export async function runCli(opts: RunCliOpts): Promise<CliResult> {
-  const { adapter, script, connectOpts } = opts;
+  const { adapter, script, connectOpts, onStep } = opts;
 
   await adapter.connect(connectOpts);
 
   try {
-    await runScript(adapter, script);
+    await runScript(adapter, script, onStep);
     return { ok: true };
   } catch (err) {
     const stepId = (err as { stepId?: string }).stepId;

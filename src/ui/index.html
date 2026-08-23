@@ -55,6 +55,20 @@
     .ui-shell-step-idx { color: var(--muted); width: 20px; text-align: right; flex: none; }
     .ui-shell-step-desc { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+    /* 步骤运行态（R3 运行全部）：左侧色条 + 底色区分 pending/running/pass/fail */
+    .ui-shell-step-item.is-running { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+    .ui-shell-step-item.is-pass { box-shadow: inset 3px 0 0 #3fb950; }
+    .ui-shell-step-item.is-fail { border-color: #f85149; background: #43303a; box-shadow: inset 3px 0 0 #f85149; }
+
+    /* 运行中断提醒条 */
+    .ui-shell-run-notice {
+      margin: 0 16px 10px; padding: 9px 12px; border-radius: 6px; font-size: 13px;
+      background: #43303a; border: 1px solid #f85149; color: #ffb4ae;
+    }
+
+    /* 高亮占位框（坐标未到位时的即时反馈，虚线区分） */
+    .ui-shell-highlight.is-pending { border-style: dashed; opacity: .6; }
+
     /* 底部：操作栏 */
     .ui-shell-actions { display: flex; gap: 8px; padding: 10px 16px; background: var(--panel); border-top: 1px solid var(--line); flex-wrap: wrap; }
     .ui-shell-actions button {
