@@ -53,23 +53,26 @@ export class Recorder {
 
   /** 将累积事件转为 Step[]（不依赖 target 软件的纯逻辑）。 */
   toSteps(): Step[] {
-    return this.events.map((ev) => {
-      const step: Step = {
-        id: nextId(),
-        type: ev.type,
-        source: this.source,
-      };
-      if (ev.target !== undefined) step.target = ev.target;
-      if (ev.locator) step.locator = ev.locator;
-      if (ev.params) {
-        step.params = { ...ev.params };
-      }
-      // assert 类型需带 assertion（录制即断言场景），与是否有 params 无关。
-      if (ev.type === 'assert') {
-        step.params = { ...step.params, assertion: { kind: 'exists', locator: ev.locator } };
-      }
-      return step;
-    });
+    return this.events.map((ev) => this.toSingleStep(ev));
+  }
+
+  /** 将单个交互事件转为 Step（实时录制增量生成，避免全量重建）。 */
+  toSingleStep(ev: InteractionEvent): Step {
+    const step: Step = {
+      id: nextId(),
+      type: ev.type,
+      source: this.source,
+    };
+    if (ev.target !== undefined) step.target = ev.target;
+    if (ev.locator) step.locator = ev.locator;
+    if (ev.params) {
+      step.params = { ...ev.params };
+    }
+    // assert 类型需带 assertion（录制即断言场景），与是否有 params 无关。
+    if (ev.type === 'assert') {
+      step.params = { ...step.params, assertion: { kind: 'exists', locator: ev.locator } };
+    }
+    return step;
   }
 
   /** 构建完整 Script（含 app 元信息）。 */
