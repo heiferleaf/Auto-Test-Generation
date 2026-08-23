@@ -6,10 +6,49 @@ import type { Script, Step, Locator } from '../types/step';
 import { runAssertion, AssertionError } from './assert';
 import { invokeAction } from './actions';
 
-/** 执行整个脚本：按序执行每条 step；断言失败抛出带 stepId 的结构化错误。 */
+/** 执行整个脚本：对每条顶层 step 调递归 runNode。 */
 export async function runScript(adapter: CdpAdapter, script: Script): Promise<void> {
   for (const step of script.steps) {
-    await runStep(adapter, step);
+    await runNode(adapter, step);
+  }
+}
+
+/**
+ * 递归执行单个步骤节点（M3-R0 CFG）。
+ * - 控制流节点（sequence/if/while）按结构调度 children；
+ * - 叶子节点复用 runStep（selectTarget + 断言/动作分发）。
+ */
+async function runNode(adapter: CdpAdapter, node: Step): Promise<void> {
+  const ctrl = node.control;
+  if (!ctrl) {
+    await runStep(adapter, node);
+    return;
+  }
+  switch (ctrl.kind) {
+    case 'sequence':
+      for (const child of node.children ?? []) {
+        await runNode(adapter, child);
+      }
+      break;
+    case 'if': {
+      const result = ctrl.condition
+        ? await runAssertion(adapter, ctrl.condition)
+        : { passed: true };
+      const branches = node.children ?? [];
+      // children[0]=then, children[1]=else
+      const chosen = result.passed ? branches[0] : branches[1];
+      if (chosen) await runNode(adapter, chosen);
+      break;
+    }
+    case 'while': {
+      const count = ctrl.loopCount ?? 1;
+      for (let i = 0; i < count; i++) {
+        for (const child of node.children ?? []) {
+          await runNode(adapter, child);
+        }
+      }
+      break;
+    }
   }
 }
 
