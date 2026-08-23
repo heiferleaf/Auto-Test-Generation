@@ -124,6 +124,10 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   // M3 录制：累积当前 target 捕获的交互事件（仅在 startRecording 后生效）。
   private recording = false;
   private recorded: InteractionEvent[] = [];
+  /** 录制实时回调（边操作边长步骤）：startRecording 传入，stop 时置空。 */
+  private recordingListener: ((e: InteractionEvent) => void) | null = null;
+  /** 增量 drain 定时器句柄。 */
+  private recordingTimer: number | null = null;
   /** 浏览器级 CDP 会话（监听 Target.targetCreated，捕捉录制中途动态新增的 webview）。 */
   private recordBrowserWs?: WebSocket;
   /** 本轮录制已注入监听器的 target id 集合，避免重复注入。 */
@@ -298,13 +302,16 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
    * M3 录制：对所有已枚举 target（主 page + 每个 webview）注入交互监听器。
    * 事件累积在各自的 window.__recBuf；webview 内层通过 CdpTarget.evaluate 的 ctxId 注入。
    * 同时开启浏览器级 Target 监听，录制中途动态新增的 webview 也会被自动注入。
+   * @param onEvent 可选实时回调：录制中每捕获一个增量事件即调用（支撑"边操作边长步骤"）。
    */
-  startRecording(): void {
+  startRecording(onEvent?: (e: InteractionEvent) => void): void {
     // 先清理可能残留的监听 ws（防止连续两次 startRecording 未 stop 时句柄泄漏）。
     this.stopTargetWatch();
     this.recording = true;
     this.recorded = [];
     this.injectedTargets.clear();
+    this.recordingListener = onEvent ?? null;
+    this.recordingTimer = null;
     // 会话开始：先排空所有 target 的残留缓冲（监听器常驻，跨会话可能已累积），
     // 再注入录制脚本。后续 refreshTargets 触发的重复注入只注入不排空，避免清掉已捕获事件。
     for (const t of this.targets) {
@@ -313,12 +320,35 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     this.injectRecorderIntoTargets();
     // 再开启动态监听：中途新开的 webview 也能被录到。
     this.startTargetWatch();
+    // 实时增量轮询：周期性 drain 各 target 缓冲，把新增事件通过 onEvent 推给订阅者。
+    if (this.recordingListener) {
+      this.recordingTimer = setInterval(() => this.drainIncremental(), 250) as unknown as number;
+    }
+  }
+
+  /** 增量取回：drain 每个 target 缓冲，新增事件追加到 recorded 并推给 onEvent。 */
+  private async drainIncremental(): Promise<void> {
+    if (!this.recording || !this.recordingListener) return;
+    for (const t of this.targets) {
+      const buf = await t.target.evaluate<any[]>(RECORD_DRAIN).catch(() => []);
+      if (!Array.isArray(buf)) continue;
+      for (const e of buf) {
+        const ev: InteractionEvent = { ...(e as InteractionEvent), target: t.info.id };
+        this.recorded.push(ev);
+        this.recordingListener(ev);
+      }
+    }
   }
 
   /** M3 录制：停止监听并异步取回所有 target 累积的 InteractionEvent[]（按 target 标注）。 */
   async stopRecording(): Promise<InteractionEvent[]> {
     this.recording = false;
     this.stopTargetWatch();
+    if (this.recordingTimer !== null) {
+      clearInterval(this.recordingTimer);
+      this.recordingTimer = null;
+    }
+    this.recordingListener = null;
     const out: InteractionEvent[] = [];
     for (const t of this.targets) {
       const buf = await t.target.evaluate<any[]>(RECORD_DRAIN).catch(() => []);
