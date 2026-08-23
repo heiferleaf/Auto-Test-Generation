@@ -204,27 +204,42 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 > 基于 `docs/design/visual-mask-ui-spec.md` 与 `architecture.md §2.2/§2.3`。
 > 纪律：每个子任务在独立 worktree；先测试骨架再实现；过 test + code-review + runtime-runnability-review 三角色。
 
-### 阶段 M3-R0：CFG 步骤模型（内核，无 UI）
+#### 进度总览（每阶段开工/完成时必须同步本表 — CODEBUDDY.md §5 测试先行 + 计划维护）
+
+| 阶段 | 状态 | worktree | 合并提交 | 测试证据 |
+|---|---|---|---|---|
+| M3-R0 CFG 步骤模型 | ✅ 已合并 | `feat/cfg-step-model` | `00895da` | `test/cfg-step.test.ts` 9 通过 |
+| M3-R1 WS 推送通道 | ✅ 已合并 | `feat/ws-push-channel` | `bc13d86` | `test/bridge-push.test.ts` 6 通过 |
+| M3-R2 嵌入实时录制 | ✅ 已合并 | `feat/ws-push-channel` | `a654faa` | `test/ui-shell-live-recording.test.ts` 4 通过 |
+| M3-R3 运行全部 + 步骤态 + 高亮跟随 | ⏳ 进行中 | `feat/run-all` | — | 测试先写中 |
+| M3-R4 CFG 图形化视图 | ⬜ 未开始 | `feat/cfg-view` | — | — |
+| M3-R5 Git 式版本层 | ⬜ 未开始 | `feat/git-version` | — | — |
+
+> **测试代码权威性纪律（新增，因本轮违规而补）**：既有测试文件（含其 mock 基建，如 `test/ui-shell.test.ts` 的 `makeMockKernel`）**不得为迁就新实现而修改**。新能力需要新的 mock 行为时，新建独立测试文件并自带 mock，不动既有基建。
+
+### 阶段 M3-R0：CFG 步骤模型（内核，无 UI）— ✅ 已完成
 - **worktree**：`feat/cfg-step-model`
 - **测试先行**：`test/cfg-step.test.ts` 覆盖 `Step` 递归 children、control 三种、v2 schema IO 往返、v1 扁平兼容导入。
 - **实现**：`src/types/step.ts` 加 `children?`/`control?` + `SCRIPT_SCHEMA_V2`；`src/script/io.ts` 兼容 v1；`src/executor/executor.ts` 加递归 `runNode`（sequence/if/while），复用 `runStep`；`actions.ts`/`assert.ts` 不动。
 - **校验**：`npm test` + `npm run typecheck` + code-review（SOLID/OCP）+ runtime-runnability（executor 无 WS 边界，重点单测三控制流）。
 
-### 阶段 M3-R1：WS 桥主动推送通道（基础设施）
+### 阶段 M3-R1：WS 桥主动推送通道（基础设施）— ✅ 已完成
 - **worktree**：`feat/ws-push-channel`
 - **测试先行**：`test/bridge-push.test.ts` 用真 `WebSocket` 模拟：服务端主动推 event → 客户端 `onEvent` 收到；并对 `wait` 等方法传 `null` 入参断言桥端 `?? {}` 兜底不崩。
 - **实现**：`bridge-server.ts` 增加 event/push 消息类型（非 req/res）；`ws-kernel.ts` 的 `onmessage` 加 event 分支并暴露订阅；反射转发 `fn.apply` 前对 `req.args` 逐项 `?? {}`（覆盖 `wait` 等未兜底方法）。
 - **校验**：runtime-runnability 强制真机冒烟（`verify-ui-live.mjs` 扩展推流路径）。
 
-### 阶段 M3-R2：嵌入实时录制（边操作边长步骤）
-- **worktree**：`feat/live-recording`
-- **测试先行**：`test/ui-shell.test.ts` 扩展——录制中每收到 `onEvent` 即断言 `script.steps` 实时 +1（填补当前仅 stopRecording 批量的盲区）；真机 `ui-shell-live.test.ts` 加"录制中增长"断言。
+### 阶段 M3-R2：嵌入实时录制（边操作边长步骤）— ✅ 已完成
+- **worktree**：`feat/ws-push-channel`（与 R1 同树，因共享桥协议文件，避免并行冲突）
+- **测试先行**：**新建** `test/ui-shell-live-recording.test.ts`（`// @vitest-environment jsdom` + 自带 mock kernel，不改 `ui-shell.test.ts` 的 `makeMockKernel`）——录制中每收到 `onEvent` 即断言 `script.steps` 实时 +1、DOM 增量追加、重复事件去重、未订阅时不插入。
+- **实现落点**：`shell.ts` 增 `onRecordingEvent`/`appendStepEl`/`buildStepItem`（增量 DOM，非全量 render）+ `recordedKeys` 内容指纹去重；`recorder.ts` 抽 `toSingleStep`。
+- **踩坑记录**：去重最初用 `step.id` 失败——实时推送路径与 `stopRecording()` 返回路径对**同一次交互**各自生成不同 id，必须改用内容指纹（type/locator/params/target）。
 - **实现**：`shell.ts` 增 `appendStep(ev)` 增量路径（录制中每事件 `ScriptEditor.insert` + 增量 DOM 更新，非全量 render）；`bridge-server.ts`/`ws-kernel.ts` 复用 R1 推送把录制事件流下发；`app.ts` 录制开关默认边录边显。
 - **校验**：runtime-runnability 真机冒烟（真实靶机操作→列表实时增长）；高频重渲染优化（增量更新，CODEBUDDY.md §4.1 清单 7）。
 
-### 阶段 M3-R3：运行全部 + 步骤态 + 高亮跟随（P1）
+### 阶段 M3-R3：运行全部 + 步骤态 + 高亮跟随（P1）— ⏳ 进行中
 - **worktree**：`feat/run-all`
-- **测试先行**：`test/ui-shell.test.ts` 加"运行全部逐步回显 + 失败标红暂停提醒"；`playback` 改为流式（`onStepResult` 回调）。
+- **测试先行**：**新建** `test/ui-shell-run-all.test.ts`（jsdom + 自带 mock kernel，不动既有基建），断言：逐步 `status` 流转 pending→running→pass、失败步标 fail 且后续不再执行、失败提醒可见、running 步自动高亮且上一步高亮清除、`playback` 无 `onStepResult` 时兼容旧行为。
 - **实现**：操作栏加"运行全部"按钮；`Step` 加运行时 `status: pending|running|pass|fail`；`render` 据态加 class；高亮自动跟随当前步（P1）；`playback` 签名扩展流式但兼容旧。
 - **校验**：runtime-runnability 真机跑"运行全部"闭环 + 中途失败提醒。
 
