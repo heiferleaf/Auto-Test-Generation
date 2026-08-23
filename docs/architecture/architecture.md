@@ -60,22 +60,55 @@ UI 壳是「人操作界面」，与内核（CDP 适配层 / 录制 / 执行器�
 - 关键修复：adpater 连接统一用 `127.0.0.1`（避免 `localhost` 解析 `::1` IPv6 导致 `ECONNREFUSED`）。
 - **跨进程截图序列化**：`screenshot()` 返回 Node `Buffer`，经 WS 会变成 `{type:'Buffer',data:[...]}`（浏览器无法解码）。修复：`bridge-server.ts:serializeBuffers` 把结果中的 Buffer 递归转 base64（`{__base64}`），`ws-kernel.ts` 还原为浏览器可用的 base64 字符串；`UiShell.startFrameStream` 据此渲染到舞台 `<img>`，解决"蒙版看不到软件页面"。截图流数据路径由 `scripts/verify-ui-live.mjs` 硬断言保护（base64 长度 < 1000 即失败）。
 
-### 2.2 脚本版本管理（Git 式，待实现 P4）
+### 2.2 可视化蒙版范式与 CFG + Git 融合模型（正式设计）
 
-> 需求来源：用户提出"借鉴 git 的版本管理方式，在可视化蒙版中实现类似功能的脚本管理"。
-> 当前为**概念登记**，实现前本小节须细化为正式设计（见 `docs/plan/plan.md` 待做需求 P4）。
+> 来源：用户明确要求"嵌入靶机实时交互生成步骤"（pass 掉回头看）、"以顺序/选择/循环三种控制结构组织步骤、参考 CFG"、"Git 式版本管理仅在最外层顺序组支持切分支"。
+> 完整交互规格见 `docs/design/visual-mask-ui-spec.md`。本文档为架构单一真相源，须与其同步。
 
-**核心模型**：脚本从"线性 `Step[]`"升级为"带版本的提交图"。
-- 每个 **Step** = 当前分支上的一次 **commit**（步骤快照）。
-- 从某一步骤可**迁出新分支**，在新分支修改步骤而不影响原分支。
-- 支持 **cherry-pick** 其他分支的步骤到当前分支；并借鉴 git 的 tag / diff / 回滚 / merge-rebase 思路。
+**范式**：蒙版**嵌入靶机叠加层**，用户在软件内直接操作 → 交互经 WS 回传 → **实时追加步骤到 UI 列表**（非停止后批量）。截图流仅用于单步/运行态高亮查看。
 
-**架构落点（草案）**：
-- 新增"版本层"模块，复用 `src/script/io.ts`（导入导出）与 `ScriptEditor` 不可变操作（每次编辑生成新提交而非覆盖 `Step[]`）。
-- `UiKernel` 视情况上提版本操作（commit/branch/checkout/cherryPick），或作为 `ScriptEditor` 的版本装饰器，保持 UI 壳仅依赖抽象（§2.1 DIP 不变）。
-- UI 壳新增：步骤历史时间线、从某步开分支、分支切换、cherry-pick、步骤级 diff 视图。
+**步骤模型（CFG 树，加法式升级 `src/types/step.ts`）**
+- `Step` 增加可选递归字段：`children?: Step[]`、`control?: { kind: 'sequence'|'if'|'while'; condition?: Assertion; loopCount?: number }`。
+- 叶子步骤 = 现有 8 个 `StepType`（click/fill/select/wait/assert/hover/eval/snapshot）。
+- `assert` 复用为"选择组"的判断条件；`wait` 分 `wait(waitMs)` 与 `waitUntil(assertion,timeoutMs)`；`repeat` 由 `control.kind='while'` + `loopCount` 表达（循环体=children）。
+- `Script.steps` 仍为 `Step[]`（元素自身可带 children），旧脚本向后兼容。
+- schema 升到 `v2`（`SCRIPT_SCHEMA_V2`），`io.ts` 兼容 v1 扁平导入。
 
-**影响**：属架构变更，实现前须同步 `docs/requirements/requirements.md` 与本节；code-review 角色据此核查（CODEBUDDY.md §5.1/§5.2）。
+**执行器（递归 `runNode`，`src/executor/executor.ts`）**
+- `runScript` 改为对每元素调用新增递归 `runNode(node)`：sequence 遍历 children、if 求值 `condition` 后分支、while 按 `loopCount` 回退 children。
+- 单叶子步骤逻辑（`selectTarget` + 断言/动作分发）原样复用；`actions.ts`/`assert.ts` 注册表不动（OCP）。
+
+**WS 桥主动推送通道（§2.3 关键设施）**
+- 当前 `bridge-server.ts` 为纯 req/res；需新增服务端主动推送消息类型（区分 req/res/event），供"录制增量事件"与"运行逐步进度"下发。
+- 边界兜底：除已修的 `screenshot` 外，桥端反射转发 `fn.apply(adapter, req.args)` 须对每方法入参做 `arg ?? {}`（尤其 `wait`），杜绝 `null` 陷阱（CODEBUDDY.md §4.1）。
+
+**Git 式版本层（与 CFG 融合）**
+- **版本节点 = 最外层顺序组**（Sequential Group），非单个 Step；仅最外层顺序组支持切分支（选择/循环组内不可切，保控制流合法）。
+- 一个 Script = 一条分支链（含嵌套控制结构）；整个脚本库 = 一个仓库。
+- 功能 7 项：commit / branch / switch / cherry-pick / history(CFG 融合图) / tag / diff；砍 reset / merge / rebase。
+- 落点：新增 `src/script/version-store.ts`（提交树 + 不可变更新），UI 壳 `src/ui/version-panel.ts`（SRP）；`UiKernel` **不**上提版本操作（保持 DIP，版本状态在 UI 侧/本地）。
+
+**增量渲染**：`UiShell.render()` 当前全量 `innerHTML=''`，实时生成与逐步状态会带来高频重渲染；须改为增量 DOM 更新（按 stepId diff）或视图虚拟化，避免步骤多时卡顿（CODEBUDDY.md §4.1 清单 7）。
+
+---
+
+### 2.3 模块边界与改动面（实现架构）
+
+| 模块 | 文件 | 职责 | 本次改动 |
+|---|---|---|---|
+| 步骤类型 | `src/types/step.ts` | CFG 递归字段 + v2 schema | 加法扩展（兼容 v1） |
+| 执行器 | `src/executor/executor.ts` | 线性→递归 `runNode` | 新增递归调度，复用 `runStep` |
+| 脚本 IO | `src/script/io.ts` | schema 校验 + 往返 | 增 v2 常量、children 浅校验 |
+| 录制内核 | `src/recorder/recorder.ts` + `inject.ts` | 产出扁平叶子 | 不改（仍产叶子）；增量推送在桥/UI 层 |
+| UI 壳 | `src/ui/shell.ts` | 编排 + 增量渲染 | 增量 append + 步骤态 + CFG 视图挂载 |
+| CFG 视图 | `src/ui/cfg-view.ts`（新） | 图形化控制流 | 新增组件（SRP） |
+| 版本面板 | `src/ui/version-panel.ts`（新） | Git 式版本操作 | 新增组件（SRP） |
+| WS 桥 | `src/ui/bridge-server.ts` + `ws-kernel.ts` | RPC + 推送 | 加 event/push 消息类型 + 全方法 `?? {}` 兜底 |
+| 页面 | `src/ui/index.html` | 四区→加 cfg/version 区 | CSS 扩展 |
+
+**依赖方向**（DIP 不变）：`cfg-view` / `version-panel` / `shell` 仅依赖 `UiKernel` 抽象与 `Script`/`Step` 类型，不 import 执行器/playwright。
+
+**影响**：属架构变更（步骤模型 + 执行器 + 桥协议），code-review 角色须核查本小节同步性（CODEBUDDY.md §5.1/§5.2）。
 
 ---
 

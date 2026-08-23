@@ -199,6 +199,53 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 
 ---
 
+## M3 重做实施计划（嵌入实时生成 + CFG + Git 版本）
+
+> 基于 `docs/design/visual-mask-ui-spec.md` 与 `architecture.md §2.2/§2.3`。
+> 纪律：每个子任务在独立 worktree；先测试骨架再实现；过 test + code-review + runtime-runnability-review 三角色。
+
+### 阶段 M3-R0：CFG 步骤模型（内核，无 UI）
+- **worktree**：`feat/cfg-step-model`
+- **测试先行**：`test/cfg-step.test.ts` 覆盖 `Step` 递归 children、control 三种、v2 schema IO 往返、v1 扁平兼容导入。
+- **实现**：`src/types/step.ts` 加 `children?`/`control?` + `SCRIPT_SCHEMA_V2`；`src/script/io.ts` 兼容 v1；`src/executor/executor.ts` 加递归 `runNode`（sequence/if/while），复用 `runStep`；`actions.ts`/`assert.ts` 不动。
+- **校验**：`npm test` + `npm run typecheck` + code-review（SOLID/OCP）+ runtime-runnability（executor 无 WS 边界，重点单测三控制流）。
+
+### 阶段 M3-R1：WS 桥主动推送通道（基础设施）
+- **worktree**：`feat/ws-push-channel`
+- **测试先行**：`test/bridge-push.test.ts` 用真 `WebSocket` 模拟：服务端主动推 event → 客户端 `onEvent` 收到；并对 `wait` 等方法传 `null` 入参断言桥端 `?? {}` 兜底不崩。
+- **实现**：`bridge-server.ts` 增加 event/push 消息类型（非 req/res）；`ws-kernel.ts` 的 `onmessage` 加 event 分支并暴露订阅；反射转发 `fn.apply` 前对 `req.args` 逐项 `?? {}`（覆盖 `wait` 等未兜底方法）。
+- **校验**：runtime-runnability 强制真机冒烟（`verify-ui-live.mjs` 扩展推流路径）。
+
+### 阶段 M3-R2：嵌入实时录制（边操作边长步骤）
+- **worktree**：`feat/live-recording`
+- **测试先行**：`test/ui-shell.test.ts` 扩展——录制中每收到 `onEvent` 即断言 `script.steps` 实时 +1（填补当前仅 stopRecording 批量的盲区）；真机 `ui-shell-live.test.ts` 加"录制中增长"断言。
+- **实现**：`shell.ts` 增 `appendStep(ev)` 增量路径（录制中每事件 `ScriptEditor.insert` + 增量 DOM 更新，非全量 render）；`bridge-server.ts`/`ws-kernel.ts` 复用 R1 推送把录制事件流下发；`app.ts` 录制开关默认边录边显。
+- **校验**：runtime-runnability 真机冒烟（真实靶机操作→列表实时增长）；高频重渲染优化（增量更新，CODEBUDDY.md §4.1 清单 7）。
+
+### 阶段 M3-R3：运行全部 + 步骤态 + 高亮跟随（P1）
+- **worktree**：`feat/run-all`
+- **测试先行**：`test/ui-shell.test.ts` 加"运行全部逐步回显 + 失败标红暂停提醒"；`playback` 改为流式（`onStepResult` 回调）。
+- **实现**：操作栏加"运行全部"按钮；`Step` 加运行时 `status: pending|running|pass|fail`；`render` 据态加 class；高亮自动跟随当前步（P1）；`playback` 签名扩展流式但兼容旧。
+- **校验**：runtime-runnability 真机跑"运行全部"闭环 + 中途失败提醒。
+
+### 阶段 M3-R4：CFG 图形化视图（§2.7）
+- **worktree**：`feat/cfg-view`
+- **测试先行**：`test/cfg-view.test.ts` 用 mock `Script`（含 if/while 嵌套）断言图节点/边/高亮联动生成正确。
+- **实现**：新 `src/ui/cfg-view.ts`（SRP）从 `Script` 构建控制流图（顺序竖向、选择分叉、循环回环）；与步骤列表双向联动；`index.html` 加 `.ui-shell-cfg` 区。
+- **校验**：code-review 查 SRP/ISP；runtime-runnability 真机渲染无崩。
+
+### 阶段 M3-R5：Git 式版本层（§2.2/§6）
+- **worktree**：`feat/git-version`
+- **测试先行**：`test/git-version.test.ts` 覆盖 commit/branch(仅最外层顺序组)/switch/cherry-pick/diff，断言版本树还原一致；跨分支 cherry-pick 后改参落新提交。
+- **实现**：新 `src/script/version-store.ts`（提交树 + 不可变更新，版本节点=最外层顺序组）；新 `src/ui/version-panel.ts`（SRP）分支切换/cherry-pick/tag/diff（融合 CFG 视图）；`UiKernel` 不上提版本（保 DIP）。
+- **校验**：code-review 查 DIP/架构同步；runtime-runnability 真机版本操作冒烟。
+
+### 合并纪律
+- 各阶段在 worktree 内过三角色校验后合并 master（保留 worktree 目录，用户要求不删）。
+- 每阶段若触及 `src/types/step.ts`/桥协议/模块边界，须同步 `architecture.md §2.2/§2.3`（§5.2）。
+
+---
+
 ## 待做需求（Pending Backlog）
 
 > 以下为已完成 M3 主体后，用户明确提出的后续需求，按"先落到计划、再排期实现"原则登记。
