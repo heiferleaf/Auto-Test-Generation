@@ -182,8 +182,13 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
    * 回放能力（UiKernel.playback）：编排 runCli 按脚本驱动本适配器。
    * UI 壳只调用此方法，不直接依赖执行器/playwright 链（DIP）。
    */
-  async playback(script: Script): Promise<{ ok: boolean; failedStepId?: string }> {
-    return runCli({ adapter: this, script });
+  async playback(
+    script: Script,
+    onStep?: import('../executor/executor').StepProgress,
+  ): Promise<{ ok: boolean; failedStepId?: string }> {
+    // onStep 仅在同进程内调用（bridge-server 传入以转推给浏览器端）；
+    // 跨 WS 的 WsKernel 不传此参数——函数不可序列化，详见 CODEBUDDY.md §4.1。
+    return runCli({ adapter: this, script, onStep });
   }
 
   listTargets(): TargetInfo[] {

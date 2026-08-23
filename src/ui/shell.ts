@@ -18,12 +18,30 @@ import { SCRIPT_SCHEMA } from '../types/step';
 /** 回放结果（与 cli.CliResult 同构，但由内核产生，UI 壳不依赖 cli 模块）。 */
 export type PlaybackResult = { ok: boolean; failedStepId?: string };
 
-/** UI 壳所需的完整内核能力（抽象接口并集）。 */
+/**
+ * 步骤运行态（R3）：仅 UI 瞬时状态，**不写入 Step 模型**。
+ * 理由（SRP）：`Step` 是持久化数据（导出写盘、进 R5 版本层 diff），
+ * 若把 pass/fail 混入会污染脚本文件与版本差异。故旁挂于 UiShell。
+ */
+export type StepRunStatus = 'pending' | 'running' | 'pass' | 'fail';
+
+/** 运行进度事件载荷（服务端经 'step-progress' 推送）。 */
+export type StepProgressEvent = { stepId: string; status: StepRunStatus };
+
+/**
+ * UI 壳所需的完整内核能力（抽象接口并集）。
+ *
+ * 重要约束（CODEBUDDY.md §4.1）：本接口会被 `WsKernel` 跨 WebSocket 实现，
+ * 因此**所有方法参数必须 JSON-可序列化**。逐步进度不能以回调函数入参传递
+ * （`JSON.stringify(fn)` → undefined，真机上必然丢失），只能走 `on/off` 推送通道。
+ */
 export type UiKernel = CdpAdapter & VisualCapable & Recordable & {
-  /** 按脚本回放（内核职责：真机驱动 adapter / 演示返回假结果）。 */
+  /** 按脚本回放（内核职责：真机驱动 adapter / 演示返回假结果）。签名保持单参。 */
   playback(script: Script): Promise<PlaybackResult>;
-  /** 订阅服务端主动推送事件（录制增量等）；可选，DemoKernel 可不实现。 */
+  /** 订阅服务端主动推送事件（'recording' 录制增量 / 'step-progress' 运行进度）；可选。 */
   on?(event: string, cb: (data: unknown) => void): void;
+  /** 退订；与 on 配对，供单次运行结束后清理。可选（旧内核可不实现）。 */
+  off?(event: string, cb: (data: unknown) => void): void;
 };
 
 export type UiShellOptions = {
@@ -263,12 +281,178 @@ export class UiShell {
     this.insertStep(step);
   }
 
-  // ---- 回放 ----
+  // ---- 运行全部（R3）----
 
-  async playback(): Promise<PlaybackResult> {
-    const res = await this.kernel.playback(this.getScript());
+  /** 步骤运行态旁挂表（stepId → status）；不入 Step 模型，见 StepRunStatus 注释。 */
+  private stepStatus = new Map<string, StepRunStatus>();
+  /** 上一次运行的失败步 id（用于失败提醒渲染）。 */
+  private lastFailedStepId?: string;
+
+  /** 运行态变化钩子：宿主/测试可观察逐步流转（含 running 中间态）。 */
+  onStepStatusChange?: (stepId: string, status: StepRunStatus) => void;
+
+  /** 查询某步运行态；未跑过默认 pending。 */
+  getStepStatus(stepId: string): StepRunStatus {
+    return this.stepStatus.get(stepId) ?? 'pending';
+  }
+
+  /** 扁平化脚本步骤（含 CFG children），供状态查找与汇总回填按序遍历。 */
+  private flattenSteps(steps: Step[] = this.script.steps): Step[] {
+    const out: Step[] = [];
+    for (const s of steps) {
+      out.push(s);
+      if (s.children?.length) out.push(...this.flattenSteps(s.children));
+    }
+    return out;
+  }
+
+  /** 单次运行内的 id→Step 索引（O(1) 查找），避免每步重建扁平数组（O(n²)→O(n)）。 */
+  private runIndex?: Map<string, Step>;
+
+  /**
+   * 高亮"代际号"：每次 runAll 开始 ++、结束再 ++。
+   * 迟到的异步 locateVisual 回调若携带的代际 ≠ 当前代际，则丢弃其渲染。
+   * 目的（可运行性审查结论）：同时消除两类缺陷 ——
+   *  (1) 多步快速执行时 locateVisual 乱序 resolve 导致高亮停在旧步；
+   *  (2) 运行结束 finally 清屏后，迟到渲染又画上"幽灵框"且永不清除。
+   * 仅用"当前步 id 守卫"治不了 (2)（结束时当前步仍是末步，守卫会放行）。
+   */
+  private highlightGen = 0;
+
+  /**
+   * 运行当前所有步骤（原「回放」，spec §2.3.4 改名「运行全部」）。
+   * 流式：每步 running/pass/fail 即时回显，并让高亮自动跟随当前步（P1）。
+   * 兼容：内核若忽略 onStepResult（旧实现），据汇总结果回填状态。
+   */
+  async runAll(): Promise<PlaybackResult> {
+    this.resetRunStatus();
+    // 本次运行的步骤索引快照：单次构建，后续每步 O(1) 命中（避免 O(n²) 重复扁平化）。
+    this.runIndex = new Map(this.flattenSteps().map((s) => [s.id, s]));
+    const gen = ++this.highlightGen;
+    let sawProgress = false;
+
+    /** 进度监听器：经内核推送通道接收，而非以回调入参传给 playback（RPC 不可序列化函数）。 */
+    const onProgress = (data: unknown) => {
+      // 跨 WS 边界兜底：不依赖解构默认值，显式 ?? {}（§4.1 清单 1）。
+      const d = (data ?? {}) as Partial<StepProgressEvent>;
+      const stepId = d.stepId;
+      const status = d.status;
+      if (!stepId || !status) return;
+      sawProgress = true;
+      if (status === 'running') {
+        // 顺序要求：先画占位框、再广播状态钩子，否则观察者在钩子里看到的高亮会滞后一步。
+        // 同步画占位框的理由（可运行性审查裁定）：真机 locateVisual 往返可达上百 ms，
+        // 若等它回来才画，用户会看到高亮明显滞后于执行；坐标随后精修。
+        this.renderHighlight(stepId, this.lastRect, gen);
+      }
+      this.setStepStatus(stepId, status);
+      if (status === 'running') {
+        // 精修不 await（推送回调为同步契约），失败静默不打断运行。
+        void this.followHighlight(stepId, gen);
+      }
+    };
+
+    this.kernel.on?.('step-progress', onProgress);
+
+    let res: PlaybackResult;
+    try {
+      res = await this.kernel.playback(this.getScript());
+    } finally {
+      // 退订必须与订阅配对，否则多次 runAll 的回调会叠加。
+      this.kernel.off?.('step-progress', onProgress);
+      // 先作废本代际，再清屏：此后任何迟到渲染都会被代际守卫丢弃。
+      this.highlightGen++;
+      this.clearHighlight();
+      this.runIndex = undefined;
+    }
+
+    // 内核不支持进度推送（DemoKernel / 纯批处理）时，据汇总结果回填。
+    if (!sawProgress) this.backfillStatus(res);
+    this.lastFailedStepId = res.ok ? undefined : res.failedStepId;
     this.render();
     return res;
+  }
+
+  /** 兼容旧「回放」入口（既有调用方零改动）。 */
+  async playback(): Promise<PlaybackResult> {
+    return this.runAll();
+  }
+
+  private resetRunStatus(): void {
+    this.stepStatus.clear();
+    this.lastFailedStepId = undefined;
+  }
+
+  private setStepStatus(stepId: string, status: StepRunStatus): void {
+    this.stepStatus.set(stepId, status);
+    this.onStepStatusChange?.(stepId, status);
+  }
+
+  /** 无流式回调时，按汇总结果回填：失败步前视为 pass，失败步 fail，其后 pending。 */
+  private backfillStatus(res: PlaybackResult): void {
+    const flat = this.flattenSteps();
+    if (res.ok) {
+      for (const s of flat) this.stepStatus.set(s.id, 'pass');
+      return;
+    }
+    for (const s of flat) {
+      if (s.id === res.failedStepId) {
+        this.stepStatus.set(s.id, 'fail');
+        break;
+      }
+      this.stepStatus.set(s.id, 'pass');
+    }
+  }
+
+  // ---- 高亮跟随（P1）----
+
+  /** 上一次成功定位的坐标：新步骤占位框先沿用它，避免 CDP 往返期间无反馈。 */
+  private lastRect?: VisualRect;
+
+  /** 按 id 取步骤：运行期走索引 O(1)，非运行期回退遍历。 */
+  private findStep(stepId: string): Step | undefined {
+    if (this.runIndex) return this.runIndex.get(stepId);
+    return this.flattenSteps().find((s) => s.id === stepId);
+  }
+
+  /** 定位当前步元素并精修高亮框坐标；无 locator 或定位失败则静默跳过。 */
+  private async followHighlight(stepId: string, gen: number): Promise<void> {
+    const loc = this.findStep(stepId)?.locator;
+    if (!loc) return;
+    try {
+      const rect = await this.kernel.locateVisual(loc);
+      this.lastRect = rect;
+      this.renderHighlight(stepId, rect, gen);
+    } catch (err) {
+      // 高亮是辅助能力：元素消失/未连接等失败不得中断运行全部。
+      console.warn('[UiShell] 高亮跟随失败（不影响运行）:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  /**
+   * 渲染唯一高亮框（先清旧再画新，保证舞台上恒有 0 或 1 个）。
+   * @param gen 发起时的代际号；不传=手动高亮（不受运行代际约束）。
+   *            传入且与当前代际不符 → 本次渲染已作废，直接丢弃。
+   */
+  private renderHighlight(stepId: string, rect: VisualRect | undefined, gen?: number): void {
+    if (gen !== undefined && gen !== this.highlightGen) return; // 迟到/乱序渲染作废
+    this.clearHighlight();
+    const stage = this.mount.querySelector('[data-stage]') as HTMLElement | null;
+    if (!stage) return;
+    const r = rect ?? { x: 0, y: 0, width: 0, height: 0, visible: false, inViewport: false };
+    const box = document.createElement('div');
+    box.className = 'ui-shell-highlight' + (rect ? '' : ' is-pending');
+    box.setAttribute('data-highlight', 'true');
+    box.setAttribute('data-highlight-step', stepId);
+    box.style.cssText =
+      `position:absolute;left:${r.x}px;top:${r.y}px;` +
+      `width:${r.width}px;height:${r.height}px;` +
+      'border:2px solid #ff5252;pointer-events:none;box-sizing:border-box;';
+    stage.appendChild(box);
+  }
+
+  private clearHighlight(): void {
+    this.mount.querySelectorAll('[data-highlight]').forEach((el) => el.remove());
   }
 
   // ---- 可视化 ----
@@ -381,11 +565,23 @@ export class UiShell {
     addBtn('插入步骤', 'insert', 'primary');
     addBtn('加断言', 'add-assert');
     addBtn('开始录制', 'toggle-record');
-    addBtn('回放', 'playback');
+    addBtn('运行全部', 'run-all');
     addBtn('高亮示例', 'highlight');
     addBtn('导出', 'export');
     addBtn('清空', 'clear', 'danger');
     root.appendChild(actions);
+
+    // 运行失败提醒（spec §2.3.4：中途失败需暂停提醒，指明失败步骤）
+    if (this.lastFailedStepId) {
+      const failed = this.flattenSteps().find((s) => s.id === this.lastFailedStepId);
+      const notice = document.createElement('div');
+      notice.className = 'ui-shell-run-notice';
+      notice.setAttribute('data-run-notice', 'true');
+      notice.textContent = failed
+        ? `运行中断：第 ${this.flattenSteps().indexOf(failed) + 1} 步「${describeStep(failed)}」失败，请检查后重跑。`
+        : `运行中断：步骤 ${this.lastFailedStepId} 失败。`;
+      root.appendChild(notice);
+    }
 
     // 中间：被测软件视图（截图流 <img> + 高亮层）
     const stage = document.createElement('div');
@@ -418,9 +614,11 @@ export class UiShell {
   /** 构造单条步骤 DOM 项（render 与增量 append 复用）。 */
   private buildStepItem(step: Step, idx: number): HTMLElement {
     const item = document.createElement('div');
-    item.className = 'ui-shell-step-item';
+    const status = this.getStepStatus(step.id);
+    item.className = `ui-shell-step-item is-${status}`;
     item.setAttribute('data-step-item', String(idx));
     item.setAttribute('data-step-id', step.id);
+    item.setAttribute('data-step-status', status);
     const desc = document.createElement('span');
     desc.className = 'ui-shell-step-desc';
     desc.textContent = `${idx + 1}. ${describeStep(step)}`;

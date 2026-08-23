@@ -44,8 +44,27 @@ class DemoKernel implements UiKernel {
       { type: 'fill', locator: { testId: 'username' }, params: { value: 'demo_user' } },
     ] as any;
   }
-  async playback(_script: import('../types/step').Script) {
-    log('playback', _script.steps.length, 'steps');
+  /** 演示用事件通道（与 WsKernel 的 on/off 同形，让演示模式也能看到逐步回显）。 */
+  private listeners = new Map<string, Set<(d: unknown) => void>>();
+  on(event: string, cb: (d: unknown) => void) {
+    if (!this.listeners.has(event)) this.listeners.set(event, new Set());
+    this.listeners.get(event)!.add(cb);
+  }
+  off(event: string, cb: (d: unknown) => void) {
+    this.listeners.get(event)?.delete(cb);
+  }
+  private emit(event: string, data: unknown) {
+    this.listeners.get(event)?.forEach((cb) => cb(data));
+  }
+
+  async playback(script: import('../types/step').Script) {
+    log('playback', script.steps.length, 'steps');
+    // 演示逐步进度：与真机桥经 'step-progress' 推送的形态一致（UiShell 不感知差异）。
+    for (const s of script.steps) {
+      this.emit('step-progress', { stepId: s.id, status: 'running' });
+      await new Promise((r) => setTimeout(r, 300));
+      this.emit('step-progress', { stepId: s.id, status: 'pass' });
+    }
     return { ok: true } as const;
   }
 }
@@ -130,9 +149,11 @@ function boot() {
         refreshHeader();
         break;
       }
-      case 'playback': {
-        const r = await shell.playback();
-        alert(r.ok ? '回放成功' : `回放失败: ${r.failedStepId ?? ''}`);
+      case 'run-all': {
+        // 运行全部（R3，原「回放」）：步骤态与高亮由 shell 内部经进度推送实时回显，
+        // 此处只在中断时给汇总提示；失败详情由 shell 渲染的失败提醒条呈现。
+        const r = await shell.runAll();
+        if (!r.ok) alert(`运行中断于步骤: ${r.failedStepId ?? '(未知)'}`);
         break;
       }
       case 'highlight': {
