@@ -1,0 +1,140 @@
+
+# 技术选型手册
+
+## 1 总原则
+
+| 原则        | 含义                                       |
+| --------- | ---------------------------------------- |
+| 控制面与智能面分离 | CDP/执行器负责「做」；Agent 负责「想与生成」；脚本负责「固化」     |
+| 一种步骤模型打通  | 录制、Agent 轨迹、导入导出、MCP Tool 共用同一 JSON 步骤结构 |
+| 触发与执行解耦   | 版本监听只负责发事件；执行器消费「脚本任务」或「Agent 任务」        |
+| 先稳后慧      | P0 脚本闭环可上线；Agent 与自愈作增强                  |
+
+---
+
+## 2 分层架构
+
+text
+
+```
+┌─────────────────────────────────────────┐
+│  触发层：版本监听 / 手动 / CI            │
+├─────────────────────────────────────────┤
+│  任务层：脚本任务 | Agent 任务模板        │
+├─────────────────────────────────────────┤
+│  Skill：测试场景策略、如何快照/导出/修复   │
+├─────────────────────────────────────────┤
+│  MCP Server：Tool（连接/录制/执行/导入…） │
+├─────────────────────────────────────────┤
+│  执行器：步骤解释器 + 断言                │
+├─────────────────────────────────────────┤
+│  CDP 适配层：Playwright / connectOverCDP │
+├─────────────────────────────────────────┤
+│  目标：Electron 客户端（Chromium 渲染）   │
+└─────────────────────────────────────────┘
+```
+
+---
+
+## 3 选型对照
+
+### A. 应用控制
+
+|方案|适用|建议|
+|---|---|---|
+|**CDP + Playwright（connectOverCDP / _electron）**|Electron 渲染 UI|**主选**|
+|agent-browser 等 CLI|Agent/Skill 快速集成|可作 Agent 侧辅路|
+|Computer Use（截图+键鼠）|原生菜单、系统框、无 CDP|**降级辅路**|
+|纯 UIAutomation 坐标|不推荐作主路径|仅兜底|
+
+**端口**：统一可配置，默认 9222；与 HTTP 代理无冲突（本地入站 vs 出站代理）。
+
+**多应用靶机（方案 C 通用性）**：CDP 适配层以 `webSocketDebuggerUrl` 为唯一入口，`WebviewCdpTarget` 不绑定任何具体应用。因此 CodeBuddy CN 与 WorkBuddy 等 Electron 应用共用同一套 Target 抽象，仅需各自一份靶机配置（端口 + 启动脚本），无需新增 Target 类。靶机清单集中维护于 `scripts/targets.json`，启动脚本（如 `scripts/launch-workbuddy.cmd`）负责以 `--remote-debugging-port` 拉起应用并自检 exe 存在。
+
+### B. Agent 与 Skill
+
+|能力|选型建议|
+|---|---|
+|浏览器/Electron 操作 Skill|基于现有 Electron/browser Skill 裁剪为「测试向 Skill」|
+|现场执行|宿主：Claude Code / Cursor / Codex 等 + 自研 MCP|
+|导出脚本|Skill 约定轨迹 → 标准步骤 JSON，禁止只留自然语言日志|
+
+### C. MCP Server
+
+**自研 MCP**（推荐），Tool 最小集：
+
+- app.connect / app.disconnect / app.list_targets
+- page.snapshot
+- actions.execute_steps（执行脚本）
+- record.start / record.stop / record.get_steps
+- script.import / script.export / script.update_step
+- assert.run
+- （P1）agent.suggest_steps / agent.repair_steps
+
+实现语言：TypeScript（与 Playwright/MCP 生态一致）或 Python（与现有自动化栈一致），二选一主栈即可。
+
+### D. 步骤模型（概念）
+
+每步建议字段：id、type（click/fill/select/wait/assert/…）、locator（优先 role/name/text/testid）、params、expect（可选）、source（manual|agent|repaired）、meta（窗口/时间）。
+
+### E. 版本更新触发
+
+|组件|选型|
+|---|---|
+|文件/版本监听|Python watchdog / Node chokidar；版本号可读 exe 或应用自有 version 文件|
+|防抖与「更新完成」|延迟确认 + 进程状态 + 可选「连续 N 秒版本不变」|
+|触发 Agent|调用宿主 API/CLI 创建任务（传入任务模板 ID、新版本号、连接参数）；或向队列投递任务由 Worker 拉起 Agent|
+|触发脚本|直接调 MCP actions.execute_steps 或本地执行器 CLI|
+
+**结论**：更新触发 Agent **可行**，关键是产品上提供「Agent 任务模板」与「脚本」两种可绑定对象，触发器只发事件。
+
+### F. 录制与润色 UI
+
+|阶段|建议|
+|---|---|
+|MVP|独立控制台：步骤列表编辑 + CDP 高亮元素；不强制应用内重蒙版|
+|增强|透明叠加层显示序号；点选步骤定位|
+|数据|全程步骤 JSON，导入导出与 MCP 一致|
+
+**录制实现要点（M3，适配器层）**
+- `PlaywrightCdpAdapter` 实现 `Recordable`：`startRecording` 向**全部已枚举 target**（主 page + 每个 webview）注入交互监听（`RECORD_INJECT`，累积于各 target 的 `window.__recBuf`），并开启浏览器级 CDP 监听 `Target.targetCreated`。
+- **动态 webview 自动覆盖**：录制中途应用若动态新增 webview，浏览器广播 `Target.targetCreated` → 适配器重新枚举（`refreshTargets`）并将录制监听器注入新 target，新 target 的交互同样被录到（事件按 `target` 标注来源）。`startRecording` 先排空上一轮残留缓冲，避免跨会话串扰；`injectedTargets` 守卫保证不重复注入。
+- 层级约束：部分 Electron 构建的浏览器级 target 不支持 `Target.createTarget`（"Not supported"），即测试/外部进程无法凭空铸造新 target；动态新增只能由应用自身运行时触发，走同一套 refresh+inject 路径。
+- 该能力已由 `test/integration-dynamic-webview.test.ts`（LIVE 门控，真机验证监听激活 + 注入覆盖全部已枚举 target）覆盖。
+
+### G. 覆盖性与可靠性（回应两大顾虑）
+
+|顾虑|产品+技术对策|
+|---|---|
+|能否识别全部可交互能力|UC-02/11：可交互集合可导出、可与历史 Diff；业务完整性用断言与抽检，不承诺纯 AI 穷尽业务逻辑|
+|更新后如何让 Agent 跑|UC-04：版本事件 → Agent 任务模板；与脚本触发同一管道|
+|可靠性未验证|强制保留导出脚本 + 人工润色 + 脚本回放为主路径；Agent 用于生成/探索/辅助修复|
+
+### H. 存储与报告
+
+- 脚本版本库（按应用版本或语义版本打标签）
+- 运行记录：日志、逐步截图、失败快照
+- **截图落盘**：`CdpAdapter.screenshot` 支持 `savePath` 选项，截图字节直接写入磁盘（目录递归创建），用例以 `existsSync(savePath)` 校验产物真实存在，可被人工打开查看。报告（`./reports/*.md`）汇总步骤与实际结果，与 `fixtures/*-expected.md` 预期契约对照。
+- （P2）成功基准快照用于 Diff
+
+---
+
+## 4 推荐实施路线
+
+|阶段|交付|验证问题|
+|---|---|---|
+|**M1** ✅|CDP 连接 + 步骤执行器 + 断言 + 脚本导入导出 + 简易编辑|脚本能否稳定控目标 App|
+|**M2** ✅|可视化能力层 + 真实靶机接入（CodeBuddy/WorkBuddy）|对真机能否做看得见、跨 webview 的集成测试|
+|**M3**|可视化 UI 编辑壳（高内聚组件）：脚本导入/编辑/录制/导出 + 对目标软件触发并响应|脚本能否在组件内闭环管理并被目标软件执行|
+|**M4**|MCP 全量 Tool + 测试向 Skill|脚本能力能否经 MCP 对外暴露|
+|**M5**|Agent 生成全覆盖步骤 + 参考脚本改写（为版本更新后改脚本准备）|脚本能否由 Agent 生成/演化|
+|**M6**|版本更新检测 + 更新触发 Agent 任务|版本更新后能否自动驱动脚本维护|
+
+---
+
+## 5 风险清单（产品需知情）
+
+1. 正式安装包关闭 remote debugging → 需测试通道或启动参数策略。
+2. 多窗口/webview → 步骤必须带 target。
+ Agent 覆盖「业务逻辑」不等于覆盖「全部可点击节点」→ 用结构覆盖率指标，避免过度承诺。
+3. Agent 任务触发依赖宿主（CLI/API）能力与配额，需在方案里写清集成方式。
