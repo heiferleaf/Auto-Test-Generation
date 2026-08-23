@@ -22,6 +22,8 @@ export type PlaybackResult = { ok: boolean; failedStepId?: string };
 export type UiKernel = CdpAdapter & VisualCapable & Recordable & {
   /** 按脚本回放（内核职责：真机驱动 adapter / 演示返回假结果）。 */
   playback(script: Script): Promise<PlaybackResult>;
+  /** 订阅服务端主动推送事件（录制增量等）；可选，DemoKernel 可不实现。 */
+  on?(event: string, cb: (data: unknown) => void): void;
 };
 
 export type UiShellOptions = {

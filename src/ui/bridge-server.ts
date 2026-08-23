@@ -13,9 +13,11 @@ import type { Script, Locator } from '../types/step';
 
 type RpcReq = { id: number; method: keyof UiKernel; args: unknown[] };
 type RpcRes = { id: number; ok: true; result?: unknown } | { id: number; ok: false; error: string };
+/** 服务端主动推送消息（非请求/响应），用于录制增量事件、运行进度等。 */
+type WsEvent = { type: 'event'; event: string; data: unknown };
 
 /** 把结果中的 Node Buffer 递归转为 base64 字符串（跨 WS 序列化安全）。 */
-function serializeBuffers(v: unknown): unknown {
+export function serializeBuffers(v: unknown): unknown {
   if (v == null) return v;
   if (Buffer.isBuffer(v)) return { __base64: v.toString('base64') };
   if (Array.isArray(v)) return v.map(serializeBuffers);
@@ -29,6 +31,13 @@ function serializeBuffers(v: unknown): unknown {
   return v;
 }
 
+/** WS 边界兜底：JSON.stringify 把 undefined 元素变 null，服务端默认参数对 null 不生效，
+ * 会导致 null.target 等崩溃（CODEBUDDY.md §4.1 血泪教训）。此处把 null 还原为 undefined，
+ * 让各方法体内 `x ?? {}` 兜底生效。 */
+export function sanitizeArgs(args: unknown[]): unknown[] {
+  return (args ?? []).map((a) => (a === null ? undefined : a));
+}
+
 /** 在已有 http server 上升级出 /kernel-ws 端点，桥接真机 adapter。 */
 export function attachKernelBridge(
   server: import('node:http').Server,
@@ -36,8 +45,18 @@ export function attachKernelBridge(
 ): { close: () => Promise<void> } {
   const adapter = new PlaywrightCdpAdapter();
   let connected = false;
+  const clients = new Set<WebSocket>();
 
   const wss = new WebSocketServer({ noServer: true });
+
+  /** 向所有已连接客户端广播服务端事件（录制增量 / 运行进度）。 */
+  const pushEvent = (event: string, data: unknown) => {
+    const msg: WsEvent = { type: 'event', event, data };
+    const payload = JSON.stringify(msg);
+    for (const c of clients) {
+      if (c.readyState === c.OPEN) c.send(payload);
+    }
+  };
 
   server.on('upgrade', (req: IncomingMessage, socket, head) => {
     if (req.url === '/kernel-ws') {
@@ -46,7 +65,9 @@ export function attachKernelBridge(
   });
 
   wss.on('connection', (ws: WebSocket) => {
+    clients.add(ws);
     ws.on('error', () => { /* 单连接错误不应影响 server 进程 */ });
+    ws.on('close', () => clients.delete(ws));
     ws.on('message', async (raw: Buffer) => {
       let req: RpcReq;
       try {
@@ -73,8 +94,11 @@ export function attachKernelBridge(
           send({ id: req.id, ok: true, result: undefined });
           return;
         }
-        if (!connected && method !== 'listTargets') {
-          // 未连接时（除读取型）先自动按需连接
+        if (method === 'startRecording') {
+          // 注册实时回调：录制中每捕获一个交互即广播给所有客户端（边操作边长步骤）。
+          adapter.startRecording((ev) => pushEvent('recording', ev));
+          send({ id: req.id, ok: true, result: undefined });
+          return;
         }
         const fn = (adapter as unknown as Record<string, (...a: unknown[]) => unknown>)[method];
         if (typeof fn !== 'function') {
@@ -83,7 +107,8 @@ export function attachKernelBridge(
         }
         let result: unknown;
         try {
-          result = await fn.apply(adapter, req.args as unknown[]);
+          // WS 边界兜底：null 入参还原为 undefined，避免服务端默认参数失效（§4.1）。
+          result = await fn.apply(adapter, sanitizeArgs(req.args as unknown[]));
         } catch (err) {
           send({ id: req.id, ok: false, error: (err as Error).message });
           return;

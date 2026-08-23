@@ -12,11 +12,13 @@ import type { InteractionEvent } from '../recorder/recorder';
 
 type RpcReq = { id: number; method: string; args: unknown[] };
 type RpcRes = { id: number; ok: true; result?: unknown } | { id: number; ok: false; error: string };
+type WsEventMsg = { type: 'event'; event: string; data: unknown };
 
 export class WsKernel implements UiKernel {
   private ws!: WebSocket;
   private seq = 0;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private eventListeners = new Map<string, Set<(data: unknown) => void>>();
   private ready: Promise<void>;
 
   constructor(private url: string) {
@@ -30,7 +32,15 @@ export class WsKernel implements UiKernel {
       this.ws.onerror = (e: Event) => reject(new Error(`WS 连接失败: ${(e as ErrorEvent).message}`));
       this.ws.onmessage = (ev: MessageEvent) => {
         try {
-          const res = JSON.parse(ev.data as string) as RpcRes;
+          const msg = JSON.parse(ev.data as string);
+          // 服务端主动推送事件（录制增量等）
+          if (msg && msg.type === 'event') {
+            const em = msg as WsEventMsg;
+            const set = this.eventListeners.get(em.event);
+            if (set) for (const cb of set) cb(em.data);
+            return;
+          }
+          const res = msg as RpcRes;
           const p = this.pending.get(res.id);
           if (!p) return;
           this.pending.delete(res.id);
@@ -41,6 +51,12 @@ export class WsKernel implements UiKernel {
         }
       };
     });
+  }
+
+  /** 订阅服务端主动推送的事件（如 'recording' 增量步骤）。 */
+  on(event: string, cb: (data: unknown) => void): void {
+    if (!this.eventListeners.has(event)) this.eventListeners.set(event, new Set());
+    this.eventListeners.get(event)!.add(cb);
   }
 
   private call<T>(method: string, ...args: unknown[]): Promise<T> {
