@@ -17,6 +17,8 @@ export const TYPE_LABEL: Record<StepType, string> = {
   hover: '悬停',
   eval: '执行',
   snapshot: '快照',
+  waitUntil: '等待条件',
+  repeat: '循环',
 };
 
 /** 把 locator 转成人类可读的简短描述。 */

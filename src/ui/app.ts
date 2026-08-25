@@ -10,7 +10,7 @@
 //   `?live=1` 即走此真机链路，已验证可枚举目标、录制、截图流、回放（见 scripts/verify-ui-live.mjs）。
 //   演示模式（默认）用 DemoKernel，无需真机即可查看完整交互形态。
 
-import { UiShell, type UiKernel, ASSERTION_KINDS } from './shell';
+import { UiShell, type UiKernel } from './shell';
 import type { Locator } from '../cdp/adapter';
 import { WsKernel } from './ws-kernel';
 
@@ -92,144 +92,37 @@ function boot() {
   if (live) {
     shell.connect({ port: 9222 })
       .then(() => { shell.startFrameStream(1000); refreshHeader(); })
-      .catch((e) => alert(`连接失败: ${(e as Error).message}`));
+      .catch((e) => {
+        // 不用 alert（jsdom/无头环境无实现，且不符合 spec 交互）；以控制台 + 顶部错误条提示。
+        console.error('[UiShell] 连接失败:', e instanceof Error ? e.message : e);
+        const errBar = document.createElement('div');
+        errBar.className = 'ui-shell-conn-error';
+        errBar.textContent = `连接失败: ${e instanceof Error ? e.message : String(e)}`;
+        mount.prepend(errBar);
+      });
   }
 
   // 先渲染骨架
   shell.render();
 
-  // 初始示例脚本，便于直接看到列表形态
-  shell.insertStep({ id: 'seed-1', type: 'click', source: 'manual', locator: { role: 'button', name: '打开设置' } });
-  shell.insertStep({ id: 'seed-2', type: 'fill', source: 'manual', locator: { testId: 'search' }, params: { value: '关键词' } });
+  // 初始示例脚本（演示「录制产出的步骤形态」：click/fill 仅由录制产生，此处用种子数据替代真实录制回放）。
+  shell.insertStep({ id: 'seed-1', type: 'click', source: 'recorded', locator: { role: 'button', name: '打开设置' } });
+  shell.insertStep({ id: 'seed-2', type: 'fill', source: 'recorded', locator: { testId: 'search' }, params: { value: '关键词' } });
 
-  // ---- 事件委托：驱动 shell.render 输出的所有 [data-action] 按钮 ----
-  mount.addEventListener('click', async (e) => {
-    const el = (e.target as HTMLElement).closest('[data-action]') as HTMLElement | null;
-    if (!el) return;
-    const action = el.getAttribute('data-action')!;
-    const stepId = el.getAttribute('data-step-id') ?? undefined;
+  // 用户交互（插入 4 类、编辑区、建组、运行、导出、录制……）全部由 UiShell 内部事件委托处理，
+  // app.ts 不再用 prompt/alert 实现交互（避免 jsdom 不可测、且不符合 spec §2.6 真实编辑区）。
+  // app.ts 仅负责：内核装配（DemoKernel / WsKernel）、真机连接与截图流、录制指示灯刷新。
 
-    switch (action) {
-      case 'insert': {
-        const type = prompt('步骤类型 (click/fill/select/hover/wait/eval/snapshot)', 'click') as any;
-        if (!type) break;
-        shell.insertStep({
-          id: `manual-${Date.now().toString(36)}`,
-          type,
-          source: 'manual',
-          locator: { role: 'button', name: '请指定元素' },
-          params: type === 'fill' ? { value: '值' } : undefined,
-        });
-        break;
-      }
-      case 'add-assert': {
-        // 断言类型菜单从单一真相源 ASSERTION_KINDS 派生（新增类型无需改此处）
-        const menu = ASSERTION_KINDS
-          .map((k, i) => `${i + 1}=${k.label}(${k.kind})`)
-          .join('\n');
-        const pick = prompt(`断言类型：\n${menu}`, '1');
-        if (!pick) break;
-        const idx = Number(pick) - 1;
-        const entry = ASSERTION_KINDS[idx];
-        if (!entry) break;
-        const k = entry.kind;
-        const locStr = prompt('定位（如 role=button,name=登录状态）', 'role=status') ?? '';
-        const locator = parseLocator(locStr);
-        const value = entry.needsValue ? (prompt('期望内容', '登录成功') ?? undefined) : undefined;
-        const waitMs = Number(prompt('检测前等待毫秒（Agent 推理留时，0=不等待）', '0')) || 0;
-        shell.insertAssertion(k, locator, value, waitMs);
-        break;
-      }
-      case 'toggle-record': {
-        if (shell.isRecording()) {
-          await shell.stopRecording();
-        } else {
-          shell.startRecording();
-        }
-        refreshHeader();
-        break;
-      }
-      case 'run-all': {
-        // 运行全部（R3，原「回放」）：步骤态与高亮由 shell 内部经进度推送实时回显，
-        // 此处只在中断时给汇总提示；失败详情由 shell 渲染的失败提醒条呈现。
-        const r = await shell.runAll();
-        if (!r.ok) alert(`运行中断于步骤: ${r.failedStepId ?? '(未知)'}`);
-        break;
-      }
-      case 'highlight': {
-        const rect = await shell.highlight({ role: 'button', name: '高亮我' });
-        drawHighlight(rect);
-        break;
-      }
-      case 'export': {
-        const json = shell.exportScript();
-        const blob = new Blob([json], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = 'script.json'; a.click();
-        URL.revokeObjectURL(url);
-        break;
-      }
-      case 'clear': {
-        [...shell.getScript().steps].forEach((st) => shell.removeStep(st.id));
-        break;
-      }
-      case 'up': if (stepId) shell.moveStep(stepId, Math.max(0, stepIndex(shell, stepId) - 1)); break;
-      case 'down': if (stepId) shell.moveStep(stepId, stepIndex(shell, stepId) + 1); break;
-      case 'edit': if (stepId) alert('编辑：' + JSON.stringify(findStep(shell, stepId), null, 2)); break;
-      case 'remove': if (stepId) shell.removeStep(stepId); break;
-      case 'select-target': {
-        const sel = el as HTMLSelectElement;
-        shell.selectTarget(sel.value);
-        break;
-      }
-    }
-  });
-
-  // 步骤项点击 → 高亮其在视图中的位置
-  mount.addEventListener('click', (e) => {
-    const item = (e.target as HTMLElement).closest('[data-step-item]');
-    if (!item) return;
-    if ((e.target as HTMLElement).closest('[data-action]')) return; // 操作按钮不触发高亮
-    const loc = demoLocFor(item.getAttribute('data-step-id')!);
-    if (loc) shell.highlight(loc).then(drawHighlight);
-  });
-
-  function demoLocFor(_id: string): Locator | undefined {
-    return { role: 'button', name: '示例元素' };
-  }
-
-  function drawHighlight(rect: { x: number; y: number; width: number; height: number }) {
-    const stage = mount.querySelector('[data-stage]') as HTMLElement;
-    if (!stage) return;
-    let hl = stage.querySelector('.ui-shell-highlight') as HTMLElement | null;
-    if (!hl) { hl = document.createElement('div'); hl.className = 'ui-shell-highlight'; stage.appendChild(hl); }
-    hl.style.left = `${rect.x}px`;
-    hl.style.top = `${rect.y}px`;
-    hl.style.width = `${rect.width}px`;
-    hl.style.height = `${rect.height}px`;
-  }
-
-  function refreshHeader() {
+  // 录制指示灯跟随（内核录制态变化后刷新顶部指示）。
+  const refreshHeader = () => {
     const dot = mount.querySelector('.ui-shell-header .rec-dot') as HTMLElement | null;
     if (dot) dot.classList.toggle('on', shell.isRecording());
-  }
-}
-
-// ---- 小工具 ----
-function stepIndex(shell: UiShell, id: string): number {
-  return shell.getScript().steps.findIndex((s) => s.id === id);
-}
-function findStep(shell: UiShell, id: string) {
-  return shell.getScript().steps.find((s) => s.id === id);
-}
-function parseLocator(input: string): Locator {
-  const loc: Locator = {};
-  input.split(',').forEach((kv) => {
-    const [k, v] = kv.split('=').map((s) => s.trim());
-    if (k && v) (loc as any)[k] = v;
+  };
+  // 录制按钮在 shell 内部委托处理 start/stop，这里仅订阅录制态以刷新指示。
+  mount.addEventListener('click', (e) => {
+    const el = (e.target as HTMLElement).closest('[data-action="toggle-record"]');
+    if (el) refreshHeader();
   });
-  return loc;
 }
 
 if (document.readyState === 'loading') {

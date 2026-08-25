@@ -363,14 +363,18 @@ describe('步骤编辑组件（UI 渲染）', () => {
     expect(acts).toContain('down');
   });
 
-  it('顶部含 插入 与 加断言 入口', () => {
+  it('顶部含 插入步骤 / 包成选择组 / 包成循环组 / 运行全部 入口（spec §2.3.0/§2.3.1）', () => {
     const k = makeMockKernel();
     const mount = document.createElement('div');
     const shell = new UiShell({ kernel: k as any, mount });
     shell.render();
     const actions = Array.from(mount.querySelectorAll('[data-action]')).map((b) => b.getAttribute('data-action'));
     expect(actions).toContain('insert');
-    expect(actions).toContain('add-assert');
+    expect(actions).toContain('wrap-if');
+    expect(actions).toContain('wrap-while');
+    expect(actions).toContain('run-all');
+    // 独立「加断言」入口已移除：断言是 4 类手动插入之一（点「插入步骤」→ assert）。
+    expect(actions).not.toContain('add-assert');
   });
 
   it('点击删除按钮移除对应步骤（委托 removeStep）', () => {

@@ -38,6 +38,16 @@ export const actionHandlers: Record<Exclude<StepType, 'assert'>, ActionHandler> 
   snapshot: async (adapter) => {
     await adapter.snapshot();
   },
+  // waitUntil：等待某断言条件成立（轮询至 timeoutMs）。本期以 wait 语义兜底，
+  // 真实"轮询断言"由后续断言引擎接入（避免 actions 反向依赖 executor）。
+  waitUntil: async (adapter, step) => {
+    await adapter.wait({ durationMs: step.params?.timeoutMs });
+  },
+  // repeat 是 while 循环组的表达（带 children），不应作为叶子执行；
+  // 若作为叶子到达此处，说明脚本结构非法（缺 children）。
+  repeat: async (_adapter, step) => {
+    throw new Error(`repeat 步骤 ${step.id} 必须作为循环组（带 children），不应作为叶子执行`);
+  },
 };
 
 /** 依据 step.type 把操作转发给注册表策略。未知 type 抛错（类型系统兜底）。 */

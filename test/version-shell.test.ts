@@ -28,7 +28,7 @@ describe('UiShell × VersionPanel 集成', () => {
   it('render 后版本面板挂载，且默认含 main 分支 chip', () => {
     const k = makeMockKernel();
     const mount = document.createElement('div');
-    const shell = new UiShell({ kernel: k as any, mount, script: scriptOf([seqStep('g1', [])]) });
+    const shell = new UiShell({ kernel: k as any, mount, script: scriptOf([seqStep('g1', [])]), enableVersionPanel: true });
     shell.render();
     const verWrap = mount.querySelector('[data-version]');
     expect(verWrap).not.toBeNull();
@@ -40,7 +40,7 @@ describe('UiShell × VersionPanel 集成', () => {
   it('versionBranch 后在面板出现新分支 chip（经 shell 编排写回 store）', () => {
     const k = makeMockKernel();
     const mount = document.createElement('div');
-    const shell = new UiShell({ kernel: k as any, mount, script: scriptOf([seqStep('g1', [])]) });
+    const shell = new UiShell({ kernel: k as any, mount, script: scriptOf([seqStep('g1', [])]), enableVersionPanel: true });
     shell.render();
     shell.versionBranch('feature');
     shell.render(); // 重绘以刷新面板
@@ -52,7 +52,7 @@ describe('UiShell × VersionPanel 集成', () => {
   it('点击分支 chip 经 shell 切回 store（onSwitch → vSwitchTo → 面板刷新）', () => {
     const k = makeMockKernel();
     const mount = document.createElement('div');
-    const shell = new UiShell({ kernel: k as any, mount, script: scriptOf([seqStep('g1', [])]) });
+    const shell = new UiShell({ kernel: k as any, mount, script: scriptOf([seqStep('g1', [])]), enableVersionPanel: true });
     shell.render();
     shell.versionBranch('feature');
     shell.render();
@@ -72,7 +72,7 @@ describe('UiShell × VersionPanel 集成', () => {
   it('versionCommit 后历史条数 +1（不可变：原脚本未被改写）', () => {
     const k = makeMockKernel();
     const mount = document.createElement('div');
-    const shell = new UiShell({ kernel: k as any, mount, script: scriptOf([seqStep('g1', [])]) });
+    const shell = new UiShell({ kernel: k as any, mount, script: scriptOf([seqStep('g1', [])]), enableVersionPanel: true });
     shell.render();
     const before = mount.querySelectorAll('[data-version] [data-commit]').length;
     shell.versionCommit('snapshot v1');
