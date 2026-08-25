@@ -69,8 +69,18 @@ git worktree remove .codebuddy/worktree/m1-cdp
 
 **强制要求**：完成任何任务，都必须经过三个校验角色（缺一不可，顺序可并行）：
 - **test 角色**：确认对应测试方案/测试代码存在且通过（见 §5）。
-- **code-review 角色**：审查实现是否符合本文件约定、设计文档、测试要求，以及下列设计质量基线。
+- **code-review 角色**：审查实现是否符合本文件约定、设计文档、测试要求，以及下列设计质量基线；**并须做「产品符合度审查」**（见下方），逐条比对 spec 交互验收清单，而非只看代码质量。
 - **可运行性审查（Runtime-Runnability Review）角色**：专盯"编译/单测全绿、但真实运行路径会崩"的盲区（详见 §4.1）。**只要有代码修改，就必须运行本角色**，不可跳过。
+
+**产品符合度审查（Product-Conformance Review，code-review 角色必做子项）**
+> 设立动机（血泪教训）：本项目 M3 可视化蒙版曾"编译全绿、单测全绿、演示页能渲染"，但用户打开后**功能零可用**——根因是"设计文档只写模块职责、没写组件级交互；测试只覆盖纯函数、不覆盖用户路径；review 只查代码质量、不查产品符合度"。三层各自合格，叠加却产出不可用产品。
+
+**强制规则**：凡是实现**用户可见功能**（UI / Agent 交互 / 脚本回放入口）的任务，code-review 角色除既有设计质量基线外，还须：
+1. 依据 `docs/design/visual-mask-ui-spec.md` §2.x（或对应功能 spec）的**交互逻辑**列，逐条生成**交互验收清单**（如："插入步骤仅暴露 wait/waitUntil/assert/repeat 4 类"、"选中步点编辑出现真实表单而非 alert"）。
+2. 核对实现是否逐条满足清单；任一条不满足 → review 不通过（即使代码质量达标）。
+3. UI 功能（见 §4.1 端到端门槛）：除单测外，必须有 jsdom 驱动 `app.boot()` + 模拟 `[data-action]` 点击的 e2e 测试，证明**用户主链路**（插入→编辑→建组→运行→失败标红）真实跑通，禁止只信"内部 API 直调返回正确"的 Mock 单测。
+
+> 验收清单随 PR 一并提交，存于对应 worktree 或 `docs/plan/plan.md` 测试方案节，作为 review 的对照基线。
 
 **code-review 设计质量基线（除语法/对齐外，必查）**
 1. **SOLID**
@@ -112,6 +122,18 @@ git worktree remove .codebuddy/worktree/m1-cdp
    真实/近真实环境（真机端口、浏览器 WS、Electron 调试端口）下能跑通一次端到端冒烟，不能只信 Mock。
 4. **端到端冒烟证据**：UI / Agent / 脚本入口必须在目标真实环境启动一次并确认主链路无异常（如 M3 的 `?live=1` 截图流真实出图），
    而非仅依赖单元断言"有返回就算过"。
+
+**UI 端到端主链路冒烟（专防"功能零可用"，强制门槛）**
+> 动机：M3 可视化蒙版曾"渲染能出、单测全绿"，用户打开却**无任何功能可用、流程跑不通**。根因是测试只覆盖纯函数/内部 API 直调，不覆盖"用户经 `[data-action]` 按钮点击的真实路径"。
+
+UI 改动（含新增/修改任何用户可见交互）**必须**满足：
+1. 有 jsdom 环境驱动的 e2e 测试：真实调用 `app.boot()`（或等价入口）→ 用 `dispatchEvent` 模拟用户点击渲染出的 `[data-action]` 按钮 → 断言**用户主链路**端到端跑通：
+   - 插入（`wait`/`waitUntil`/`assert`/`repeat` 4 类，非法类被拒）；
+   - 选中步 → 编辑区真实表单 → 保存 → `getScript()` 该步不可变更新；
+   - 多选步 → 包成 if/while 组 → CFG 视图出现对应分支/回环边；
+   - 运行全部失败 → 该步标红 + 提醒条。
+2. 禁止只用"内部 API 直调"（如直接 `shell.insertStep`）冒充用户路径测试——必须走 DOM 事件委托入口。
+3. 复用固定命令（§5）：`npm test -- test/ui-core-e2e.test.ts`（命令不变，仅加参数）。
 
 **失败处理**
 - 不通过 → 打回实现者修复，修复后重新跑本角色，直到真实路径冒烟通过。
@@ -268,5 +290,7 @@ set WORKBUDDY_LIVE=1 && npm test -- test/integration-workbuddy.test.ts
 | 并行 | 多 Agent/team + 每任务带 test & review 角色 |
 | 架构同步 | 影响/新增架构方案时须同步 `docs/architecture/architecture.md`（见 §5.1） |
 | 注释规范 | 注释直接说明「做什么/为什么」，禁止只写需求/设计编号（见 §4.2）；可运行性审查须查 |
+| 产品符合度审查 | UI/交互任务须逐条比对 spec §2.x 交互验收清单（见 §4）；code-review 角色必做 |
+| UI 端到端验收 | UI 改动须 `npm test -- test/ui-core-e2e.test.ts`（jsdom 跑 app.boot + 模拟 [data-action] 点击，主链路真实跑通，见 §4.1） |
 | 纪律归属 | 统一在 CODEBUDDY.md（CLI 不读 `.codebuddy/rules/`） |
 | 沉淀 | 重复任务→skills（`.codebuddy/skills/`），偏好/纪律→本文件 |
