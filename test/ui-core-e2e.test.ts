@@ -73,13 +73,14 @@ describe('UI 主链路 e2e（DOM 事件委托入口）', () => {
     expect(mount.querySelector('[data-cfg]')).toBeTruthy();
   });
 
-  it('插入：点击「插入步骤」展开 4 类菜单（wait/waitUntil/assert/repeat），不含 click 等', () => {
+  it('插入：点击「插入步骤」展开 3 类菜单（wait/waitUntil/assert），不含 click/repeat', () => {
     const { mount } = bootShell(kernel, seed);
     click(mount.querySelector('[data-action="insert"]'));
     const types = Array.from(mount.querySelectorAll('[data-insert-type]')).map((e) => e.getAttribute('data-insert-type'));
-    expect(types.sort()).toEqual(['assert', 'repeat', 'wait', 'waitUntil']);
+    expect(types.sort()).toEqual(['assert', 'wait', 'waitUntil']);
     expect(types).not.toContain('click');
     expect(types).not.toContain('fill');
+    expect(types).not.toContain('repeat'); // 循环走组操作（§2.5），不进插入菜单
   });
 
   it('插入 wait：点 4 类菜单中的 wait → 列表 +1 且类型为 wait', () => {

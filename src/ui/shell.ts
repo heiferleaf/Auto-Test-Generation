@@ -35,8 +35,8 @@ import { VersionPanel } from './version-panel';
 /** 回放结果（与 cli.CliResult 同构，但由内核产生，UI 壳不依赖 cli 模块）。 */
 export type PlaybackResult = { ok: boolean; failedStepId?: string };
 
-/** 手动可插入的步骤类型（spec §2.3.1 仅 4 类；click/fill 等仅由录制产生）。 */
-type ManualStepType = 'wait' | 'waitUntil' | 'assert' | 'repeat';
+/** 手动可插入的步骤类型（spec §2.4 仅 3 类；click/fill 等仅由录制产生，循环走组操作）。 */
+type ManualStepType = 'wait' | 'waitUntil' | 'assert';
 
 // 运行态类型定义已迁至 `src/types/step.ts`（与 StepType/ControlKind 同处真相源），
 // 因同级视图组件 cfg-view 也需要它，从 shell 引入会形成"子组件反向依赖编排者"。
@@ -576,8 +576,8 @@ export class UiShell {
     return row;
   }
 
-  /** 手动步骤类型：spec §2.3.1 仅暴露 4 类（录制才产生 click/fill 等）。 */
-  private insertManualStep(type: 'wait' | 'waitUntil' | 'assert' | 'repeat'): void {
+  /** 手动步骤类型：spec §2.4 仅暴露 3 类（wait/waitUntil/assert）；循环走组操作（§2.5）。 */
+  private insertManualStep(type: 'wait' | 'waitUntil' | 'assert'): void {
     const id = `manual-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     let step: Step;
     switch (type) {
@@ -595,10 +595,6 @@ export class UiShell {
           id, type: 'assert', source: 'manual',
           params: { assertion: { kind: 'visible', locator: { role: 'status' } } },
         };
-        break;
-      case 'repeat':
-        // repeat ≡ while 循环组：以 while 控制节点表达，循环体初为空，用户再往里加步或包组。
-        step = { id, type: 'wait', source: 'manual', control: { kind: 'while', loopCount: 1 }, children: [] };
         break;
       default:
         // 受控联合外的值（如非法注入）直接拒绝，避免 insertStep(undefined) 崩溃。
@@ -1094,7 +1090,7 @@ export class UiShell {
     addBtn('清空', 'clear', 'danger');
     root.appendChild(actions);
 
-    // 插入 4 类手动步骤的子菜单（spec §2.3.1：仅 wait/waitUntil/assert/repeat）。
+    // 插入 3 类手动步骤的子菜单（spec §2.4：仅 wait/waitUntil/assert；循环走组操作 §2.5）。
     // 仅当用户点击「插入步骤」展开后才渲染；初始不展开，避免遮挡主区。
     if (this.insertMenuOpen) {
       const menu = document.createElement('div');
@@ -1104,7 +1100,6 @@ export class UiShell {
         { type: 'wait', label: '等待时间（wait）' },
         { type: 'waitUntil', label: '等待条件（waitUntil）' },
         { type: 'assert', label: '断言（assert，可作选择组条件）' },
-        { type: 'repeat', label: '循环（repeat）' },
       ];
       kinds.forEach((k) => {
         const b = document.createElement('button');
