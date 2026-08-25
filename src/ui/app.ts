@@ -57,10 +57,16 @@ class DemoKernel implements UiKernel {
     this.listeners.get(event)?.forEach((cb) => cb(data));
   }
 
-  async playback(script: import('../types/step').Script) {
+  async playback(script: import('../types/step').Script, fromStepId?: string) {
     log('playback', script.steps.length, 'steps');
     // 演示逐步进度：与真机桥经 'step-progress' 推送的形态一致（UiShell 不感知差异）。
+    // 支持「从此处运行」：前序跳过 fromStepId 之前的顶层步骤（演示与真机语义一致）。
+    let started = fromStepId === undefined;
     for (const s of script.steps) {
+      if (!started) {
+        if (s.id === fromStepId) started = true;
+        else continue;
+      }
       this.emit('step-progress', { stepId: s.id, status: 'running' });
       await new Promise((r) => setTimeout(r, 300));
       this.emit('step-progress', { stepId: s.id, status: 'pass' });

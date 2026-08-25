@@ -256,8 +256,9 @@ describe('回放流程', () => {
     const shell = new UiShell({ kernel: k as any, mount: document.createElement('div'), script: s });
     const res = await shell.playback();
     // UI 壳不依赖执行器细节，只把脚本交给内核 playback 编排
+    // runAll 现以 (script, fromStepId?) 调用（§2.7）；从头跑时 fromStepId 为 undefined。
     expect(k.playback).toHaveBeenCalledTimes(1);
-    expect(k.playback).toHaveBeenCalledWith(s);
+    expect(k.playback).toHaveBeenCalledWith(s, undefined);
     expect(res.ok).toBe(true);
   });
 

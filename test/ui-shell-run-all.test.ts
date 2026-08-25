@@ -327,8 +327,9 @@ describe('R3 异步高亮的乱序与迟到防护（可运行性审查要求）'
     const { shell } = mountShell(script, k);
     await shell.runAll();
     expect(k.playback).toHaveBeenCalledTimes(1);
-    expect(k.playback.mock.calls[0].length).toBe(1);
-    expect(k.playback).toHaveBeenCalledWith(script);
+    // runAll 现以 (script, fromStepId?) 调用（§2.7）；从头跑时第二参为 undefined（2 个参数）。
+    expect(k.playback.mock.calls[0].length).toBe(2);
+    expect(k.playback).toHaveBeenCalledWith(script, undefined);
   });
 
   it('运行结束后退订进度监听，多次 runAll 不叠加回调', async () => {

@@ -116,5 +116,7 @@ export class WsKernel implements UiKernel {
   cancelPick(): Promise<void> { return this.call('cancelPick'); }
 
   // ---- UiKernel.playback ----
-  playback(script: Script): Promise<PlaybackResult> { return this.call('playback', script); }
+  playback(script: Script, fromStepId?: string): Promise<PlaybackResult> {
+    return this.call('playback', script, fromStepId);
+  }
 }

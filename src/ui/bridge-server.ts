@@ -137,7 +137,7 @@ export type BridgeAdapter = CdpAdapter & {
   stopRecording(): Promise<unknown[]>;
   startPick(onPick: (locator: Locator) => void): void;
   cancelPick(): void;
-  playback(script: Script, onStep?: StepProgress): Promise<{ ok: boolean; failedStepId?: string }>;
+  playback(script: Script, onStep?: StepProgress, fromStepId?: string): Promise<{ ok: boolean; failedStepId?: string }>;
 };
 
 /**
@@ -225,14 +225,19 @@ export function attachKernelBridge(
           return;
         }
         if (method === 'playback') {
-          // 运行全部（R3）：函数不可跨 WS 传递，故在桥端注册进度回调，
+          // 运行全部 / 从此处运行（R3 / spec §2.7）：函数不可跨 WS 传递，故在桥端注册进度回调，
           // 用 R1 的单向推送通道把每步 running/pass/fail 下发给浏览器端。
           // 必须走专门分支（同 startRecording），不能落到下方通用 fn.apply。
           // 边界校验：null/undefined/缺 steps 直接回明确错误，
           // 不让它流到 runScript 里变成 "failedStepId:undefined" 的静默误提示。
-          const script = assertRunnableScript(sanitizeArgs(req.args as unknown[])[0]);
-          const res = await adapter.playback(script, (stepId, status) =>
-            pushEvent('step-progress', { stepId, status }),
+          const args = sanitizeArgs(req.args as unknown[]);
+          const script = assertRunnableScript(args[0]);
+          // fromStepId 可选（第 2 参）；跨 WS 的 undefined 经 JSON 变 null，统一还原。
+          const fromStepId = args[1] === null || args[1] === undefined ? undefined : String(args[1]);
+          const res = await adapter.playback(
+            script,
+            (stepId, status) => pushEvent('step-progress', { stepId, status }),
+            fromStepId,
           );
           send({ id: req.id, ok: true, result: res });
           return;

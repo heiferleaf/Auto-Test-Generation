@@ -51,8 +51,9 @@ export type { StepRunStatus, StepProgressEvent } from '../types/step';
  * （`JSON.stringify(fn)` → undefined，真机上必然丢失），只能走 `on/off` 推送通道。
  */
 export type UiKernel = CdpAdapter & VisualCapable & Recordable & {
-  /** 按脚本回放（内核职责：真机驱动 adapter / 演示返回假结果）。签名保持单参。 */
-  playback(script: Script): Promise<PlaybackResult>;
+  /** 按脚本回放（内核职责：真机驱动 adapter / 演示返回假结果）。签名保持单参。
+   *  fromStepId 可选「从此处运行」起点（spec §2.7），不传为从头跑（向后兼容）。 */
+  playback(script: Script, fromStepId?: string): Promise<PlaybackResult>;
   /** 订阅服务端主动推送事件（'recording' 录制增量 / 'step-progress' 运行进度 / 'pick' 点选命中）；可选。 */
   on?(event: string, cb: (data: unknown) => void): void;
   /** 退订；与 on 配对，供单次运行结束后清理。可选（旧内核可不实现）。 */
@@ -290,6 +291,11 @@ export class UiShell {
       case 'run-all':
         void this.runAll();
         break;
+      case 'run-from': {
+        const id = el.getAttribute('data-step-id') ?? '';
+        if (id) void this.runAll(id);
+        break;
+      }
       case 'export':
         this.downloadScript();
         break;
@@ -563,6 +569,13 @@ export class UiShell {
     save.setAttribute('data-action', 'save-edit');
     save.setAttribute('data-step-id', step.id);
     area.appendChild(save);
+
+    // 从此处运行（spec §2.7）：以本步为起点运行其后所有步骤。
+    const runFrom = document.createElement('button');
+    runFrom.textContent = '从此处运行';
+    runFrom.setAttribute('data-action', 'run-from');
+    runFrom.setAttribute('data-step-id', step.id);
+    area.appendChild(runFrom);
 
     const del = document.createElement('button');
     del.textContent = '删除';
@@ -923,8 +936,9 @@ export class UiShell {
    * 运行当前所有步骤（原「回放」，spec §2.3.4 改名「运行全部」）。
    * 流式：每步 running/pass/fail 即时回显，并让高亮自动跟随当前步（P1）。
    * 兼容：内核若忽略 onStepResult（旧实现），据汇总结果回填状态。
+   * @param fromStepId 可选「从此处运行」起点（spec §2.7）：前序跳过该步之前的步骤。
    */
-  async runAll(): Promise<PlaybackResult> {
+  async runAll(fromStepId?: string): Promise<PlaybackResult> {
     this.resetRunStatus();
     // 本次运行的步骤索引快照：单次构建，后续每步 O(1) 命中（避免 O(n²) 重复扁平化）。
     this.runIndex = new Map(this.flattenSteps().map((s) => [s.id, s]));
@@ -937,7 +951,7 @@ export class UiShell {
 
     let res: PlaybackResult;
     try {
-      res = await this.kernel.playback(this.getScript());
+      res = await this.kernel.playback(this.getScript(), fromStepId);
     } finally {
       // 退订必须与订阅配对，否则多次 runAll 的回调会叠加。
       this.kernel.off?.('step-progress', this.onProgress);

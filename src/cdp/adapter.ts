@@ -198,10 +198,11 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   async playback(
     script: Script,
     onStep?: import('../executor/executor').StepProgress,
+    fromStepId?: string,
   ): Promise<{ ok: boolean; failedStepId?: string }> {
     // onStep 仅在同进程内调用（bridge-server 传入以转推给浏览器端）；
     // 跨 WS 的 WsKernel 不传此参数——函数不可序列化，详见 CODEBUDDY.md §4.1。
-    return runCli({ adapter: this, script, onStep });
+    return runCli({ adapter: this, script, onStep, fromStepId });
   }
 
   listTargets(): TargetInfo[] {
