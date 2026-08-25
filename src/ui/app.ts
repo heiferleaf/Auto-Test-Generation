@@ -105,6 +105,12 @@ function boot() {
   // 先渲染骨架
   shell.render();
 
+  // 演示模式（默认，无 ?live）下无真机事件源：一进来就告知用户，
+  // 避免「点了录制却什么都没发生」被误判为功能失效（真实路径可用性反馈）。
+  if (!live) {
+    shell.setBanner('演示模式：内置示例内核，操作为模拟。要录制真实软件操作，请访问 http://localhost:5173/?live=1 连接靶机。');
+  }
+
   // 初始示例脚本（演示「录制产出的步骤形态」：click/fill 仅由录制产生，此处用种子数据替代真实录制回放）。
   shell.insertStep({ id: 'seed-1', type: 'click', source: 'recorded', locator: { role: 'button', name: '打开设置' } });
   shell.insertStep({ id: 'seed-2', type: 'fill', source: 'recorded', locator: { testId: 'search' }, params: { value: '关键词' } });

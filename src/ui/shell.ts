@@ -151,6 +151,8 @@ export class UiShell {
   private insertMenuOpen = false;
   /** Git 版本面板是否挂载（可选插件，默认隐藏）。 */
   private enableVersionPanel: boolean;
+  /** 顶部提示横幅文本（演示模式说明 / 未连接真机录制警告）。render 会据此重建，故不会被后续 render 冲掉。 */
+  private bannerText?: string;
 
   constructor(opts: UiShellOptions) {
     this.kernel = opts.kernel;
@@ -283,12 +285,25 @@ export class UiShell {
   }
 
   startRecording(): void {
+    // 录制依赖真机内核实时回传交互事件（click/fill 等仅由录制产生，见 spec §2.3.1）。
+    // 演示模式（未连接真机）下 DemoKernel.startRecording 无真实事件源，录制不会产出任何步骤。
+    // 若不提示，用户点「开始录制」后毫无反应、也录不到东西，会被误判为「功能失效」。
+    // 故未连接时给出明确横幅，指引用户用 ?live=1 连真机；录制态仍照常进入（按钮联动不受影响）。
+    if (!this.connected) {
+      this.setBanner('当前为演示模式（未连接真机），录制不会产生真实步骤。如需录制真实操作，请访问 ?live=1 连接靶机。');
+    }
     this.recorder.reset();
     this.recordedKeys.clear();
     this.kernel.startRecording();
     this.recording = true;
     // 订阅服务端实时推送：每捕获一个交互即增量生成步骤（边操作边长步骤）。
     this.kernel.on?.('recording', (ev) => this.onRecordingEvent(ev as InteractionEvent));
+    this.render();
+  }
+
+  /** 设置顶部提示横幅（持久于实例，render 会据此重建，故不被后续 render 冲掉）。 */
+  setBanner(text: string): void {
+    this.bannerText = text;
     this.render();
   }
 
@@ -833,6 +848,16 @@ export class UiShell {
   render(): void {
     const root = this.mount;
     root.innerHTML = '';
+
+    // 持久横幅（演示模式/录制警告）：render 每次重建 DOM，故 banner 必须从实例字段重新渲染，
+    // 否则 insertStep 等后续 render 会把它冲掉（此前 banner 在 render 外 prepend 即被此问题吞掉）。
+    if (this.bannerText) {
+      const bar = document.createElement('div');
+      bar.className = 'ui-shell-banner';
+      bar.setAttribute('data-banner', 'true');
+      bar.textContent = this.bannerText;
+      root.appendChild(bar);
+    }
 
     const header = document.createElement('div');
     header.className = 'ui-shell-header';

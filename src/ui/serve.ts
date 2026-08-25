@@ -36,15 +36,19 @@ async function transformApp(): Promise<string> {
 const server = createServer(async (req, res) => {
   const url = (req.url ?? '/').split('?')[0];
   try {
+    // 开发服务器：页面与打包脚本均禁用缓存，确保每次刷新都拿到最新代码。
+    // 否则浏览器会缓存旧版 app.js（尤其 UI 高频迭代时），表现为「代码已改、测试已绿，
+    // 但浏览器里交互依旧坏的」——正是用户撞到的「点开始录制没反应」最可能的诱因之一。
+    const noCache = { 'Cache-Control': 'no-cache, no-store, must-revalidate' };
     if (url === '/' || url === '/index.html') {
       const html = await readFile(join(UI_DIR, 'index.html'), 'utf-8');
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...noCache });
       res.end(html);
       return;
     }
     if (url === '/app.js') {
       const js = await transformApp();
-      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', ...noCache });
       res.end(js);
       return;
     }
