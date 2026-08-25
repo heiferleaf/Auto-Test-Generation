@@ -70,9 +70,14 @@
       background: #43303a; border: 1px solid #f85149; color: #ffb4ae;
     }
 
-    /* 顶部提示横幅（演示模式说明 / 未连接真机录制警告） */
+    /* 顶部提示横幅：默认红色系（降级/错误，如「未连接靶机」「录制失败」），
+       与运行失败提醒条同语（用户要求「红条提示」）。 */
     .ui-shell-banner {
       margin: 8px 16px; padding: 9px 12px; border-radius: 6px; font-size: 13px; line-height: 1.5;
+      background: #43303a; border: 1px solid #f85149; color: #ffb4ae;
+    }
+    /* 显式演示模式（?demo=1）用琥珀色区分，避免与错误红条混淆。 */
+    .ui-shell-banner.banner--demo {
       background: #2d2b1a; border: 1px solid var(--warn); color: var(--warn);
     }
 

@@ -55,6 +55,8 @@ describe('app.ts boot() 真实入口（用户实际打开的页面）', () => {
     const banner = document.querySelector('[data-banner]');
     expect(banner).toBeTruthy();
     expect(banner?.textContent).toContain('未连接靶机');
+    // 降级横幅应为红色（非 demo 琥珀变体）
+    expect(banner?.classList.contains('banner--demo')).toBe(false);
   });
 
   it('默认模式：点开始录制因未连真机而不进入录制态（降级提示，非失败崩溃）', async () => {
@@ -81,6 +83,8 @@ describe('app.ts boot() 真实入口（用户实际打开的页面）', () => {
 
     const banner = document.querySelector('[data-banner]');
     expect(banner?.textContent).toContain('演示模式');
+    // 显式 demo 横幅应为琥珀色变体（区别于红色降级条）
+    expect(banner?.classList.contains('banner--demo')).toBe(true);
 
     const recBtn = () => document.querySelector('[data-action="toggle-record"]') as HTMLElement;
     const dot = () => document.querySelector('.rec-dot');

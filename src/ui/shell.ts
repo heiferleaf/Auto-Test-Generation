@@ -153,6 +153,8 @@ export class UiShell {
   private enableVersionPanel: boolean;
   /** 顶部提示横幅文本（演示模式说明 / 未连接真机录制警告）。render 会据此重建，故不会被后续 render 冲掉。 */
   private bannerText?: string;
+  /** 横幅样式变体：true=琥珀色（显式演示），false=红色（降级/错误）。 */
+  private bannerDemo = false;
 
   constructor(opts: UiShellOptions) {
     this.kernel = opts.kernel;
@@ -303,9 +305,11 @@ export class UiShell {
     this.render();
   }
 
-  /** 设置顶部提示横幅（持久于实例，render 会据此重建，故不被后续 render 冲掉）。 */
-  setBanner(text: string): void {
+  /** 设置顶部提示横幅（持久于实例，render 会据此重建，故不被后续 render 冲掉）。
+   * @param demo 为 true 时用琥珀色变体（显式演示模式），否则默认红色（降级/错误）。 */
+  setBanner(text: string, demo = false): void {
     this.bannerText = text;
+    this.bannerDemo = demo;
     this.render();
   }
 
@@ -855,7 +859,7 @@ export class UiShell {
     // 否则 insertStep 等后续 render 会把它冲掉（此前 banner 在 render 外 prepend 即被此问题吞掉）。
     if (this.bannerText) {
       const bar = document.createElement('div');
-      bar.className = 'ui-shell-banner';
+      bar.className = 'ui-shell-banner' + (this.bannerDemo ? ' banner--demo' : '');
       bar.setAttribute('data-banner', 'true');
       bar.textContent = this.bannerText;
       root.appendChild(bar);
