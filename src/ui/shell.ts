@@ -10,23 +10,23 @@
 // 设计依据：docs/plan/plan.md §M3.3；docs/test/visual-overlay-ui.md（UI 规格）。
 
 import type { CdpAdapter, VisualCapable, Recordable, ConnectOptions, Locator, VisualRect } from '../cdp/adapter';
-import type { Script, Step, StepType, Assertion, AssertionKind } from '../types/step';
+import type {
+  Script, Step, StepType, Assertion, AssertionKind,
+  StepRunStatus, StepProgressEvent,
+} from '../types/step';
 import { Recorder, type InteractionEvent } from '../recorder/recorder';
 import { ScriptEditor } from '../editor/editor';
 import { SCRIPT_SCHEMA } from '../types/step';
+import { CfgView } from './cfg-view';
+import { TYPE_LABEL, describeLocator } from './step-label';
 
 /** 回放结果（与 cli.CliResult 同构，但由内核产生，UI 壳不依赖 cli 模块）。 */
 export type PlaybackResult = { ok: boolean; failedStepId?: string };
 
-/**
- * 步骤运行态（R3）：仅 UI 瞬时状态，**不写入 Step 模型**。
- * 理由（SRP）：`Step` 是持久化数据（导出写盘、进 R5 版本层 diff），
- * 若把 pass/fail 混入会污染脚本文件与版本差异。故旁挂于 UiShell。
- */
-export type StepRunStatus = 'pending' | 'running' | 'pass' | 'fail';
-
-/** 运行进度事件载荷（服务端经 'step-progress' 推送）。 */
-export type StepProgressEvent = { stepId: string; status: StepRunStatus };
+// 运行态类型定义已迁至 `src/types/step.ts`（与 StepType/ControlKind 同处真相源），
+// 因同级视图组件 cfg-view 也需要它，从 shell 引入会形成"子组件反向依赖编排者"。
+// 此处 re-export 保持既有引用路径可用（向后兼容，不破坏既有 import）。
+export type { StepRunStatus, StepProgressEvent } from '../types/step';
 
 /**
  * UI 壳所需的完整内核能力（抽象接口并集）。
@@ -52,29 +52,7 @@ export type UiShellOptions = {
   script?: Script;
 };
 
-/** step.type → 用户友好动词（展示关注点，与内核语义中立解耦）。 */
-const TYPE_LABEL: Record<StepType, string> = {
-  click: '点击',
-  fill: '填写',
-  select: '选择',
-  wait: '等待',
-  assert: '断言',
-  hover: '悬停',
-  eval: '执行',
-  snapshot: '快照',
-};
-
-/** 把 locator 转成人类可读的简短描述。 */
-function describeLocator(loc?: Locator): string {
-  if (!loc) return '';
-  if (loc.name) return `"${loc.name}"`;
-  if (loc.text) return `文本"${loc.text}"`;
-  if (loc.testId) return `[data-testid=${loc.testId}]`;
-  if (loc.role) return `<${loc.role}>`;
-  if (loc.css) return loc.css;
-  if (loc.xpath) return loc.xpath;
-  return '';
-}
+// TYPE_LABEL / describeLocator 已收敛到 ./step-label（与 CFG 视图共用同一份文案真相源）。
 
 /** 把一条 step 转成用户友好的单行描述。 */
 function describeStep(step: Step): string {
@@ -131,6 +109,15 @@ export class UiShell {
   private frameTimer: any = undefined;
   /** 步骤列表容器缓存（增量 append 用，避免录制高频全量重渲染）。 */
   private stepsEl?: HTMLElement;
+  /** CFG 图形化视图（M3-R4）：SRP 独立组件，仅依赖 Script/Step 类型（DIP）。 */
+  private cfgView?: CfgView;
+  /** CFG 视图挂载区（render 时创建，update 复用）。 */
+  private cfgMount?: HTMLElement;
+  /**
+   * 选中态唯一真相源：列表视图与 CFG 视图都订阅它（兄弟视图互不依赖）。
+   * 避免两个兄弟视图互相同步产生的双向耦合与状态分叉。
+   */
+  private selectedStepId?: string;
 
   constructor(opts: UiShellOptions) {
     this.kernel = opts.kernel;
@@ -140,7 +127,42 @@ export class UiShell {
       app: { name: 'Unnamed', version: '0.0.0' },
       steps: [],
     };
+    // 在 UiShell 内部挂**一处**事件委托：列表项点击 → 选中（反向联动），
+    // 不依赖 app.ts。用 closest 就近命中，兼容点击列表项内部文字。
+    this.mount.addEventListener('click', (e) => {
+      const item = (e.target as HTMLElement).closest('[data-step-item]') as HTMLElement | null;
+      if (!item) return;
+      // 操作按钮（data-action）的点击不触发选中，交由其自身 handler。
+      if ((e.target as HTMLElement).closest('[data-action]')) return;
+      const id = item.getAttribute('data-step-id');
+      if (id) this.selectStep(id);
+    });
   }
+
+  /** 运行进度处理（每次 runAll 订阅，finally 退订，避免多次运行回调叠加）。 */
+  private sawProgress = false;
+  private onProgress = (data: unknown): void => {
+    // 跨 WS 边界兜底：不依赖解构默认值，显式 ?? {}（§4.1 清单 1）。
+    const d = (data ?? {}) as Partial<StepProgressEvent>;
+    const stepId = d.stepId;
+    const status = d.status;
+    if (!stepId || !status) return;
+    this.sawProgress = true;
+    if (status === 'running') {
+      // 顺序要求：先画占位框、再广播状态钩子，否则观察者在钩子里看到的高亮会滞后一步。
+      this.renderHighlight(stepId, this.lastRect, this.highlightGen);
+    }
+    this.setStepStatus(stepId, status);
+    if (status === 'running') {
+      // 精修不 await（推送回调为同步契约），失败静默不打断运行。
+      void this.followHighlight(stepId, this.highlightGen);
+    }
+  };
+
+  // 注：CFG 节点状态**不另开** WS 订阅。状态经 `setStepStatus` 单点分发
+  // （列表项 + CFG 视图共用同一个 stepStatus Map），故只需一处订阅、无顺序问题。
+  // 曾有一版为迁就测试而让生产代码嗅探 mock 夹具属性（kernel.listeners）走不同分支，
+  // 已移除 —— 那会造成"单测走 A 路径、真机走 B 路径"，正是 CODEBUDDY.md §4.1 的盲区成因。
 
   // ---- 状态查询 ----
 
@@ -296,6 +318,85 @@ export class UiShell {
     return this.stepStatus.get(stepId) ?? 'pending';
   }
 
+  // ---- 选中态（M3-R4）：UiShell 是唯一真相源 ----
+
+  /** 当前选中步骤 id（未选中=undefined）。 */
+  getSelectedStepId(): string | undefined {
+    return this.selectedStepId;
+  }
+
+  /** 选中某步：同时同步列表项与 CFG 节点的选中态。选不存在的 id 不产生任何选中态。 */
+  selectStep(stepId: string): void {
+    // 校验 id 是否真实存在于脚本（防脏数据）；不存在则清空选中。
+    const exists = this.flattenSteps().some((s) => s.id === stepId);
+    if (!exists) {
+      this.clearSelection();
+      return;
+    }
+    this.selectedStepId = stepId;
+    this.syncSelectedDom(stepId);
+  }
+
+  /**
+   * 按 stepId 查列表项 DOM。
+   *
+   * 刻意**不用** `querySelector(`[data-step-id="${id}"]`)` 拼接选择器：
+   * stepId 由脚本自由命名，可能含 `"` `\` `]` 空格等 CSS 特殊字符，
+   * 拼接后在真实 Chromium 会抛 SyntaxError 使整页 JS 中断（jsdom 下则静默选空，
+   * 单测因只用安全 id 而看不见）。改为属性精确比对，从根上消除选择器注入。
+   */
+  private findStepItemEl(stepId: string): Element | undefined {
+    for (const el of this.mount.querySelectorAll('[data-step-id]')) {
+      if (el.getAttribute('data-step-id') === stepId) return el;
+    }
+    return undefined;
+  }
+
+  /**
+   * 在单个列表项上标记/取消选中。
+   *
+   * 属性与 class **必须同时设置**：`data-step-selected` 供测试与程序查询，
+   * `is-selected` class 是 CSS 挂点（用户能看见的那一半）。
+   * 曾出现只打属性、index.html 无对应规则 → 点 CFG 节点时列表侧零视觉反馈，
+   * 而只断言属性的测试完全看不出来。故收敛到这一处，避免两者再分叉。
+   */
+  private markStepItemSelected(el: Element | undefined, selected: boolean): void {
+    if (!el) return;
+    el.setAttribute('data-step-selected', selected ? 'true' : 'false');
+    el.classList.toggle('is-selected', selected);
+  }
+
+  /** 清除选中态（列表项与 CFG 节点都还原）。 */
+  private clearSelection(): void {
+    if (this.selectedStepId) {
+      this.markStepItemSelected(this.findStepItemEl(this.selectedStepId), false);
+    }
+    this.cfgView?.setSelected(undefined);
+    this.selectedStepId = undefined;
+  }
+
+  /**
+   * 把当前 stepStatus Map 全部回填到 CFG 节点（CFG update 重置为 pending 后调用，
+   * 保证图节点与列表项状态始终一致——同一真相源，不各算一套）。
+   */
+  private syncAllCfgStatuses(): void {
+    if (!this.cfgView) return;
+    for (const s of this.flattenSteps()) {
+      this.cfgView.setStatus(s.id, this.getStepStatus(s.id));
+    }
+  }
+
+  /** 把选中态同步到两个兄弟视图（列表项 + CFG 节点）。 */
+  private syncSelectedDom(stepId: string): void {
+    // 列表项：先清旧、再置新。
+    this.mount.querySelectorAll('[data-step-selected="true"]').forEach((el) =>
+      this.markStepItemSelected(el, false),
+    );
+    this.markStepItemSelected(this.findStepItemEl(stepId), true);
+    // CFG 节点：由 CfgView 自身管理唯一选中（setSelected 内部清旧置新）。
+    this.cfgView?.setSelected(stepId);
+  }
+
   /** 扁平化脚本步骤（含 CFG children），供状态查找与汇总回填按序遍历。 */
   private flattenSteps(steps: Step[] = this.script.steps): Step[] {
     const out: Step[] = [];
@@ -329,37 +430,18 @@ export class UiShell {
     // 本次运行的步骤索引快照：单次构建，后续每步 O(1) 命中（避免 O(n²) 重复扁平化）。
     this.runIndex = new Map(this.flattenSteps().map((s) => [s.id, s]));
     const gen = ++this.highlightGen;
-    let sawProgress = false;
+    this.sawProgress = false;
 
-    /** 进度监听器：经内核推送通道接收，而非以回调入参传给 playback（RPC 不可序列化函数）。 */
-    const onProgress = (data: unknown) => {
-      // 跨 WS 边界兜底：不依赖解构默认值，显式 ?? {}（§4.1 清单 1）。
-      const d = (data ?? {}) as Partial<StepProgressEvent>;
-      const stepId = d.stepId;
-      const status = d.status;
-      if (!stepId || !status) return;
-      sawProgress = true;
-      if (status === 'running') {
-        // 顺序要求：先画占位框、再广播状态钩子，否则观察者在钩子里看到的高亮会滞后一步。
-        // 同步画占位框的理由（可运行性审查裁定）：真机 locateVisual 往返可达上百 ms，
-        // 若等它回来才画，用户会看到高亮明显滞后于执行；坐标随后精修。
-        this.renderHighlight(stepId, this.lastRect, gen);
-      }
-      this.setStepStatus(stepId, status);
-      if (status === 'running') {
-        // 精修不 await（推送回调为同步契约），失败静默不打断运行。
-        void this.followHighlight(stepId, gen);
-      }
-    };
-
-    this.kernel.on?.('step-progress', onProgress);
+    // 进度监听器：每次运行订阅一次、结束时退订一次，避免多次 runAll 回调叠加。
+    // 只需这一处订阅 —— CFG 节点状态由 setStepStatus 单点分发，不另开订阅。
+    this.kernel.on?.('step-progress', this.onProgress);
 
     let res: PlaybackResult;
     try {
       res = await this.kernel.playback(this.getScript());
     } finally {
       // 退订必须与订阅配对，否则多次 runAll 的回调会叠加。
-      this.kernel.off?.('step-progress', onProgress);
+      this.kernel.off?.('step-progress', this.onProgress);
       // 先作废本代际，再清屏：此后任何迟到渲染都会被代际守卫丢弃。
       this.highlightGen++;
       this.clearHighlight();
@@ -367,7 +449,7 @@ export class UiShell {
     }
 
     // 内核不支持进度推送（DemoKernel / 纯批处理）时，据汇总结果回填。
-    if (!sawProgress) this.backfillStatus(res);
+    if (!this.sawProgress) this.backfillStatus(res);
     this.lastFailedStepId = res.ok ? undefined : res.failedStepId;
     this.render();
     return res;
@@ -381,10 +463,17 @@ export class UiShell {
   private resetRunStatus(): void {
     this.stepStatus.clear();
     this.lastFailedStepId = undefined;
+    // 重置图上所有节点状态为 pending（避免上一轮 pass/fail 残留，§4 测试「重跑」）。
+    this.cfgView?.update(this.script);
   }
 
   private setStepStatus(stepId: string, status: StepRunStatus): void {
     this.stepStatus.set(stepId, status);
+    // 顺序要求：**先把状态落到视图，再广播钩子**。
+    // 钩子是对外可观测点，订阅者会在回调里读 DOM；若先广播后更新，订阅者读到的是
+    // 上一步的旧状态（滞后一步）。R3 的高亮占位框曾踩过同一个坑，此处同理。
+    // CFG 与列表项共用同一 stepStatus Map，状态不各算一套。
+    this.cfgView?.setStatus(stepId, status);
     this.onStepStatusChange?.(stepId, status);
   }
 
@@ -609,6 +698,29 @@ export class UiShell {
 
     this.stepsEl = side;
     root.appendChild(side);
+
+    // 右侧：CFG 图形化视图（M3-R4）。独立 SRP 组件，由 UiShell 编排联动。
+    const cfg = document.createElement('div');
+    cfg.className = 'ui-shell-cfg';
+    cfg.setAttribute('data-cfg', 'true');
+    // 复用同一挂载区：若已存在 CfgView 则复用其实例，避免重复 new 导致事件重复绑定。
+    if (!this.cfgView) {
+      this.cfgView = new CfgView({
+        mount: cfg,
+        onSelect: (stepId) => this.selectStep(stepId),
+      });
+    } else {
+      // 重新挂到新创建的挂载区（render 会 innerHTML=''，旧 mount 已脱离文档）。
+      this.cfgView.rebindMount(cfg);
+    }
+    this.cfgMount = cfg;
+    // update 幂等：重复 render 不会产生重复节点。
+    this.cfgView.update(this.script);
+    // 重建后回填运行态（update 会重置为 pending，需用同一真相源 stepStatus 恢复）。
+    this.syncAllCfgStatuses();
+    // 重建后恢复当前选中态（若运行/编辑期间有选中）。
+    if (this.selectedStepId) this.cfgView.setSelected(this.selectedStepId);
+    root.appendChild(cfg);
   }
 
   /** 构造单条步骤 DOM 项（render 与增量 append 复用）。 */
@@ -619,6 +731,8 @@ export class UiShell {
     item.setAttribute('data-step-item', String(idx));
     item.setAttribute('data-step-id', step.id);
     item.setAttribute('data-step-status', status);
+    // 选中态经统一入口设置（属性 + class 同步），避免 render 重建后丢样式。
+    this.markStepItemSelected(item, step.id === this.selectedStepId);
     const desc = document.createElement('span');
     desc.className = 'ui-shell-step-desc';
     desc.textContent = `${idx + 1}. ${describeStep(step)}`;

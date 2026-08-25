@@ -13,6 +13,20 @@ export type StepType = typeof STEP_TYPES[number];
 export const CONTROL_KINDS = ['sequence', 'if', 'while'] as const;
 export type ControlKind = typeof CONTROL_KINDS[number];
 
+/**
+ * 步骤运行态（M3-R3）：**瞬时 UI 状态，刻意不作为 `Step` 的字段**。
+ * 理由（SRP）：`Step` 是持久化数据（导出写盘、进 R5 版本层 diff），
+ * 把 pass/fail 混进去会污染脚本文件与版本差异。故由 UI 侧旁挂 Map 保存。
+ *
+ * 放在本文件而非 `ui/shell.ts`：`ui/cfg-view.ts` 等**同级视图组件**也需要此类型，
+ * 若从 shell 引入会形成"子组件反向依赖编排者"的耦合（违反架构文档中
+ * "CfgView 仅依赖 Script/Step 类型"的约定）。故与 StepType/ControlKind 同处真相源。
+ */
+export type StepRunStatus = 'pending' | 'running' | 'pass' | 'fail';
+
+/** 运行进度事件载荷（服务端经 'step-progress' 推送）。 */
+export type StepProgressEvent = { stepId: string; status: StepRunStatus };
+
 export type Locator = {
   role?: string;       // 语义角色，如 'button'
   name?: string;       // accessibility name

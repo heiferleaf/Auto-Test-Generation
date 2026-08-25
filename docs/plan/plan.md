@@ -212,7 +212,7 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 | M3-R1 WS 推送通道 | ✅ 已合并 | `feat/ws-push-channel` | `bc13d86` | `test/bridge-push.test.ts` 6 通过 |
 | M3-R2 嵌入实时录制 | ✅ 已合并 | `feat/ws-push-channel` | `a654faa` | `test/ui-shell-live-recording.test.ts` 4 通过 |
 | M3-R3 运行全部 + 步骤态 + 高亮跟随 | ✅ 已合并 | `feat/run-all` | 见合并记录 | `ui-shell-run-all` 22 + `executor-progress` 11 + `bridge-ws-progress` 7（真 WS）+ `bridge-push` 25 通过 |
-| M3-R4 CFG 图形化视图 | ⏳ 进行中 | `feat/cfg-view` | — | 测试先写 |
+| M3-R4 CFG 图形化视图 | 🔍 审查中（待合并） | `feat/cfg-view` | — | `test/cfg-view.test.ts` 47 通过（含特殊字符 id / 点击内部子元素 / OCP 穷尽性 / 导入期 kind 校验） |
 | M3-R5 Git 式版本层 | ⬜ 未开始 | `feat/git-version` | — | — |
 
 > **测试代码权威性纪律（新增，因本轮违规而补）**：既有测试文件（含其 mock 基建，如 `test/ui-shell.test.ts` 的 `makeMockKernel`）**不得为迁就新实现而修改**。新能力需要新的 mock 行为时，新建独立测试文件并自带 mock，不动既有基建。
@@ -259,11 +259,31 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 - **校验**：`npm test` 164 通过 / 17 跳过；`npm run typecheck` 干净；runtime-runnability 第 5 轮**通过**（含 8 类坏数据实测 + 4 突变点）；test 角色**通过**（4/4 突变被捕获，无假绿；确认既有测试为纯追加）；code-review 3 项已修。
 - **未做**：真机端到端冒烟（需 9222 靶机）—— 见下方待办。
 
-### 阶段 M3-R4：CFG 图形化视图（§2.7）
+### 阶段 M3-R4：CFG 图形化视图（§2.7）— 🔍 审查中（待合并）
 - **worktree**：`feat/cfg-view`
-- **测试先行**：`test/cfg-view.test.ts` 用 mock `Script`（含 if/while 嵌套）断言图节点/边/高亮联动生成正确。
-- **实现**：新 `src/ui/cfg-view.ts`（SRP）从 `Script` 构建控制流图（顺序竖向、选择分叉、循环回环）；与步骤列表双向联动；`index.html` 加 `.ui-shell-cfg` 区。
-- **校验**：code-review 查 SRP/ISP；runtime-runnability 真机渲染无崩。
+- **测试先行**：**新建** `test/cfg-view.test.ts`（38 例，jsdom + 自带 mock kernel，未改任何既有测试）。实现前确认为红（模块不存在 → 解析失败）。分五组：①`buildCfgGraph` 图模型（顺序链式边 / if 真假两枝 / while 回环 / 嵌套 / 空脚本 / 坏数据不崩 / isLeaf 标注）；②DOM 渲染（`.ui-shell-cfg`、`data-cfg-node/kind/branch/loop`、嵌套包含、空态）；③双向联动（图↔列表、唯一选中、组节点可选、脏 id 不选中、**stepId 含 CSS 特殊字符**）；④运行态（running/pass/**fail 标红**、与列表状态一致、循环体内嵌套步、重跑重置）；⑤组件边界（可独立挂载、`update` 幂等、`onSelect` 上报、`setStatus` 原地更新不重建）。
+- **实现**：
+  - 新 `src/ui/cfg-view.ts`（SRP）：`buildCfgGraph(script)` 纯函数产图模型（与 DOM 解耦）+ `class CfgView` 渲染（只画图与上报点击，DIP 不 import 内核/执行器）。
+  - 新 `src/ui/step-label.ts`：展示文案单一真相源（`TYPE_LABEL`/`describeLocator`/`describeStepBrief`），步骤列表与 CFG 共用。
+  - 改 `src/ui/shell.ts`：选中态 `selectedStepId` + `selectStep()`/`getSelectedStepId()`（UiShell 为唯一真相源，两个兄弟视图都订阅它）；内部挂列表点击委托；`render()` 挂载 CFG 区；`setStepStatus` 单点分发状态到列表 + 图。
+  - 改 `src/ui/index.html`：`.ui-shell-cfg` 系列 CSS（竖向/分叉/回环/状态色/选中描边），无新依赖。
+  - `src/ui/app.ts`：未改（shell 内部自挂委托）。
+- **关键约定**：`if` 的 `children[0]=then`、`children[1]=else`，**依据执行器** `runNode` 的 `chosen = result.passed ? branches[0] : branches[1]`。画反则图与真实执行相反，属最危险的 UI 谬误。
+- **踩坑记录（审查打回项，均已收口并写入架构文档）**：
+  1. **实现者为让测试通过，在生产代码里嗅探 mock 夹具属性**（`if (kernel.listeners) 走 A 分支 else 走 on/off`），造成「单测走 A、真机 WsKernel 走 B 且 B 从未被测」——§4.1 盲区成因。已整段删除（CFG 状态本就由 `setStepStatus` 单点分发，不需要第二个订阅）。
+  2. 删除后暴露真实缺陷：`setStepStatus` 先广播 `onStepStatusChange` 再更新 CFG DOM，订阅者读到滞后一步的状态（与 R3 高亮占位框同款顺序 bug）。已改为**先落视图、再广播**。
+  3. **我自己的测试掩盖了一个真 bug**：节点点击原实现要求 `e.target === e.currentTarget`，而真实用户点的是节点内部文字（`e.target` 是 label 子元素）→ 点文字无反应；`el.click()` 的合成事件恰好 `target === el`，把缺陷完全掩盖。已补「点击节点内部子元素」测试并改为 mount 级单一委托 + `closest`。
+  4. **DOM 查询拼接选择器**：`querySelector(\`[data-step-id="${id}"]\`)` 在 stepId 含 `"`/`\`/`]`/空格时于真实 Chromium 抛 `SyntaxError` 中断整页 JS，jsdom 下只静默选空（单测用安全 id 看不见）。已改为属性精确比对（`findStepItemEl`），并补特殊字符用例。
+  5. **`switch(ctrl.kind)` 的 `default:` 兜底掩盖 OCP 缺口**：新增控制流类型会被静默错渲为顺序组。已改为穷尽性检查 `const exhaustive: never = ctrl.kind`；实测给 `CONTROL_KINDS` 加 `'switch'` 后 `tsc` 确实在 `cfg-view.ts` 报错。
+  6. `cfg-view` 从 `./shell` 引入 `StepRunStatus` 形成「子组件反向依赖编排者」，与架构文档声明的 DIP 自相矛盾。已把类型迁至 `types/step.ts`，shell 仅 re-export。
+  7. 空态提示在空→非空 `update` 后残留；重复注册的列表点击委托（复制粘贴）。均已修。
+  8. **`never` 穷尽性只是编译期守卫，运行时脏数据照样漏过**：本地导入含未知 `control.kind` 的脚本时（`io.ts` 原先只校验 schema + steps 数组），CFG 会静默错渲（边全空、子节点不挂载、误标"顺序 sequence"），执行器 switch 也会跳过该节点（"看起来通过了"其实没执行）。已在 `io.ts` 的 `validateSteps` 递归校验 `control.kind ∈ CONTROL_KINDS`，与桥边界 `assertRunnableScript` 形成本地/WS 双路同等门槛。
+  9. **只修了一处 OCP 缺口**：`buildCfgGraph` 改了穷尽性检查，但 `renderNode` / `nodeLabel` 仍是 `if/else` + 兜底 else，新增控制流类型同样会被静默按顺序组渲染。已把三处统一为 `assertNeverControlKind`；并把 `CfgNode` 改为**判别联合**（`isLeaf` 判别位），因为原先 `kind: StepType | ControlKind` 迫使每处 `as ControlKind` 强转，而强转会破坏 TS 收窄、令守卫失效。实测：给 `CONTROL_KINDS` 加 `'switch'` → `tsc` 在 cfg-view 的 **3 处**分别报错。
+  10. **只断言 `data-*` 属性掩盖了"用户看不见"**：列表项选中只打 `data-step-selected`，而 `index.html` 无对应 CSS 规则 → 真机点 CFG 节点时列表侧零视觉反馈。已把属性 + `is-selected` class 收敛到 `markStepItemSelected` 单一入口并补 CSS，测试同时断言 class。
+  11. `resetRunStatus` 调 `cfgView.update()` 会清掉图内部选中态而 `UiShell.selectedStepId` 未变，两视图分叉。已让 `CfgView.update` 自行保留并恢复选中项（步骤已删则自然不恢复）。
+  12. **我为修第 9 项引入的 `throw` 本身成了新缺陷**：`assertNeverControlKind` 运行时抛错，而导入期校验只覆盖 `importScript`（本地文件）一条路径 —— 录制直接构造 Script、Agent 经 MCP 构造、R5 版本层还原旧数据都能绕过它直达渲染层，异常在 `render()` 同步栈爆开即**整页白屏**，等于把"静默错渲"升级成"彻底不可用"。已改为**渲染层降级**：`console.warn` + 画「未知控制结构」占位节点（`data-cfg-kind="unknown"` + 虚线样式），子节点照画；硬失败只留在数据入口（io.ts / 桥边界）。补了 3 个「未知 kind 直达渲染层不白屏」用例。**关键**：改 `throw`→`warn` 后**仍保留 `kind: never` 参数类型**，实测新增 `'switch'` 时 tsc 仍在 3 处报错 —— 编译期守卫与运行时降级两者并存，不是二选一。
+- **校验**：`npm test` 211 通过 / 17 跳过；`npm run typecheck` 干净；三校验角色结论见合并记录。
+- **未做**：真机端到端冒烟（需 9222 靶机）。
 
 ### 阶段 M3-R5：Git 式版本层（§2.2/§6）
 - **worktree**：`feat/git-version`

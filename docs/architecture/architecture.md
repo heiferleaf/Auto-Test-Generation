@@ -118,6 +118,54 @@ executor.runScript(adapter, script, onStep)   ← 进度在 Node 进程内产生
 
 **增量渲染**：`UiShell.render()` 当前全量 `innerHTML=''`，实时生成与逐步状态会带来高频重渲染；须改为增量 DOM 更新（按 stepId diff）或视图虚拟化，避免步骤多时卡顿（CODEBUDDY.md §4.1 清单 7）。
 
+#### 2.2.1 CFG 图形化视图（M3-R4，新增模块）
+
+> 来源：docs/design/visual-mask-ui-spec.md §2.7「控制流图」；测试规格 `test/cfg-view.test.ts`（47 例，纯 UI 壳内验证，不依赖内核/执行器）。
+
+**组件职责（SRP）**：新增 `src/ui/cfg-view.ts`，对外导出两样：
+- `buildCfgGraph(script): CfgGraph` —— 纯函数，把 `Script` 递归转为图模型 `{ nodes, edges }`（`nodes` 为顶层节点、嵌套经 `node.children` 递归；`edges` 为各层级扁平汇总）。与 DOM 解耦，便于单测。
+- `class CfgView` —— DOM 渲染组件。只负责画图与上报点击（`onSelect(stepId)`），不决定联动（由 `UiShell` 编排，符合 SRP/DIP）。仅依赖 `Script`/`Step` 类型，**不 import 执行器/playwright/内核**（DIP）。
+
+**图模型约定（与执行器 `runNode` 严格一致，不可自行发明）**：
+- `if` 组：`children[0]=then`（边 `kind:'true'`）、`children[1]=else`（边 `kind:'false'`）。依据 `src/executor/executor.ts`：
+  `const chosen = result.passed ? branches[0] : branches[1]`。若画反则用户所见流向与真实执行相反——最危险的 UI 谬误。只有一个 child 时不得臆造 false 边。
+- `while` 组：循环头→首子 `flow`，末子→循环头 `loop`（回环）；`loopCount` 暴露在节点上供「×N」显示。
+- 顺序/顶层兄弟：`flow` 链式边。
+
+**`if` 约定依据的执行器引用**：`src/executor/executor.ts` 的 `runNode`（`chosen = result.passed ? branches[0] : branches[1]`）。图模型以此为准，保证可视化与真实执行一致。
+
+**边界安全（§4.1）**：`buildCfgGraph` 对 `children` 含 `null` 的坏数据跳过而非抛错（渲染路径崩了会白屏）；`setStatus` 对未知 stepId 静默跳过。
+
+**`setStatus` 原地更新（避免高频重渲染，§4.1 清单 7）**：`CfgView` 缓存 `stepId → DOM 节点` 映射，`setStatus` 只改已有节点的 `data-cfg-status`/`class`，**不整树重建**（测试断言前后 `querySelector` 返回同一 DOM 引用）。`update` 幂等（先清再画，同脚本重复 update 不产生重复节点）。
+
+**选中态真相源在 `UiShell`（兄弟视图互不依赖）**：
+- `UiShell` 新增 `selectedStepId`，暴露 `selectStep(stepId)` / `getSelectedStepId()` 作为唯一真相源。
+- 列表项（`data-step-selected`）与 CFG 节点（`data-cfg-selected`）都订阅它；二者互不耦合。
+- 点击列表项 / 点击 CFG 节点都在 `UiShell` 内部挂事件委托触发 `selectStep`（不依赖 `app.ts`）；选中不存在的 id 不产生任何选中态。
+
+**运行态同步（同一真相源）**：`runAll` 的进度回调除更新列表 `stepStatus` Map 外，经 `CfgView.setStatus` 同步到图节点；`render()` 重建 CFG 后用 `stepStatus` Map 回填，保证图节点与列表项状态始终一致、不各算一套。
+
+**状态分发顺序（先落视图、再广播钩子）**：`setStepStatus` 内部先 `cfgView.setStatus(...)` 更新 DOM，**之后**才 `onStepStatusChange?.(...)` 广播。钩子是对外可观测点，订阅者会在回调里读 DOM；若先广播后更新，订阅者读到的是上一步的旧状态（滞后一步）。R3 的高亮占位框曾踩同一个坑。
+
+**以下为 code-review / 可运行性审查打回后的收口（记录以免复发）**
+
+- **禁止在生产路径嗅探测试夹具**：曾有一版为让测试通过，在 `shell.ts` 里判断 `kernel.listeners` 是否存在来走不同订阅分支（mock 走直接增删集合、真机走 `on/off`）。这造成「单测走 A 路径、真机 WsKernel 走 B 路径」，真机分支从未被任何测试执行——正是 CODEBUDDY.md §4.1 盲区的成因。已整段删除：CFG 状态本就由 `setStepStatus` 单点分发，无需第二个 WS 订阅。
+- **DOM 查询不拼接选择器**：按 stepId 找 DOM 一律走「属性精确比对」（`shell.findStepItemEl` 遍历 `[data-step-id]` 比对，`CfgView` 用 `Map<stepId, HTMLElement>`），**不用** `querySelector(\`[data-step-id="${id}"]\`)`。原因：stepId 由脚本自由命名，可能含 `"` `\` `]` 空格等 CSS 特殊字符，拼接后在真实 Chromium 抛 `SyntaxError` 使整页 JS 中断，而 jsdom 下只是静默选空（单测用安全 id 时完全看不见）。
+- **点击走 mount 级单一事件委托 + `closest`**：不逐节点绑监听、也不用「仅当 `e.target === e.currentTarget` 才响应」。后者会导致点击节点内部文字（真实用户的落点，此时 `e.target` 是 label 子元素）无反应；而测试里的 `el.click()` 恰好 `target === el`，会把该缺陷完全掩盖。委托同时避免大脚本下累积成百上千个监听器。
+- **控制流分发用穷尽性检查守 OCP（三处统一）**：按 `control.kind` 分发的**全部三处**（`buildCfgGraph` 建边、`renderNode` 建 DOM、`nodeLabel` 取文案）统一以 `assertNeverControlKind(kind)` 收尾，**不写运行时兜底**。若 `CONTROL_KINDS` 新增类型而某处未补 `case`，该处**编译期报错**；若写成 `default:` 当顺序组处理，新类型会被静默错渲为顺序流向（图与真实执行不符）。已实测：临时给 `CONTROL_KINDS` 加 `'switch'` → `tsc` 在 `cfg-view.ts` 的 3 处分别报 `Argument of type '"switch"' is not assignable to parameter of type 'never'`。
+  - 配套：`CfgNode` 设计为**判别联合**（`CfgLeafNode | CfgGroupNode`，以 `isLeaf` 为判别位）。原先单一形状 `kind: StepType | ControlKind` 迫使每处分发 `as ControlKind` 强转，而**强转会破坏 TS 收窄，使穷尽性守卫静默失效**——守卫写了却不生效比没写更危险。
+  - 分发时对 `kind` 取局部变量再 `switch`（而非直接 `switch (node.kind)`）：让收窄落在**值**上，`default` 分支里 `kind` 才是 `never`；若对整个对象取 switch，`default` 里 `node` 变 `never`，反而读不出 `node.kind`。
+- **编译期守卫 ≠ 运行时安全（三层防护，缺一不可）**：`never` 穷尽性只拦"开发者新增类型忘了改这里"，拦不住**运行时脏数据**。故按"边界拦截 + 渲染降级"分层：
+  1. **导入期硬失败**：`src/script/io.ts` 的 `validateSteps` 递归校验 `control.kind ∈ CONTROL_KINDS`，非法抛 `ScriptError`。
+  2. **桥边界硬失败**：`bridge-server.assertRunnableScript` 对 WS 传入脚本做同等校验（`CONTROL_KINDS` 单一真相源，两侧自动跟随）。
+  3. **渲染层降级（不抛错）**：`CfgView` 的三处分发点遇未知 kind 时 `console.warn` + 渲染为「未知控制结构」占位节点（`data-cfg-kind="unknown"` + `is-unknown` 虚线样式），子节点照画。
+  - **为何渲染层必须降级而非 throw**：上述 1、2 只覆盖"本地文件导入"与"WS 传入"两条路径；**录制直接构造 Script、Agent 经 MCP 构造、R5 版本层还原旧数据**都能绕过它们直达渲染层。若渲染层 throw，异常在 `render()` 同步栈内爆开 → **整页白屏**，等于把"静默错渲"升级成"彻底不可用"，更糟。降级后：问题可见（不伪装成"顺序 sequence"误导用户）、页面可用（不白屏）、硬失败留在数据入口。
+  - 若未知 kind 流到执行器，`runNode` 的 switch 会跳过该节点（步骤"看起来通过了"其实没执行）——这也是必须在数据入口拦截的原因。
+- **选中态：属性与 class 必须同设**：列表项选中经 `markStepItemSelected` 单一入口同时设 `data-step-selected`（程序/测试可查）与 `is-selected` class（CSS 挂点，用户能看见的那一半）。此前只设属性而 `index.html` 无对应规则 → 真机点 CFG 节点时列表侧零视觉反馈，而只断言属性的测试完全看不出来。**只断言 `data-*` 属性无法证明用户看得见**。
+- **`CfgView.update` 自行保留选中项**：重建 DOM 会丢选中态，但"当前选中哪一步"属 `UiShell` 层语义，不应因视图内部重建而丢（否则 `resetRunStatus` 后出现"列表有选中、图上没有"的兄弟视图分叉）。`update` 记住旧 `selectedId` 并在重建后恢复；该步已被删除则自然不恢复。
+- **展示文案单一真相源**：新增 `src/ui/step-label.ts` 收敛 `TYPE_LABEL` / `describeLocator` / `describeStepBrief`。此前步骤列表与 CFG 视图各存一份 `TYPE_LABEL`，改一处另一处不跟随，会导致同一步骤在列表与图上显示不一致。
+- **运行态类型定义位置**：`StepRunStatus` / `StepProgressEvent` 定义在 `src/types/step.ts`（与 `StepType`/`ControlKind` 同处），`shell.ts` 仅 re-export 保持既有引用可用。原因：`cfg-view` 是与列表**同级**的视图组件，若从 `./shell` 引入类型会形成「子组件反向依赖编排者」，与本节声明的 DIP 约定自相矛盾。
+
 ---
 
 ### 2.3 模块边界与改动面（实现架构）
@@ -128,10 +176,11 @@ executor.runScript(adapter, script, onStep)   ← 进度在 Node 进程内产生
 | 执行器 | `src/executor/executor.ts` | 线性→递归 `runNode` | 新增递归调度，复用 `runStep`；**R3**：新增 `StepProgress` 逐叶子进度上报（控制流节点自身不报）+ `childrenOf` 坏子节点守卫 |
 | CLI | `src/cli.ts` | 汇总运行结果 | **R3**：`onStep` 透传给 `runScript` |
 | CDP 适配层 | `src/cdp/adapter.ts` | 真机控制 | **R3**：`playback(script, onStep?)` 进程内可选进度回调（跨 WS 不传，函数不可序列化） |
-| 脚本 IO | `src/script/io.ts` | schema 校验 + 往返 | 增 v2 常量、children 浅校验 |
+| 脚本 IO | `src/script/io.ts` | schema 校验 + 往返 | 增 v2 常量、children 递归校验；**R4**：递归校验 `control.kind ∈ CONTROL_KINDS`（本地导入路径的边界门槛，与桥边界 `assertRunnableScript` 对等，防未知 kind 静默错渲 / 被执行器跳过） |
 | 录制内核 | `src/recorder/recorder.ts` + `inject.ts` | 产出扁平叶子 | 不改（仍产叶子）；增量推送在桥/UI 层 |
-| UI 壳 | `src/ui/shell.ts` | 编排 + 增量渲染 | 增量 append + CFG 视图挂载；**R3**：`runAll()` + 运行态 `Map`（不入 Step 模型）+ 高亮跟随 + generation token 作废迟到定位 |
-| CFG 视图 | `src/ui/cfg-view.ts`（新） | 图形化控制流 | 新增组件（SRP） |
+| UI 壳 | `src/ui/shell.ts` | 编排 + 增量渲染 + 选中态真相源 | 增量 append + CFG 视图挂载；**R3**：`runAll()` + 运行态 `Map`（不入 Step 模型）+ 高亮跟随 + generation token 作废迟到定位；**R4**：新增 `selectedStepId`/`selectStep`/`getSelectedStepId` 选中态唯一真相源，内部事件委托双向联动列表项与 CFG 节点，进度回调经 `CfgView.setStatus` 同步图节点状态（同一 `stepStatus` Map） |
+| CFG 视图 | `src/ui/cfg-view.ts`（已实现，M3-R4） | 图形化控制流 | 新增组件（SRP）：`buildCfgGraph` 纯函数（图模型，与 DOM 解耦）+ `CfgView` DOM 渲染（只画图与上报点击，DIP 不 import 执行器/内核）；`setStatus` 原地更新避免高频重渲染；坏数据（`children` 含 null）跳过不抛错 |
+| 展示文案 | `src/ui/step-label.ts`（已实现，M3-R4） | Step→人话文案 | 新增（SRP）：`TYPE_LABEL`/`describeLocator`/`describeStepBrief` 单一真相源，步骤列表与 CFG 视图共用，避免两处各存一份而显示不一致 |
 | 版本面板 | `src/ui/version-panel.ts`（新） | Git 式版本操作 | 新增组件（SRP） |
 | WS 桥 | `src/ui/bridge-server.ts` + `ws-kernel.ts` | RPC + 推送 | 加 event/push 消息类型 + `sanitizeArgs` 兜底；**R3**：`playback` 专用分支 + `pushEvent('step-progress')` + `assertRunnableScript` 递归深度校验 + adapter 可注入（DIP，使 WS 线路可测） |
 | 页面 | `src/ui/index.html` | 四区→加 cfg/version 区 | CSS 扩展；**R3**：步骤运行态 class + 失败提示 + 待定位高亮样式 |
