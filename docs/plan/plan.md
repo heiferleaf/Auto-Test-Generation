@@ -146,6 +146,18 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 - 连 CodeBuddy → 面板「开始录制」→ 在软件真实操作后停止 → 步骤列表出现对应 step → 「回放」成功（复用 M3.2 集成闭环，但经 UI 壳触发而非 CLI）。
 - 截图流视图：回放/试跑时中间视图区持续刷新靶机截图（断言截图非空白落盘或返回 Buffer 非空）。
 
+**端到端主链路验收（jsdom，CODEBUDDY.md §4.1 强制门槛）**
+> 动机：M3 曾"渲染能出、单测全绿"但用户打开无任何功能可用。故 UI 改动除单测外，必须有 jsdom 驱动 `app.boot()`（或等价入口）→ 模拟 `[data-action]` 点击的 e2e 测试，证明**用户真实路径**跑通（禁止只信内部 API 直调）。
+> 落地：`test/ui-core-e2e.test.ts`（jsdom 环境）。
+
+交互验收清单（逐条比对 `docs/design/visual-mask-ui-spec.md` §2.x，code-review 须核对）：
+1. **布局（§2 核心范式）**：render 后存在 `.ui-shell-body` 包裹 `[data-stage][data-steps][data-cfg]`（4 栏横向生效，截图流不再独占竖向）。
+2. **插入 4 类（§2.3.1）**：点「插入步骤」展开菜单仅含 `wait/waitUntil/assert/repeat`；选 `wait` → 列表 +1；选非法类（click/fill）被拒（菜单不提供）。
+3. **真实编辑区（§2.6）**：选中步骤 → 渲染 `[data-edit-area]` 真实表单（非 alert）→ 改参数 → 点保存 → `getScript()` 该步不可变更新。
+4. **建组（§2.3.0）**：多选 ≥2 步 → 点「包成选择组」→ 顶层塌缩为 1 个 `control.kind='if'` 节点（children=[选中步]）；CFG 视图出现 `true/false` 两枝。点「包成循环组」→ `control.kind='while'`，CFG 出现回环边（↻）。
+5. **运行失败标红（§2.3.4/§2.4）**：`运行全部` 失败 → 该步 `data-step-status="fail"` + 顶部 `[data-run-notice]` 提醒条。
+6. **Git 面板默认隐藏**：主体流程 `render` 不挂载 `[data-version]`（解耦可选插件，opt-in `enableVersionPanel` 才挂载）。
+
 **架构同步（§5.1）**：UI 壳新增 `src/ui/` 目录（UiShell 组件 + 宿主 serve 入口），属新增模块边界，需在 `architecture.md` 补「UI 壳」小节（组件职责、与内核依赖方向）。
 
 ---
