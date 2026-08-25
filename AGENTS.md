@@ -70,6 +70,10 @@ git worktree add -b feat/<name> .cursor/worktree/<name> master
 
 注释必须写「这段代码做什么 / 为什么」，禁止只写需求/设计编号。
 
+### 4.1 从需求到代码的方法论（`spec-driven-impl`）
+
+接到功能/修复任务、需要从需求产出设计与实施计划时，走 `spec-driven-impl` 链路：需求冻结 → **时序对齐**（可动手的标志是执行时序对齐，不是功能清单对齐）→ 差距分析（A 缺陷 / B 计划 / C 决策点）→ 决策点确认（schema/协议变更必须显式问用户，不默默改）→ 测试先行 → 三方一致 → 边界兜底。详见 skill `spec-driven-impl`。Windows/编码环境坑（终端乱码、`Select-String` 截断、PS 不支持 `&&`、fnm symlink 噪音）见 `.cursor/rules/engineering.mdc`。
+
 ---
 
 ## 5 测试先行
