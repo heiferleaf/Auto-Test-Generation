@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ATG M3 可视化面板原型（对照确认 · 非正式实现）</title>
+  <style>
+    :root {
+      --bg: #1e1e2e; --panel: #27293d; --line: #3a3d57; --chip: #2f3147;
+      --text: #e6e6f0; --muted: #9a9cb8; --accent: #6c8cff; --ok: #4ec9a8;
+      --warn: #e5c07b; --danger: #f85149; --true: #3fb950; --stage: #11111b;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #12121a; color: var(--text); }
+    .proto-nav {
+      display: flex; align-items: flex-start; gap: 10px; padding: 10px 14px;
+      background: #2d2b1a; border-bottom: 1px solid var(--warn); flex-wrap: wrap;
+    }
+    .proto-nav-label { font-size: 12px; color: var(--warn); line-height: 1.4; min-width: 220px; }
+    .proto-nav-label strong { color: #fff; }
+    .proto-nav-btns { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
+    .proto-nav button {
+      background: #3a3724; color: var(--text); border: 1px solid #6b6238; border-radius: 6px;
+      padding: 6px 10px; font-size: 12px; cursor: pointer;
+    }
+    .proto-nav button.is-on { background: var(--warn); color: #1e1e2e; border-color: var(--warn); font-weight: 600; }
+    .proto-note { font-size: 11px; color: #c9c3a0; width: 100%; }
+
+    .browser-chrome {
+      margin: 12px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+      background: var(--bg); box-shadow: 0 18px 40px rgba(0,0,0,.35);
+    }
+    .chrome-bar {
+      display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #23243a;
+      border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted);
+    }
+    .chrome-dots { display: flex; gap: 5px; }
+    .chrome-dots i { width: 9px; height: 9px; border-radius: 50%; display: block; }
+    .chrome-dots i:nth-child(1) { background: #ff5f56; }
+    .chrome-dots i:nth-child(2) { background: #ffbd2e; }
+    .chrome-dots i:nth-child(3) { background: #27c93f; }
+    .chrome-url {
+      flex: 1; background: #1a1b2b; border: 1px solid var(--line); border-radius: 6px;
+      padding: 5px 10px; color: var(--muted);
+    }
+
+    .screen { display: none; }
+    .screen.is-on { display: block; }
+    .app { display: flex; flex-direction: column; min-height: 720px; }
+
+    .header {
+      display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+      background: var(--panel); border-bottom: 1px solid var(--line); font-size: 13px;
+    }
+    .badge { color: var(--muted); font-size: 12px; }
+    .status-ok { color: var(--ok); font-weight: 600; }
+    .rec-dot { width: 9px; height: 9px; border-radius: 50%; background: #555; }
+    .rec-dot.on { background: #ff5f56; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+    .banner {
+      margin: 8px 16px 0; padding: 9px 12px; border-radius: 6px; font-size: 13px; line-height: 1.5;
+      background: #2a3148; border: 1px solid var(--accent); color: #c9d4ff;
+    }
+    .banner.warn { background: #43303a; border-color: var(--danger); color: #ffb4ae; }
+    .banner.rec { background: #3a1f24; border-color: #ff5f56; color: #ffb4ae; font-weight: 600; }
+
+    .body { flex: 1; display: flex; min-height: 0; }
+    .cfg {
+      width: 360px; border-right: 1px solid var(--line); background: var(--panel);
+      display: flex; flex-direction: column; min-height: 540px;
+    }
+    .pane-title { padding: 10px 14px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; }
+    .cfg-tree { flex: 1; overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; position: relative; }
+    .group {
+      border: 1px dashed var(--line); border-radius: 8px; padding: 6px; background: #22243a;
+    }
+    .group.is-selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(108,140,255,.35); }
+    .group.is-drag { opacity: .45; transform: rotate(-1.5deg); }
+    .group-head { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; margin-bottom: 4px; }
+    .node {
+      padding: 8px 10px; background: var(--chip); border: 1px solid transparent; border-radius: 6px;
+      font-size: 13px; cursor: pointer;
+    }
+    .node.is-selected { border-color: var(--accent); background: #1f2b3a; }
+    .kind { color: var(--muted); font-size: 11px; margin-right: 6px; }
+    .branch { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
+    .col { padding: 6px; border-radius: 6px; min-height: 54px; }
+    .col.t { border-left: 2px solid var(--true); background: #1c2a22; }
+    .col.f { border-left: 2px solid var(--danger); background: #2a1c22; }
+    .col h4 { margin: 0 0 6px; font-size: 11px; color: var(--muted); font-weight: 600; }
+    .loop { margin-top: 6px; padding-left: 8px; border-left: 2px dashed var(--accent); display: flex; flex-direction: column; gap: 6px; }
+    .drop { height: 8px; border-radius: 4px; background: var(--accent); margin: 2px 0; box-shadow: 0 0 0 3px rgba(108,140,255,.25); }
+    .lasso {
+      position: absolute; left: 18px; top: 58px; width: 310px; height: 118px;
+      border: 1.5px dashed var(--accent); background: rgba(108,140,255,.12); border-radius: 8px; pointer-events: none;
+    }
+    .popup {
+      position: absolute; left: 48px; top: 168px; width: 220px; background: #34374f;
+      border: 1px solid var(--accent); border-radius: 8px; padding: 8px; z-index: 3; box-shadow: 0 10px 24px rgba(0,0,0,.4);
+    }
+    .popup button {
+      display: block; width: 100%; text-align: left; margin: 4px 0; padding: 7px 10px;
+      background: #2f3147; color: var(--text); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; font-size: 13px;
+    }
+    .popup button:hover { border-color: var(--accent); }
+
+    .stage-wrap { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .stage {
+      position: relative; flex: 1; margin: 12px; border: 1px solid var(--line);
+      border-radius: 8px; overflow: hidden; background: var(--stage);
+    }
+    .stage-lock {
+      position: absolute; top: 10px; left: 10px; right: 10px; z-index: 2;
+      background: rgba(17,17,27,.92); border: 1px dashed #ff8b82; color: #ffb4ae;
+      border-radius: 6px; padding: 8px 10px; font-size: 12px;
+    }
+    .fake-ide {
+      margin: 58px 16px 16px; height: calc(100% - 80px); background: #1f2330; border: 1px solid #2d3348;
+      border-radius: 6px; padding: 12px; color: #9aa3b8; font-size: 12px; position: relative;
+    }
+    .fake-title { color: #d7dbe8; font-size: 13px; margin-bottom: 8px; }
+    .fake-input {
+      margin-top: 10px; background: #161821; border: 1px solid #3a3d57; border-radius: 6px;
+      padding: 8px 10px; color: #e6e6f0;
+    }
+    .hl { position: absolute; border: 2px solid var(--accent); background: rgba(108,140,255,.15); border-radius: 3px; pointer-events: none; }
+    .hl.rec { border-color: #ff5f56; background: rgba(255,95,86,.12); }
+    .float-tag {
+      position: absolute; font-size: 11px; background: var(--accent); color: #fff;
+      border-radius: 4px; padding: 2px 6px;
+    }
+
+    .detail {
+      width: 300px; border-left: 1px solid var(--line); background: var(--panel);
+      display: flex; flex-direction: column;
+    }
+    .form { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+    label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+    input, select, textarea {
+      background: #1a1b2b; border: 1px solid var(--line); color: var(--text);
+      border-radius: 6px; padding: 7px 9px; font-size: 13px;
+    }
+    .row-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+    button.ui {
+      background: #34374f; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+      padding: 7px 12px; font-size: 13px; cursor: pointer;
+    }
+    button.ui.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    button.ui.danger { color: #ff8b82; }
+    button.ui:disabled { opacity: .45; cursor: not-allowed; }
+    .encap { background: #1f2b3a; border: 1px solid var(--accent); border-radius: 6px; padding: 8px 10px; color: #c9d4ff; font-size: 13px; }
+    .muted { color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+    .actions { display: flex; gap: 8px; padding: 10px 16px; background: var(--panel); border-top: 1px solid var(--line); flex-wrap: wrap; }
+    .insert-menu {
+      position: relative;
+    }
+    .insert-pop {
+      position: absolute; bottom: 42px; left: 0; width: 180px; background: #34374f;
+      border: 1px solid var(--line); border-radius: 8px; padding: 6px; z-index: 4;
+    }
+    .insert-pop div { padding: 7px 10px; border-radius: 5px; font-size: 13px; cursor: pointer; }
+    .insert-pop div:hover { background: #2f3147; }
+    .insert-pop .off { color: var(--muted); font-size: 11px; cursor: default; }
+
+    .flow { padding: 20px; background: #171824; }
+    .flow h2 { margin: 0 0 8px; font-size: 18px; }
+    .flow p { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+    .flow-grid { display: flex; flex-direction: column; gap: 18px; }
+    .lane { border: 1px solid var(--line); border-radius: 10px; padding: 14px; background: #1e1f30; }
+    .lane h3 { margin: 0 0 10px; font-size: 14px; }
+    .steps { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .box { background: var(--chip); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12px; max-width: 180px; }
+    .box.start { border-color: var(--ok); }
+    .box.decision { border-color: var(--warn); background: #2d2b1a; }
+    .box.target { border-color: #ff9e42; background: #2c2418; }
+    .box.web { border-color: var(--accent); }
+    .arrow { color: var(--muted); font-size: 16px; }
+    .caption { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="proto-nav">
+    <div class="proto-nav-label">
+      <strong>对照确认导航（不是产品 UI）</strong><br />
+      工作台 = 浏览器面板 localhost:5173 · 点选发生在真实靶机
+    </div>
+    <div class="proto-nav-btns" id="nav"></div>
+    <div class="proto-note">非正式实现、未改 src/。Figma MCP 当前需要登录，本页用于先对照确认交互。无 Git 版本面板。</div>
+  </div>
+
+  <div class="browser-chrome">
+    <div class="chrome-bar">
+      <span class="chrome-dots"><i></i><i></i><i></i></span>
+      <div class="chrome-url">localhost:5173 · ATG 可视化工作台（网页） · 靶机另开：VS Code / Electron</div>
+    </div>
+
+    <!-- 1 主界面-已连接 -->
+    <div class="screen is-on" data-id="s1">
+      <div class="app">
+        <div class="header">
+          <span class="status-ok">已连接</span>
+          <span class="badge">靶机 VS Code · 调试端口 9222</span>
+          <span class="rec-dot"></span>
+          <span class="badge">空闲</span>
+          <span class="badge" style="margin-left:auto">CFG 统一展示 · 无版本管理</span>
+        </div>
+        <div class="banner">本面板不能操作测试软件。截图仅预览；开始录制后请到真实软件里点击/输入。</div>
+        <div class="body">
+          <aside class="cfg">
+            <div class="pane-title"><span>CFG 步骤（一步 = 一组）</span><span>拖拽调序 · 框选打包</span></div>
+            <div class="cfg-tree">
+              <div class="group is-selected">
+                <div class="group-head"><span>组 1 · 顺序组</span><span>默认</span></div>
+                <div class="node is-selected"><span class="kind">点击</span>搜索框</div>
+              </div>
+              <div class="group">
+                <div class="group-head"><span>组 2 · 顺序组</span><span>默认</span></div>
+                <div class="node"><span class="kind">填充</span>搜索框 = 你好</div>
+              </div>
+              <div class="group">
+                <div class="group-head"><span>组 3 · 顺序组</span><span>默认</span></div>
+                <div class="node"><span class="kind">点击</span>搜索</div>
+              </div>
+            </div>
+          </aside>
+          <div class="stage-wrap">
+            <div class="stage">
+              <div class="stage-lock">预览舞台：这里点不到靶机。真实点击必须发生在已启动的 VS Code / Electron 窗口。</div>
+              <div class="fake-ide">
+                <div class="fake-title">VS Code 截图预览（只读）</div>
+                侧栏 · 编辑器 · 终端……这是靶机画面的快照，不是可点的软件本体。
+                <div class="fake-input">搜索框</div>
+                <div class="hl" style="left:12px;top:72px;width:120px;height:28px"></div>
+                <div class="float-tag" style="left:12px;top:56px">点击 · 搜索框</div>
+              </div>
+            </div>
+          </div>
+          <aside class="detail">
+            <div class="pane-title">详情 / 编辑</div>
+            <div class="form">
+              <div>类型：点击</div>
+              <label>封装定位（给人看）
+                <div class="encap">搜索框</div>
+              </label>
+              <div class="muted">完整 DOM 路径默认折叠。不把 css/xpath 长串甩到主视图。</div>
+              <div class="row-btns">
+                <button class="ui primary">保存</button>
+                <button class="ui danger">删除此步</button>
+              </div>
+              <div class="muted">删除只删当前节点，不级联后面的步骤。</div>
+            </div>
+          </aside>
+        </div>
+        <div class="actions">
+          <button class="ui primary">开始录制</button>
+          <span class="insert-menu">
+            <button class="ui">插入步骤 ▾</button>
+          </span>
+          <button class="ui">运行全部</button>
+          <span class="badge">未连接时录制/运行禁用 · 本期插入只有等待时间 / 等待元素 / 断言</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2 录制中 -->
+    <div class="screen" data-id="s2">
+      <div class="app">
+        <div class="header">
+          <span class="status-ok">已连接</span>
+          <span class="badge">靶机 VS Code · 9222</span>
+          <span class="rec-dot on"></span>
+          <span style="color:#ff8b82;font-weight:700">● 录制中</span>
+        </div>
+        <div class="banner rec">请到真实软件里点击 / 输入。本网页截图上的点击不会生成步骤。输入「你好」只保留一条填充，不会出现 n / ni / nihao。</div>
+        <div class="body">
+          <aside class="cfg">
+            <div class="pane-title"><span>CFG 实时增长</span><span>不是停录后批量生成</span></div>
+            <div class="cfg-tree">
+              <div class="group">
+                <div class="group-head"><span>组 1 · 顺序组</span><span>刚捕获</span></div>
+                <div class="node"><span class="kind">点击</span>搜索框</div>
+              </div>
+              <div class="group is-selected">
+                <div class="group-head"><span>组 2 · 顺序组</span><span>刚捕获</span></div>
+                <div class="node is-selected"><span class="kind">填充</span>搜索框 = 你好</div>
+              </div>
+            </div>
+          </aside>
+          <div class="stage-wrap">
+            <div class="stage">
+              <div class="stage-lock">录制监听在靶机内。请切到 VS Code 窗口操作。</div>
+              <div class="fake-ide">
+                <div class="fake-title">截图跟随（辅助面）</div>
+                <div class="fake-input">你好</div>
+                <div class="hl rec" style="left:12px;top:42px;width:220px;height:36px"></div>
+                <div class="float-tag" style="left:12px;top:26px;background:#ff5f56">填充 · 搜索框</div>
+              </div>
+            </div>
+          </div>
+          <aside class="detail">
+            <div class="pane-title">刚生成的步骤</div>
+            <div class="form">
+              <div>类型：填充</div>
+              <label>封装定位<div class="encap">搜索框</div></label>
+              <label>最终文本<input value="你好" readonly /></label>
+              <div class="muted">中间按键过程已坍缩。详情里也不展示 n → ni → nihao。</div>
+            </div>
+          </aside>
+        </div>
+        <div class="actions">
+          <button class="ui danger">停止录制</button>
+          <button class="ui" disabled>插入步骤</button>
+          <button class="ui" disabled>运行全部</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3 插入-等待时间 -->
+    <div class="screen" data-id="s3">
+      <div class="app">
+        <div class="header">
+          <span class="status-ok">已连接</span>
+          <span class="badge">插入控制步 · 不需要点选元素</span>
+        </div>
+        <div class="banner">用户操作类步骤（点击/填充）不能手建，只能录制。插入菜单只有三类。</div>
+        <div class="body">
+          <aside class="cfg">
+            <div class="pane-title">CFG</div>
+            <div class="cfg-tree">
+              <div class="group"><div class="group-head">组 1</div><div class="node"><span class="kind">点击</span>搜索</div></div>
+              <div class="group is-selected"><div class="group-head">组 4 · 新建</div><div class="node is-selected"><span class="kind">等待</span>3000ms</div></div>
+            </div>
+          </aside>
+          <div class="stage-wrap">
+            <div class="stage">
+              <div class="stage-lock">等待时间不拾取元素，舞台可继续看当前页截图。</div>
+              <div class="fake-ide">等模型回答 / 等页面加载时用此时长，不做假 sleep 冒充等到元素。</div>
+            </div>
+          </div>
+          <aside class="detail">
+            <div class="pane-title">插入 · 等待时间</div>
+            <div class="form">
+              <label>等待时长 waitMs<input value="3000" /> </label>
+              <div class="muted">保存后 CFG 显示「等待 3000ms」。</div>
+              <div class="row-btns"><button class="ui primary">保存</button><button class="ui">取消</button></div>
+            </div>
+          </aside>
+        </div>
+        <div class="actions">
+          <button class="ui">开始录制</button>
+          <span class="insert-menu">
+            <button class="ui primary">插入步骤 ▾</button>
+            <div class="insert-pop">
+              <div>等待时间</div>
+              <div>等待元素出现</div>
+              <div>断言</div>
+              <div class="off">循环不在这里 · 选中组后设 kind</div>
+            </div>
+          </span>
+          <button class="ui">运行全部</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4 插入-等待元素 -->
+    <div class="screen" data-id="s4">
+      <div class="app">
+        <div class="header">
+          <span class="status-ok">已连接</span>
+          <span class="rec-dot on"></span>
+          <span style="color:#ff8b82;font-weight:700">点选中 · 不是整段录制</span>
+        </div>
+        <div class="banner rec">请到真实软件里点选目标元素。这次点击只写回当前表单的 locator，不会当成普通录制步骤。</div>
+        <div class="body">
+          <aside class="cfg">
+            <div class="pane-title">CFG</div>
+            <div class="cfg-tree">
+              <div class="group"><div class="group-head">组 3</div><div class="node"><span class="kind">点击</span>搜索</div></div>
+              <div class="group is-selected"><div class="group-head">组 5 · 草稿</div><div class="node is-selected"><span class="kind">等待元素</span>尚未点选</div></div>
+            </div>
+          </aside>
+          <div class="stage-wrap">
+            <div class="stage">
+              <div class="stage-lock">不要点这张截图来冒充点选。请切到靶机窗口。</div>
+              <div class="fake-ide">靶机内会出现拾取高亮。选中后工作台显示人话名。</div>
+            </div>
+          </div>
+          <aside class="detail">
+            <div class="pane-title">插入 · 等待元素</div>
+            <div class="form">
+              <label>等待目标
+                <div class="encap">尚未选取</div>
+              </label>
+              <button class="ui primary">在软件中选取</button>
+              <label>最长等待 timeoutMs<input value="10000" /></label>
+              <div class="muted">保存后：等待 [封装名] 出现，最长 10000ms。超时则该步失败，禁止只 sleep 假装等到。</div>
+              <div class="muted">点选完成后示例：<b style="color:var(--text)">回答完成</b>（不是 role=status css=...）</div>
+              <div class="row-btns"><button class="ui" disabled>保存</button><button class="ui">取消点选</button></div>
+            </div>
+          </aside>
+        </div>
+        <div class="actions">
+          <button class="ui" disabled>开始录制</button>
+          <button class="ui">取消点选</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4b 等待元素已选中 -->
+    <div class="screen" data-id="s4b">
+      <div class="app">
+        <div class="header">
+          <span class="status-ok">已连接</span>
+          <span class="badge">点选完成，已写回封装名</span>
+        </div>
+        <div class="banner">目标来自靶机点选。人话标签：回答完成。完整路径可在详情展开。</div>
+        <div class="body">
+          <aside class="cfg">
+            <div class="pane-title">CFG</div>
+            <div class="cfg-tree">
+              <div class="group is-selected"><div class="group-head">组 5</div><div class="node is-selected"><span class="kind">等待元素</span>回答完成 · 最长 10000ms</div></div>
+            </div>
+          </aside>
+          <div class="stage-wrap">
+            <div class="stage">
+              <div class="stage-lock">舞台仅高亮刚点到的元素，仍不可点。</div>
+              <div class="fake-ide">
+                <div class="fake-title">状态栏</div>
+                <div class="fake-input">回答完成</div>
+                <div class="hl" style="left:12px;top:42px;width:160px;height:32px"></div>
+              </div>
+            </div>
+          </div>
+          <aside class="detail">
+            <div class="pane-title">等待元素 · 已选取</div>
+            <div class="form">
+              <label>封装定位<div class="encap">回答完成</div></label>
+              <button class="ui">重新在软件中选取</button>
+              <label>最长等待 timeoutMs<input value="10000" /></label>
+              <div class="row-btns"><button class="ui primary">保存</button></div>
+            </div>
+          </aside>
+        </div>
+        <div class="actions"><button class="ui">开始录制</button><button class="ui">插入步骤</button><button class="ui">运行全部</button></div>
+      </div>
+    </div>
+
+    <!-- 5 断言-元素可见 -->
+    <div class="screen" data-id="s5a">
+      <div class="app">
+        <div class="header"><span class="status-ok">已连接</span><span class="badge">断言 · 元素可见</span></div>
+        <div class="banner">元素类断言必须能点选。点「在软件中选取」进入与等待元素同一套点选子模式。</div>
+        <div class="body">
+          <aside class="cfg">
+            <div class="pane-title">CFG</div>
+            <div class="cfg-tree">
+              <div class="group is-selected"><div class="group-head">组 6</div><div class="node is-selected"><span class="kind">断言</span>可见 · 提交按钮</div></div>
+            </div>
+          </aside>
+          <div class="stage-wrap">
+            <div class="stage">
+              <div class="stage-lock">断言目标也在靶机里点，不在网页填 css。</div>
+              <div class="fake-ide"><div class="fake-input" style="width:90px;text-align:center">提交</div><div class="hl" style="left:12px;top:12px;width:90px;height:36px"></div></div>
+            </div>
+          </div>
+          <aside class="detail">
+            <div class="pane-title">插入 · 断言</div>
+            <div class="form">
+              <label>断言类型
+                <select><option selected>元素可见</option><option>存在文本</option></select>
+              </label>
+              <label>目标元素<div class="encap">提交按钮</div></label>
+              <button class="ui">在软件中选取</button>
+              <div class="row-btns"><button class="ui primary">保存</button></div>
+            </div>
+          </aside>
+        </div>
+        <div class="actions"><button class="ui">开始录制</button><button class="ui primary">插入步骤 ▾</button><button class="ui">运行全部</button></div>
+      </div>
+    </div>
+
+    <!-- 5 断言-存在文本 -->
+    <div class="screen" data-id="s5b">
+      <div class="app">
+        <div class="header"><span class="status-ok">已连接</span><span class="badge">断言 · 存在文本</span></div>
+        <div class="banner">文本类断言：填写目标文本。可选再点选所在元素，缩小查找范围。</div>
+        <div class="body">
+          <aside class="cfg">
+            <div class="pane-title">CFG</div>
+            <div class="cfg-tree">
+              <div class="group is-selected"><div class="group-head">组 6</div><div class="node is-selected"><span class="kind">断言</span>存在文本「完成」</div></div>
+            </div>
+          </aside>
+          <div class="stage-wrap">
+            <div class="stage">
+              <div class="stage-lock">目标文本在工作台填写；若要点选容器，仍须切到靶机。</div>
+              <div class="fake-ide">标题区域显示「完成」</div>
+            </div>
+          </div>
+          <aside class="detail">
+            <div class="pane-title">插入 · 断言</div>
+            <div class="form">
+              <label>断言类型
+                <select><option>元素可见</option><option selected>存在文本</option></select>
+              </label>
+              <label>目标文本<input value="完成" /></label>
+              <label>可选：所在元素<div class="encap">未选取（整页查找）</div></label>
+              <button class="ui">在软件中选取容器（可选）</button>
+              <div class="row-btns"><button class="ui primary">保存</button></div>
+            </div>
+          </aside>
+        </div>
+        <div class="actions"><button class="ui">开始录制</button><button class="ui">插入步骤</button><button class="ui">运行全部</button></div>
+      </div>
+    </div>
+
+    <!-- 6 框选成组 -->
+    <div class="screen" data-id="s6">
+      <div class="app">
+        <div class="header"><span class="status-ok">已连接</span><span class="badge">左键按住框选</span></div>
+        <div class="banner">松手后弹出：分支组 / 循环组 / 仅打包为顺序组。组可命名、可拆包。</div>
+        <div class="body">
+          <aside class="cfg">
+            <div class="pane-title">CFG · 橡皮筋框选中</div>
+            <div class="cfg-tree">
+              <div class="lasso"></div>
+              <div class="group is-selected"><div class="group-head">组 1</div><div class="node is-selected"><span class="kind">点击</span>刷新</div></div>
+              <div class="group is-selected"><div class="group-head">组 2</div><div class="node is-selected"><span class="kind">等待</span>1000ms</div></div>
+              <div class="group"><div class="group-head">组 3</div><div class="node"><span class="kind">点击</span>提交</div></div>
+              <div class="popup">
+                <div class="muted" style="padding:4px 6px">将 2 个组合并为</div>
+                <button>设为分支组</button>
+                <button>设为循环组</button>
+                <button>仅打包为顺序组</button>
+              </div>
+            </div>
+          </aside>
+          <div class="stage-wrap">
+            <div class="stage">
+              <div class="stage-lock">框选发生在网页 CFG 区，不是靶机窗口。</div>
+              <div class="fake-ide">舞台保持当前截图，不参与框选。</div>
+            </div>
+          </div>
+          <aside class="detail">
+            <div class="pane-title">打包</div>
+            <div class="form">
+              <label>组名（建议本期就做）<input value="组 3" /></label>
+              <div class="muted">若选分支组：当前框选内容进入 True，False 初始为空，条件再点选。</div>
+            </div>
+          </aside>
+        </div>
+        <div class="actions"><button class="ui">开始录制</button><button class="ui">插入步骤</button><button class="ui">运行全部</button></div>
+      </div>
+    </div>
+
+    <!-- 7 选择组设置 -->
+    <div class="screen" data-id="s7">
+      <div class="app">
+        <div class="header"><span class="status-ok">已连接</span><span class="badge">选择组 · if / else</span></div>
+        <div class="banner">执行条件和断言同一套：点选元素或设文本。条件点选仍须到真实软件。</div>
+        <div class="body">
+          <aside class="cfg">
+            <div class="pane-title">CFG</div>
+            <div class="cfg-tree">
+              <div class="group is-selected">
+                <div class="group-head"><span>登录后处理 · 选择组</span><span>可拆包</span></div>
+                <div class="node is-selected"><span class="kind">条件</span>标题 存在文本「完成」</div>
+                <div class="branch">
+                  <div class="col t">
+                    <h4>Then / True</h4>
+                    <div class="node"><span class="kind">点击</span>继续</div>
+                  </div>
+                  <div class="col f">
+                    <h4>Else / False（空）</h4>
+                    <div class="muted">可再拖入或框选填入</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </aside>
+          <div class="stage-wrap">
+            <div class="stage">
+              <div class="stage-lock">配置条件时点「在软件中选取」，不要在截图上点。</div>
+              <div class="fake-ide">标题 = 完成</div>
+            </div>
+          </div>
+          <aside class="detail">
+            <div class="pane-title">选择组设置</div>
+            <div class="form">
+              <label>组名<input value="登录后处理" /></label>
+              <label>条件类型
+                <select><option>元素可见</option><option selected>存在文本</option></select>
+              </label>
+              <label>目标文本<input value="完成" /></label>
+              <button class="ui">在软件中选取条件元素</button>
+              <div class="muted">children[0]=True，children[1]=Else。画反则运行相反。</div>
+              <div class="row-btns"><button class="ui primary">保存</button><button class="ui">拆包</button></div>
+            </div>
+          </aside>
+        </div>
+        <div class="actions"><button class="ui">开始录制</button><button class="ui">插入步骤</button><button class="ui">运行全部</button></div>
+      </div>
+    </div>
+
+    <!-- 8 循环组设置 -->
+    <div class="screen" data-id="s8">
+      <div class="app">
+        <div class="header"><span class="status-ok">已连接</span><span class="badge">循环组 · ×N</span></div>
+        <div class="banner">循环不是插入菜单项。先有组（默认一步一组或打包），再设为循环并填次数。</div>
+        <div class="body">
+          <aside class="cfg">
+            <div class="pane-title">CFG</div>
+            <div class="cfg-tree">
+              <div class="group is-selected">
+                <div class="group-head"><span>重试刷新 · 循环组 × 5</span><span>可拆包</span></div>
+                <div class="loop">
+                  <div class="node"><span class="kind">点击</span>刷新</div>
+                  <div class="node"><span class="kind">等待</span>1000ms</div>
+                </div>
+              </div>
+            </div>
+          </aside>
+          <div class="stage-wrap">
+            <div class="stage">
+              <div class="stage-lock">循环次数在网页里填，循环体里的点击仍来自录制。</div>
+              <div class="fake-ide">循环执行时舞台跟随当前步高亮。</div>
+            </div>
+          </div>
+          <aside class="detail">
+            <div class="pane-title">循环组设置</div>
+            <div class="form">
+              <label>组名<input value="重试刷新" /></label>
+              <label>循环次数<input value="5" /></label>
+              <div class="muted">组内步骤为循环体。CFG 显示回环标记 ×5。</div>
+              <div class="row-btns"><button class="ui primary">保存</button><button class="ui">拆包</button></div>
+            </div>
+          </aside>
+        </div>
+        <div class="actions"><button class="ui">开始录制</button><button class="ui">插入步骤</button><button class="ui">运行全部</button></div>
+      </div>
+    </div>
+
+    <!-- 9 拖拽调序 -->
+    <div class="screen" data-id="s9">
+      <div class="app">
+        <div class="header"><span class="status-ok">已连接</span><span class="badge">拖拽调序</span></div>
+        <div class="banner">在 CFG 上拖节点调整兄弟顺序。不能拖进破坏 if/while 合法性的位置（例如把 True 拖成与条件平级且无提示）。</div>
+        <div class="body">
+          <aside class="cfg">
+            <div class="pane-title">CFG · 正在拖动组 2</div>
+            <div class="cfg-tree">
+              <div class="group"><div class="group-head">组 1</div><div class="node"><span class="kind">点击</span>搜索框</div></div>
+              <div class="drop"></div>
+              <div class="group is-drag is-selected"><div class="group-head">组 2 · 拖动中</div><div class="node is-selected"><span class="kind">填充</span>搜索框 = 你好</div></div>
+              <div class="group"><div class="group-head">组 3</div><div class="node"><span class="kind">点击</span>搜索</div></div>
+            </div>
+          </aside>
+          <div class="stage-wrap">
+            <div class="stage">
+              <div class="stage-lock">拖拽只改工作台里的执行顺序，不会驱动靶机。</div>
+              <div class="fake-ide">松手后顺序变为：搜索框 → 搜索 → 填充，或按落点插入。</div>
+            </div>
+          </div>
+          <aside class="detail">
+            <div class="pane-title">拖拽中</div>
+            <div class="form">
+              <div class="muted">蓝色条表示插入位置。一步默认仍是一组，整组一起移动。</div>
+            </div>
+          </aside>
+        </div>
+        <div class="actions"><button class="ui">开始录制</button><button class="ui">插入步骤</button><button class="ui">运行全部</button></div>
+      </div>
+    </div>
+
+    <!-- 流程 -->
+    <div class="screen" data-id="flow">
+      <div class="flow">
+        <h2>交互流程（不是 UI 屏幕）</h2>
+        <p>网页点录制 → 真实软件操作 → 步骤进入 CFG；插入等待元素 / 断言 / 分支条件嵌入同一套点选。</p>
+        <div class="flow-grid">
+          <div class="lane">
+            <h3>A. 录制用户操作步</h3>
+            <div class="steps">
+              <div class="box start">网页：开始录制</div><span class="arrow">→</span>
+              <div class="box web">面板进入录制态并提示切走</div><span class="arrow">→</span>
+              <div class="box target">靶机：点击 / 输入</div><span class="arrow">→</span>
+              <div class="box">完整定位 + 输入坍缩为一次填充</div><span class="arrow">→</span>
+              <div class="box web">CFG 实时追加（一步一组）</div>
+            </div>
+            <div class="caption">网页截图点击不生成步骤。停止录制后步骤保留可编。</div>
+          </div>
+          <div class="lane">
+            <h3>B. 插入等待元素 / 断言 / 选择组条件（共用点选子模式）</h3>
+            <div class="steps">
+              <div class="box start">网页：插入或设组</div><span class="arrow">→</span>
+              <div class="box web">点「在软件中选取」</div><span class="arrow">→</span>
+              <div class="box decision">未连接？</div><span class="arrow">→</span>
+              <div class="box target">靶机点一个元素</div><span class="arrow">→</span>
+              <div class="box">写回 locator，显示封装名</div><span class="arrow">→</span>
+              <div class="box web">退出点选；该次点击不进普通步骤列表</div>
+            </div>
+            <div class="caption">等待元素另填最长等待。断言「存在文本」以填文本为主，点选容器可选。选择组条件与断言同一套。</div>
+          </div>
+          <div class="lane">
+            <h3>C. 框选编排</h3>
+            <div class="steps">
+              <div class="box web">CFG 左键拖框</div><span class="arrow">→</span>
+              <div class="box decision">弹出分支 / 循环 / 仅打包</div><span class="arrow">→</span>
+              <div class="box">可命名、可拆包</div><span class="arrow">→</span>
+              <div class="box">分支：内容进 True，False 为空，再点选条件</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const screens = [
+      ["s1", "1 主界面-已连接"],
+      ["s2", "2 录制中"],
+      ["s3", "3 插入-等待时间"],
+      ["s4", "4 插入-等待元素（拾取态）"],
+      ["s4b", "4b 等待元素已选中"],
+      ["s5a", "5 断言-元素可见"],
+      ["s5b", "5 断言-存在文本"],
+      ["s6", "6 框选成组"],
+      ["s7", "7 选择组设置"],
+      ["s8", "8 循环组设置"],
+      ["s9", "9 拖拽调序"],
+      ["flow", "交互流程（非 UI）"]
+    ];
+    const nav = document.getElementById("nav");
+    screens.forEach(([id, label], i) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      if (i === 0) b.className = "is-on";
+      b.onclick = () => {
+        document.querySelectorAll(".screen").forEach(s => s.classList.toggle("is-on", s.dataset.id === id));
+        nav.querySelectorAll("button").forEach(x => x.classList.remove("is-on"));
+        b.classList.add("is-on");
+      };
+      nav.appendChild(b);
+    });
+  </script>
+</body>
+</html>
