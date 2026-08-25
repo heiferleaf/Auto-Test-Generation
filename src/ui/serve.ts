@@ -59,10 +59,26 @@ const server = createServer(async (req, res) => {
 // 挂载真机桥：在 /kernel-ws 上升级 WebSocket，由 Node 侧持有 PlaywrightCdpAdapter 驱动真机。
 const bridge = attachKernelBridge(server, CDP_PORT);
 
-server.listen(PORT, () => {
+// listen 失败（端口被占用、权限不足等）会以 error 事件抛出而非走回调；
+// 不接住会直接变成未捕获异常令进程崩溃（见 CODEBUDDY.md §4.1 真实路径盲区）。
+// 这里对 EADDRINUSE 自动递增端口重试，让用户「再开一个实例」时仍可正常起服务。
+let actualPort = PORT;
+server.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE' && actualPort < PORT + 10) {
+    actualPort += 1;
+    server.listen(actualPort);
+    return;
+  }
+  throw err;
+});
+
+server.listen(actualPort, () => {
   // eslint-disable-next-line no-console
-  console.log(`可视化蒙版面板已启动: http://localhost:${PORT}  (Ctrl+C 退出)`);
-  console.log(`真机桥已挂载: ws://localhost:${PORT}/kernel-ws  (CODEBUDDY 调试端口 ${CDP_PORT})`);
+  if (actualPort !== PORT) {
+    console.warn(`端口 ${PORT} 被占用，已自动改用 ${actualPort}`);
+  }
+  console.log(`可视化蒙版面板已启动: http://localhost:${actualPort}  (Ctrl+C 退出)`);
+  console.log(`真机桥已挂载: ws://localhost:${actualPort}/kernel-ws  (CODEBUDDY 调试端口 ${CDP_PORT})`);
 });
 
 process.on('SIGINT', () => {
