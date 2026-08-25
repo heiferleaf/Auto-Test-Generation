@@ -212,7 +212,7 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 | M3-R1 WS 推送通道 | ✅ 已合并 | `feat/ws-push-channel` | `bc13d86` | `test/bridge-push.test.ts` 6 通过 |
 | M3-R2 嵌入实时录制 | ✅ 已合并 | `feat/ws-push-channel` | `a654faa` | `test/ui-shell-live-recording.test.ts` 4 通过 |
 | M3-R3 运行全部 + 步骤态 + 高亮跟随 | ✅ 已合并 | `feat/run-all` | 见合并记录 | `ui-shell-run-all` 22 + `executor-progress` 11 + `bridge-ws-progress` 7（真 WS）+ `bridge-push` 25 通过 |
-| M3-R4 CFG 图形化视图 | 🔍 审查中（待合并） | `feat/cfg-view` | — | `test/cfg-view.test.ts` 47 通过（含特殊字符 id / 点击内部子元素 / OCP 穷尽性 / 导入期 kind 校验） |
+| M3-R4 CFG 图形化视图 | ✅ 已合并 | `feat/cfg-view` | `883fe1e` | `test/cfg-view.test.ts` 47 通过（含特殊字符 id / 点击内部子元素 / OCP 穷尽性 / 导入期 kind 校验 / 未知 kind 不白屏） |
 | M3-R5 Git 式版本层 | ⬜ 未开始 | `feat/git-version` | — | — |
 
 > **测试代码权威性纪律（新增，因本轮违规而补）**：既有测试文件（含其 mock 基建，如 `test/ui-shell.test.ts` 的 `makeMockKernel`）**不得为迁就新实现而修改**。新能力需要新的 mock 行为时，新建独立测试文件并自带 mock，不动既有基建。
@@ -259,7 +259,7 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 - **校验**：`npm test` 164 通过 / 17 跳过；`npm run typecheck` 干净；runtime-runnability 第 5 轮**通过**（含 8 类坏数据实测 + 4 突变点）；test 角色**通过**（4/4 突变被捕获，无假绿；确认既有测试为纯追加）；code-review 3 项已修。
 - **未做**：真机端到端冒烟（需 9222 靶机）—— 见下方待办。
 
-### 阶段 M3-R4：CFG 图形化视图（§2.7）— 🔍 审查中（待合并）
+### 阶段 M3-R4：CFG 图形化视图（§2.7）— ✅ 已合并（`883fe1e`）
 - **worktree**：`feat/cfg-view`
 - **测试先行**：**新建** `test/cfg-view.test.ts`（38 例，jsdom + 自带 mock kernel，未改任何既有测试）。实现前确认为红（模块不存在 → 解析失败）。分五组：①`buildCfgGraph` 图模型（顺序链式边 / if 真假两枝 / while 回环 / 嵌套 / 空脚本 / 坏数据不崩 / isLeaf 标注）；②DOM 渲染（`.ui-shell-cfg`、`data-cfg-node/kind/branch/loop`、嵌套包含、空态）；③双向联动（图↔列表、唯一选中、组节点可选、脏 id 不选中、**stepId 含 CSS 特殊字符**）；④运行态（running/pass/**fail 标红**、与列表状态一致、循环体内嵌套步、重跑重置）；⑤组件边界（可独立挂载、`update` 幂等、`onSelect` 上报、`setStatus` 原地更新不重建）。
 - **实现**：
@@ -282,7 +282,7 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
   10. **只断言 `data-*` 属性掩盖了"用户看不见"**：列表项选中只打 `data-step-selected`，而 `index.html` 无对应 CSS 规则 → 真机点 CFG 节点时列表侧零视觉反馈。已把属性 + `is-selected` class 收敛到 `markStepItemSelected` 单一入口并补 CSS，测试同时断言 class。
   11. `resetRunStatus` 调 `cfgView.update()` 会清掉图内部选中态而 `UiShell.selectedStepId` 未变，两视图分叉。已让 `CfgView.update` 自行保留并恢复选中项（步骤已删则自然不恢复）。
   12. **我为修第 9 项引入的 `throw` 本身成了新缺陷**：`assertNeverControlKind` 运行时抛错，而导入期校验只覆盖 `importScript`（本地文件）一条路径 —— 录制直接构造 Script、Agent 经 MCP 构造、R5 版本层还原旧数据都能绕过它直达渲染层，异常在 `render()` 同步栈爆开即**整页白屏**，等于把"静默错渲"升级成"彻底不可用"。已改为**渲染层降级**：`console.warn` + 画「未知控制结构」占位节点（`data-cfg-kind="unknown"` + 虚线样式），子节点照画；硬失败只留在数据入口（io.ts / 桥边界）。补了 3 个「未知 kind 直达渲染层不白屏」用例。**关键**：改 `throw`→`warn` 后**仍保留 `kind: never` 参数类型**，实测新增 `'switch'` 时 tsc 仍在 3 处报错 —— 编译期守卫与运行时降级两者并存，不是二选一。
-- **校验**：`npm test` 211 通过 / 17 跳过；`npm run typecheck` 干净；三校验角色结论见合并记录。
+- **校验**：`npm test` 211 通过 / 17 跳过；`npm run typecheck` 干净；三校验角色结论见合并记录 `883fe1e`。
 - **未做**：真机端到端冒烟（需 9222 靶机）。
 
 ### 阶段 M3-R5：Git 式版本层（§2.2/§6）
