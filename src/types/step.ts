@@ -7,6 +7,7 @@
 export const STEP_TYPES = [
   'click', 'fill', 'select', 'wait',
   'assert', 'hover', 'eval', 'snapshot',
+  'waitUntil', 'repeat',
 ] as const;
 export type StepType = typeof STEP_TYPES[number];
 
@@ -61,9 +62,10 @@ export type Step = {
     value?: string;            // fill 文本 / select option
     optionText?: string;       // select
     durationMs?: number;       // wait
+    timeoutMs?: number;        // waitUntil 等待条件成立的超时
     key?: string;              // wait 文本/键
     code?: string;             // eval JS
-    assertion?: Assertion;     // assert 用
+    assertion?: Assertion;     // assert / waitUntil 用
   };
   expect?: Assertion;          // 步骤级可选期望
   source: StepSource;

@@ -35,6 +35,9 @@ import { VersionPanel } from './version-panel';
 /** 回放结果（与 cli.CliResult 同构，但由内核产生，UI 壳不依赖 cli 模块）。 */
 export type PlaybackResult = { ok: boolean; failedStepId?: string };
 
+/** 手动可插入的步骤类型（spec §2.3.1 仅 4 类；click/fill 等仅由录制产生）。 */
+type ManualStepType = 'wait' | 'waitUntil' | 'assert' | 'repeat';
+
 // 运行态类型定义已迁至 `src/types/step.ts`（与 StepType/ControlKind 同处真相源），
 // 因同级视图组件 cfg-view 也需要它，从 shell 引入会形成"子组件反向依赖编排者"。
 // 此处 re-export 保持既有引用路径可用（向后兼容，不破坏既有 import）。
@@ -62,6 +65,8 @@ export type UiShellOptions = {
   mount: HTMLElement;
   /** 初始脚本（可选，如从文件载入）。 */
   script?: Script;
+  /** 是否挂载 Git 版本面板（可选插件，默认隐藏；主体生成流程不依赖）。 */
+  enableVersionPanel?: boolean;
 };
 
 // TYPE_LABEL / describeLocator 已收敛到 ./step-label（与 CFG 视图共用同一份文案真相源）。
@@ -140,10 +145,17 @@ export class UiShell {
    * 避免两个兄弟视图互相同步产生的双向耦合与状态分叉。
    */
   private selectedStepId?: string;
+  /** 多选态（建组用）：收集用户勾选/连选的步骤 id，调 wrap 时整体包成组。 */
+  private selectedIds = new Set<string>();
+  /** 插入菜单展开态：点击「插入步骤」切换，决定是否渲染 4 类子菜单。 */
+  private insertMenuOpen = false;
+  /** Git 版本面板是否挂载（可选插件，默认隐藏）。 */
+  private enableVersionPanel: boolean;
 
   constructor(opts: UiShellOptions) {
     this.kernel = opts.kernel;
     this.mount = opts.mount;
+    this.enableVersionPanel = opts.enableVersionPanel ?? false;
     this.script = opts.script ?? {
       schema: SCRIPT_SCHEMA,
       app: { name: 'Unnamed', version: '0.0.0' },
@@ -151,16 +163,69 @@ export class UiShell {
     };
     // M3-R5：以当前脚本在 main 分支建首个提交（版本库入口，不可变）。
     this.versionStore = createStore(this.script, 'init');
-    // 在 UiShell 内部挂**一处**事件委托：列表项点击 → 选中（反向联动），
+    // 在 UiShell 内部挂**一处**事件委托：列表项点击 → 选中/多选（反向联动），
     // 不依赖 app.ts。用 closest 就近命中，兼容点击列表项内部文字。
     this.mount.addEventListener('click', (e) => {
-      const item = (e.target as HTMLElement).closest('[data-step-item]') as HTMLElement | null;
+      const el = e.target as HTMLElement;
+      // 操作栏/菜单/步骤按钮等带 data-action 的点击，统一交给下方动作委托处理。
+      const actionEl = el.closest('[data-action]') as HTMLElement | null;
+      if (actionEl) {
+        this.handleAction(actionEl.getAttribute('data-action')!, actionEl);
+        return;
+      }
+      // 否则按步骤项命中：多选累积 + 选中并打开编辑区（spec §2.6 选中即出详情）。
+      const item = el.closest('[data-step-item]') as HTMLElement | null;
       if (!item) return;
-      // 操作按钮（data-action）的点击不触发选中，交由其自身 handler。
-      if ((e.target as HTMLElement).closest('[data-action]')) return;
       const id = item.getAttribute('data-step-id');
-      if (id) this.selectStep(id);
+      if (!id) return;
+      // 多选：每点一次 toggle 进/出 selectedIds（建组用）。
+      if (this.selectedIds.has(id)) this.selectedIds.delete(id);
+      else this.selectedIds.add(id);
+      // 选中该步并渲染真实编辑区（替代旧版 alert 弹窗）。
+      this.editStep(id);
     });
+  }
+
+  /** 统一动作分发（操作栏 / 插入菜单 / 建组按钮的 data-action 均走此）。 */
+  private handleAction(action: string, el: HTMLElement): void {
+    switch (action) {
+      case 'insert':
+        this.insertMenuOpen = !this.insertMenuOpen;
+        this.render();
+        break;
+      case 'insert-type': {
+        const type = el.getAttribute('data-insert-type')!;
+        this.insertManualStep(type as ManualStepType);
+        this.insertMenuOpen = false;
+        this.render();
+        break;
+      }
+      case 'wrap-if':
+        this.wrapSelection('if');
+        break;
+      case 'wrap-while':
+        this.wrapSelection('while');
+        break;
+      case 'save-edit':
+        this.saveEdit(el.getAttribute('data-step-id') ?? '');
+        break;
+      case 'toggle-record':
+        if (this.isRecording()) void this.stopRecording();
+        else this.startRecording();
+        this.render();
+        break;
+      case 'run-all':
+        void this.runAll();
+        break;
+      case 'export':
+        this.downloadScript();
+        break;
+      case 'clear':
+        [...this.getScript().steps].forEach((st) => this.removeStep(st.id));
+        break;
+      default:
+        break;
+    }
   }
 
   /** 运行进度处理（每次 runAll 订阅，finally 退订，避免多次运行回调叠加）。 */
@@ -295,12 +360,147 @@ export class UiShell {
     this.render();
   }
 
-  /** 编辑钩子：由宿主（app.ts）注入弹窗；默认无操作。点击步骤 ✎ 时触发。 */
-  onEditStep?: (step: Step) => void;
-
+  /** 编辑某步：渲染 §2.6 真实编辑区（表单），替代旧版 alert 弹窗。 */
   editStep(stepId: string): void {
-    const step = this.script.steps.find((s) => s.id === stepId);
-    if (step && this.onEditStep) this.onEditStep(step);
+    const step = this.findStep(stepId);
+    if (!step) return;
+    this.selectStep(stepId); // 同步选中态（列表项 + CFG 节点高亮）
+    this.renderEditArea(step);
+  }
+
+  /**
+   * 渲染步骤详情/编辑区（spec §2.6）：类型/定位/参数可改，保存=不可变更新。
+   * 挂在 mount 内的独立片段 [data-edit-area]，不占用步骤列表 DOM。
+   */
+  private renderEditArea(step: Step): void {
+    // 每次重建编辑区（简单优先，步骤规模小）。
+    this.mount.querySelector('[data-edit-area]')?.remove();
+    const area = document.createElement('div');
+    area.className = 'ui-shell-edit-area';
+    area.setAttribute('data-edit-area', 'true');
+
+    const title = document.createElement('div');
+    title.className = 'ui-shell-edit-title';
+    title.textContent = `编辑步骤：${describeStep(step)}`;
+    area.appendChild(title);
+
+    // 定位 name 字段（最常见的可编辑项，点击/填充/断言都带 locator.name）。
+    if (step.locator) {
+      area.appendChild(this.editField(step, 'locator.name', '定位名称(name)', step.locator.name ?? ''));
+      if (step.locator.role) {
+        area.appendChild(this.editField(step, 'locator.role', '定位角色(role)', step.locator.role));
+      }
+    }
+    // 参数：fill/select 的 value、wait 的 durationMs、waitUntil/assert 的 timeoutMs。
+    const val = step.params?.value ?? step.params?.optionText;
+    if (val !== undefined) {
+      area.appendChild(this.editField(step, 'params.value', '输入值(value)', val));
+    }
+    if (step.params?.durationMs !== undefined) {
+      area.appendChild(this.editField(step, 'params.durationMs', '等待毫秒(durationMs)', String(step.params.durationMs)));
+    }
+
+    // 保存 / 删除（保存走统一 data-action 委托，见 saveEdit；删除保留行内处理）
+    const save = document.createElement('button');
+    save.textContent = '保存';
+    save.setAttribute('data-action', 'save-edit');
+    save.setAttribute('data-step-id', step.id);
+    area.appendChild(save);
+
+    const del = document.createElement('button');
+    del.textContent = '删除';
+    del.setAttribute('data-action', 'remove');
+    del.setAttribute('data-step-id', step.id);
+    del.addEventListener('click', () => { this.removeStep(step.id); area.remove(); });
+    area.appendChild(del);
+
+    this.mount.appendChild(area);
+  }
+
+  /** 统一处理「保存编辑」：从编辑区表单读取并不可变更新对应步骤。 */
+  private saveEdit(stepId: string): void {
+    const step = this.findStep(stepId);
+    const area = this.mount.querySelector('[data-edit-area]');
+    if (!step || !area) return;
+    const patch: Partial<Step> = {};
+    area.querySelectorAll<HTMLInputElement>('[data-edit-field]').forEach((inp) => {
+      const path = inp.getAttribute('data-edit-field')!;
+      const v = inp.value;
+      // 多个 locator/params 字段须累加到同一 patch 对象，不能各自覆盖（否则后者丢失前者）。
+      if (path === 'locator.name') patch.locator = { ...(patch.locator ?? step.locator), name: v };
+      else if (path === 'locator.role') patch.locator = { ...(patch.locator ?? step.locator), role: v };
+      else if (path === 'params.value') patch.params = { ...(patch.params ?? step.params), value: v };
+      else if (path === 'params.durationMs') patch.params = { ...(patch.params ?? step.params), durationMs: Number(v) || 0 };
+    });
+    this.script = ScriptEditor.updateNested(this.script, stepId, patch);
+    area.remove();
+    this.render();
+  }
+
+  /** 生成一个可编辑输入行（label + input），input 带 data-edit-field 供保存时读取。 */
+  private editField(step: Step, path: string, label: string, value: string): HTMLElement {
+    const row = document.createElement('label');
+    row.className = 'ui-shell-edit-field';
+    const span = document.createElement('span');
+    span.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = value;
+    input.setAttribute('data-edit-field', path);
+    row.appendChild(span);
+    row.appendChild(input);
+    return row;
+  }
+
+  /** 手动步骤类型：spec §2.3.1 仅暴露 4 类（录制才产生 click/fill 等）。 */
+  private insertManualStep(type: 'wait' | 'waitUntil' | 'assert' | 'repeat'): void {
+    const id = `manual-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    let step: Step;
+    switch (type) {
+      case 'wait':
+        step = { id, type: 'wait', source: 'manual', params: { durationMs: 1000 } };
+        break;
+      case 'waitUntil':
+        step = {
+          id, type: 'waitUntil', source: 'manual',
+          params: { assertion: { kind: 'visible', locator: { role: 'status' } }, timeoutMs: 5000 },
+        };
+        break;
+      case 'assert':
+        step = {
+          id, type: 'assert', source: 'manual',
+          params: { assertion: { kind: 'visible', locator: { role: 'status' } } },
+        };
+        break;
+      case 'repeat':
+        // repeat ≡ while 循环组：以 while 控制节点表达，循环体初为空，用户再往里加步或包组。
+        step = { id, type: 'wait', source: 'manual', control: { kind: 'while', loopCount: 1 }, children: [] };
+        break;
+      default:
+        // 受控联合外的值（如非法注入）直接拒绝，避免 insertStep(undefined) 崩溃。
+        console.warn('[UiShell] 未知手动步骤类型，已忽略:', type);
+        return;
+    }
+    this.insertStep(step);
+  }
+
+  /** 把当前多选的步骤整体包成控制流组（spec §2.3.0）。空选集不操作（边界安全）。 */
+  private wrapSelection(kind: 'if' | 'while'): void {
+    const ids = [...this.selectedIds];
+    if (ids.length === 0) return;
+    this.script = ScriptEditor.wrap(this.script, ids, kind);
+    this.selectedIds.clear();
+    this.render();
+  }
+
+  /** 导出脚本为 JSON 文件下载（替代旧 app.ts 的实现，UI 壳自包含）。 */
+  private downloadScript(): void {
+    const json = ScriptEditor.save(this.getScript());
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'script.json'; a.click();
+    URL.revokeObjectURL(url);
   }
 
   /**
@@ -676,13 +876,36 @@ export class UiShell {
       actions.appendChild(b);
     };
     addBtn('插入步骤', 'insert', 'primary');
-    addBtn('加断言', 'add-assert');
     addBtn('开始录制', 'toggle-record');
+    addBtn('包成选择组', 'wrap-if');
+    addBtn('包成循环组', 'wrap-while');
     addBtn('运行全部', 'run-all');
-    addBtn('高亮示例', 'highlight');
     addBtn('导出', 'export');
     addBtn('清空', 'clear', 'danger');
     root.appendChild(actions);
+
+    // 插入 4 类手动步骤的子菜单（spec §2.3.1：仅 wait/waitUntil/assert/repeat）。
+    // 仅当用户点击「插入步骤」展开后才渲染；初始不展开，避免遮挡主区。
+    if (this.insertMenuOpen) {
+      const menu = document.createElement('div');
+      menu.className = 'ui-shell-insert-menu';
+      menu.setAttribute('data-insert-menu', 'true');
+      const kinds: { type: string; label: string }[] = [
+        { type: 'wait', label: '等待时间（wait）' },
+        { type: 'waitUntil', label: '等待条件（waitUntil）' },
+        { type: 'assert', label: '断言（assert，可作选择组条件）' },
+        { type: 'repeat', label: '循环（repeat）' },
+      ];
+      kinds.forEach((k) => {
+        const b = document.createElement('button');
+        b.className = 'ui-shell-insert-item';
+        b.textContent = k.label;
+        b.setAttribute('data-action', 'insert-type');
+        b.setAttribute('data-insert-type', k.type);
+        menu.appendChild(b);
+      });
+      root.appendChild(menu);
+    }
 
     // 运行失败提醒（spec §2.3.4：中途失败需暂停提醒，指明失败步骤）
     if (this.lastFailedStepId) {
@@ -696,6 +919,11 @@ export class UiShell {
       root.appendChild(notice);
     }
 
+    // 多栏主体：被测软件视图 + 步骤列表 + CFG 视图（横向 4 栏，由 .ui-shell-body flex 承载）。
+    const body = document.createElement('div');
+    body.className = 'ui-shell-body';
+    root.appendChild(body);
+
     // 中间：被测软件视图（截图流 <img> + 高亮层）
     const stage = document.createElement('div');
     stage.className = 'ui-shell-stage';
@@ -705,9 +933,9 @@ export class UiShell {
     frameHint.setAttribute('data-frame', 'true');
     frameHint.textContent = '[ 被测软件视图：连接后自动拉取截图流 ]';
     stage.appendChild(frameHint);
-    root.appendChild(stage);
+    body.appendChild(stage);
 
-    // 侧边：步骤列表（用户友好形式，每条带操作按钮）
+    // 侧边：步骤列表（用户友好形式，每条带操作按钮；支持多选建组）
     const side = document.createElement('div');
     side.className = 'ui-shell-steps';
     side.setAttribute('data-steps', 'true');
@@ -721,7 +949,7 @@ export class UiShell {
     });
 
     this.stepsEl = side;
-    root.appendChild(side);
+    body.appendChild(side);
 
     // 右侧：CFG 图形化视图（M3-R4）。独立 SRP 组件，由 UiShell 编排联动。
     const cfg = document.createElement('div');
@@ -744,26 +972,28 @@ export class UiShell {
     this.syncAllCfgStatuses();
     // 重建后恢复当前选中态（若运行/编辑期间有选中）。
     if (this.selectedStepId) this.cfgView.setSelected(this.selectedStepId);
-    root.appendChild(cfg);
+    body.appendChild(cfg);
 
-    // 版本面板（M3-R5）：独立 SRP 组件，UiShell 把版本操作回调接回 version-store
-    // 纯函数，再把新 store 喂回面板重绘。版本状态在 UI 侧（DIP，UiKernel 不上提版本）。
-    const ver = document.createElement('div');
-    ver.className = 'ui-shell-version';
-    ver.setAttribute('data-version', 'true');
-    if (!this.versionPanel) {
-      this.versionPanel = new VersionPanel({
-        mount: ver,
-        store: this.versionStore,
-        onSwitch: (name) => this.applyVersionStore(vSwitchTo(this.versionStore, name)),
-        onCherryPick: (hash) => this.applyVersionStore(vCherryPick(this.versionStore, hash)),
-        canCherryPick: () => this.versionStore.currentBranch !== 'main' || getBranches(this.versionStore).length > 1,
-      });
-    } else {
-      this.versionPanel.rebindMount(ver);
-      this.versionPanel.update(this.versionStore);
+    // Git 版本面板：按产品决策默认不挂载（解耦可选插件，保留 VersionPanel 类与
+    // version-store 接口，由宿主配置决定是否启用）。主体「生成脚本」流程不依赖它。
+    if (this.enableVersionPanel) {
+      const ver = document.createElement('div');
+      ver.className = 'ui-shell-version';
+      ver.setAttribute('data-version', 'true');
+      if (!this.versionPanel) {
+        this.versionPanel = new VersionPanel({
+          mount: ver,
+          store: this.versionStore,
+          onSwitch: (name) => this.applyVersionStore(vSwitchTo(this.versionStore, name)),
+          onCherryPick: (hash) => this.applyVersionStore(vCherryPick(this.versionStore, hash)),
+          canCherryPick: () => this.versionStore.currentBranch !== 'main' || getBranches(this.versionStore).length > 1,
+        });
+      } else {
+        this.versionPanel.rebindMount(ver);
+        this.versionPanel.update(this.versionStore);
+      }
+      body.appendChild(ver);
     }
-    root.appendChild(ver);
   }
 
   /** 应用版本库新状态：写回 store 并刷新面板（不可变：新 store 替换旧引用）。 */
