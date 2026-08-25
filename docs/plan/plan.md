@@ -1,7 +1,7 @@
 # 总体实施计划
 
-> 配套：`requirements/requirements.md`、`architecture/architecture.md`、`design/design.md`、`CODEBUDDY.md`
-> 纪律基线：任何实现前先有测试方案/测试代码；实现后以通过测试为迭代目标（详见 CODEBUDDY.md §5）。
+> 配套：`requirements/requirements.md`、`architecture/architecture.md`、`design/design.md`、`AGENTS.md`
+> 纪律基线：任何实现前先有测试方案/测试代码；实现后以通过测试为迭代目标（详见 `AGENTS.md` §5）。
 
 ---
 
@@ -9,10 +9,10 @@
 
 1. **测试先行**：每阶段/每任务动手前，先确定测试方案或在 `test/` 落地测试骨架。
 2. **通过测试才算完成**：实现以让测试通过为第一目标，未通过不得合并。
-3. **Worktree 隔离**：每个实现任务在 `.codebuddy/worktree/<name>` 独立工作树进行（CODEBUDDY.md §3）。
-4. **双角色校验**：每个任务完成须过 **test 角色** 与 **code-review 角色**（CODEBUDDY.md §4）。
+3. **Worktree 隔离**：每个实现任务在 `.cursor/worktree/<name>` 独立工作树进行（`AGENTS.md` §3）。
+4. **双角色校验**：每个任务完成须过 **test**、**code-review**、**runtime-runnability** 三个角色（`AGENTS.md` §4）。
 5. **并行用 Agent team**：可并行子任务用多 Agent / Agent team，各自 worktree + 各自校验。
-6. **知识沉淀**：重复/有要求的任务总结进 `.codebuddy/skills`（技能文档）；工作流/纪律类约束统一维护在 `CODEBUDDY.md`（CLI 不加载 `.codebuddy/rules/`）。
+6. **知识沉淀**：重复任务总结进 `.cursor/skills/`；短约束在 `.cursor/rules/`；完整纪律在 `AGENTS.md`。
 
 ---
 

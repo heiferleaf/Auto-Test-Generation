@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .codebuddy/worktree/
+.cursor/worktree/
 *.log
 
 # 集成测试真机运行生成的报告（验证产物，不入库；预期契约在 fixtures/）。

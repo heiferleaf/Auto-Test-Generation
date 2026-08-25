@@ -1,0 +1,17 @@
+{
+  // Cursor Glass 打开尚未信任的新文件夹时，agent-exec 可能来不及注册，
+  // 报 ERROR_EXTENSION_HOST_TIMEOUT。仅对本工作区关闭信任检查。
+  "security.workspace.trust.enabled": false,
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/.cursor/worktree/**": true,
+    "**/.codebuddy/worktree/**": true,
+    "**/dist/**": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/.cursor/worktree": true,
+    "**/.codebuddy/worktree": true,
+    "**/dist": true
+  }
+}

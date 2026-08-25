@@ -13,6 +13,14 @@
       "exe": "C:\\Users\\harveyhfye\\AppData\\Local\\Programs\\WorkBuddy\\WorkBuddy.exe",
       "port": 9233,
       "launchScript": "scripts/launch-workbuddy.cmd"
+    },
+    {
+      "name": "vscode",
+      "label": "Visual Studio Code",
+      "exe": "auto-detect",
+      "port": 9244,
+      "launchScript": "scripts/launch-vscode.cmd",
+      "liveEnv": "VSCODE_LIVE"
     }
   ]
 }
