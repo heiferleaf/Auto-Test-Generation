@@ -48,3 +48,60 @@ export const RECORD_INJECT = `(() => {
 
 /** 读取并清空缓冲区的脚本。 */
 export const RECORD_DRAIN = `(() => { const b = window.${REC_BUF} || []; window.${REC_BUF} = []; return b; })()`;
+
+// ───────────────────────── 嵌入式点选录制（spec §2.3）─────────────────────────
+// 点选子模式：waitUntil/assert/选择组条件共用。注入一次性 click 监听，命中后把完整
+// locator（含祖先链 css，与 §2.2.1 同源）写入 window.__pickResult，由 adapter 轮询取回。
+// 一次性：命中即解绑；cancelPick 设标志位让监听器忽略后续点击。
+export const PICK_FLAG = '__pickInstalled';
+export const PICK_RESULT = '__pickResult';
+
+export const PICK_INJECT = `(() => {
+  window.${PICK_RESULT} = null;
+  if (window.${PICK_FLAG}) return;
+  window.${PICK_FLAG} = true;
+  const interactive = (el) => {
+    const t = el.tagName;
+    if (t === 'BUTTON' || t === 'A' || t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA') return true;
+    if (el.getAttribute('role')) return true;
+    if (el.hasAttribute('data-testid')) return true;
+    return false;
+  };
+  const cssPath = (el) => {
+    const parts = [];
+    let cur = el, depth = 0;
+    while (cur && cur.nodeType === 1 && depth < 10) {
+      let seg = cur.tagName.toLowerCase();
+      if (cur.id) { parts.unshift('#' + cur.id); break; }
+      const parent = cur.parentElement;
+      if (parent) {
+        const sibs = Array.from(parent.children).filter(c => c.tagName === cur.tagName);
+        if (sibs.length > 1) seg += ':nth-of-type(' + (sibs.indexOf(cur) + 1) + ')';
+      }
+      parts.unshift(seg);
+      cur = parent; depth++;
+    }
+    return parts.join(' > ');
+  };
+  const handler = (ev) => {
+    if (!window.${PICK_FLAG}) return;
+    let el = ev.target;
+    if (!(el instanceof Element)) return;
+    let node = el;
+    while (node && node.nodeType === 1 && !interactive(node)) node = node.parentElement;
+    if (!node) node = el;
+    window.${PICK_RESULT} = {
+      role: node.getAttribute('role') || undefined,
+      name: node.getAttribute('aria-label') || node.getAttribute('name') || node.getAttribute('data-testid') || (node.textContent || '').trim().slice(0, 40) || undefined,
+      testId: node.getAttribute('data-testid') || undefined,
+      css: cssPath(node) || undefined,
+    };
+    window.${PICK_FLAG} = false;
+    document.removeEventListener('click', handler, true);
+  };
+  document.addEventListener('click', handler, true);
+})()`;
+
+export const PICK_DRAIN = `(() => { const r = window.${PICK_RESULT} || null; window.${PICK_RESULT} = null; return r; })()`;
+
+export const PICK_STOP = `(() => { window.${PICK_FLAG} = false; window.${PICK_RESULT} = null; })()`;

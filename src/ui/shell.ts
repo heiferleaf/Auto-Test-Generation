@@ -53,10 +53,14 @@ export type { StepRunStatus, StepProgressEvent } from '../types/step';
 export type UiKernel = CdpAdapter & VisualCapable & Recordable & {
   /** 按脚本回放（内核职责：真机驱动 adapter / 演示返回假结果）。签名保持单参。 */
   playback(script: Script): Promise<PlaybackResult>;
-  /** 订阅服务端主动推送事件（'recording' 录制增量 / 'step-progress' 运行进度）；可选。 */
+  /** 订阅服务端主动推送事件（'recording' 录制增量 / 'step-progress' 运行进度 / 'pick' 点选命中）；可选。 */
   on?(event: string, cb: (data: unknown) => void): void;
   /** 退订；与 on 配对，供单次运行结束后清理。可选（旧内核可不实现）。 */
   off?(event: string, cb: (data: unknown) => void): void;
+  /** 进入点选态（spec §2.3）。可选：旧内核不实现时 UI 侧「在软件中点选」按钮禁用。 */
+  startPick?(): Promise<void>;
+  /** 取消点选态。可选，与 startPick 配对。 */
+  cancelPick?(): Promise<void>;
 };
 
 export type UiShellOptions = {
@@ -113,6 +117,18 @@ export function assertionKindLabel(kind: AssertionKind): string {
   return ASSERTION_KINDS.find((k) => k.kind === kind)?.label ?? kind;
 }
 
+/**
+ * 判断某步是否需要「在软件中点选」按钮，并返回点选回写的目标字段（spec §2.3）。
+ * - waitUntil / assert（带 params.assertion）→ 写回 assertion.locator
+ * - 选择组（control.kind==='if'）→ 写回 control.condition.locator
+ * 其余类型返回 undefined（不显示按钮）。
+ */
+function pickFieldFor(step: Step): 'assertion-locator' | 'condition-locator' | undefined {
+  if (step.control?.kind === 'if') return 'condition-locator';
+  if (step.type === 'waitUntil' || step.type === 'assert') return 'assertion-locator';
+  return undefined;
+}
+
 export class UiShell {
   private kernel: UiKernel;
   private mount: HTMLElement;
@@ -155,6 +171,20 @@ export class UiShell {
   private bannerText?: string;
   /** 横幅样式变体：true=琥珀色（显式演示），false=红色（降级/错误）。 */
   private bannerDemo = false;
+
+  // ---- 嵌入式点选录制（spec §2.3）----
+  /** 当前是否处于点选态（waitUntil/assert/选择组条件共用一套）。 */
+  private pickMode = false;
+  /** 点选回写目标：哪个步骤的哪个 locator 字段。 */
+  private pickTarget?: { stepId: string; field: 'assertion-locator' | 'condition-locator' };
+  /** 'pick' 事件回调：把靶机点到的完整 locator 写回当前编辑步骤。 */
+  private onPick = (data: unknown): void => {
+    // 跨 WS 边界兜底：不依赖解构默认值，显式 ?? {}（§4.1）。
+    const d = (data ?? {}) as { locator?: Locator };
+    const loc = d.locator;
+    if (!loc) return;
+    this.applyPick(loc);
+  };
 
   constructor(opts: UiShellOptions) {
     this.kernel = opts.kernel;
@@ -209,6 +239,15 @@ export class UiShell {
         break;
       case 'wrap-while':
         this.wrapSelection('while');
+        break;
+      case 'pick': {
+        const stepId = el.getAttribute('data-pick-step-id') ?? '';
+        const field = el.getAttribute('data-pick-field') as 'assertion-locator' | 'condition-locator';
+        if (stepId && field) void this.startPickFor(stepId, field);
+        break;
+      }
+      case 'cancel-pick':
+        this.exitPickMode();
         break;
       case 'save-edit':
         this.saveEdit(el.getAttribute('data-step-id') ?? '');
@@ -405,6 +444,24 @@ export class UiShell {
     title.textContent = `编辑步骤：${describeStep(step)}`;
     area.appendChild(title);
 
+    // 「在软件中点选」按钮（spec §2.3）：waitUntil/assert 的 assertion.locator、
+    // 选择组(if)的 condition.locator 三处共用一套点选子模式。未连接时禁用。
+    const pickField = pickFieldFor(step);
+    if (pickField) {
+      const pick = document.createElement('button');
+      pick.className = 'ui-shell-pick-btn';
+      pick.textContent = '在软件中点选';
+      pick.setAttribute('data-action', 'pick');
+      pick.setAttribute('data-pick-step-id', step.id);
+      pick.setAttribute('data-pick-field', pickField);
+      // 未连接或内核无点选能力时禁用，并提示先连接。
+      if (!this.connected || !this.kernel.startPick) {
+        pick.disabled = true;
+        pick.title = '请先连接靶机';
+      }
+      area.appendChild(pick);
+    }
+
     // 定位 name 字段（最常见的可编辑项，点击/填充/断言都带 locator.name）。
     if (step.locator) {
       area.appendChild(this.editField(step, 'locator.name', '定位名称(name)', step.locator.name ?? ''));
@@ -511,6 +568,67 @@ export class UiShell {
     if (ids.length === 0) return;
     this.script = ScriptEditor.wrap(this.script, ids, kind);
     this.selectedIds.clear();
+    this.render();
+  }
+
+  // ---- 嵌入式点选录制（spec §2.3）----
+  /** 进入点选态：未连接时禁用并提示；订阅 'pick' 事件，调内核 startPick。 */
+  private async startPickFor(
+    stepId: string,
+    field: 'assertion-locator' | 'condition-locator',
+  ): Promise<void> {
+    if (!this.connected) {
+      this.setBanner('请先连接靶机，再点选元素。');
+      return;
+    }
+    if (!this.kernel.startPick || !this.kernel.cancelPick) return; // 旧内核无点选能力：兜底静默
+    this.pickMode = true;
+    this.pickTarget = { stepId, field };
+    this.kernel.on?.('pick', this.onPick);
+    // 先渲染点选态提示（同步反馈：用户点击按钮后立刻看到「请在靶机中点击目标元素」），
+    // 再 await 内核 startPick；若 startPick 失败再 exitPickMode 清掉提示。
+    this.render();
+    try {
+      await this.kernel.startPick();
+    } catch (e) {
+      this.exitPickMode(false); // 失败：清理订阅但不再次调 cancelPick
+      const msg = e instanceof Error ? e.message : String(e);
+      this.setBanner(`点选启动失败：${msg}`);
+      return;
+    }
+  }
+
+  /** 点选命中：把完整 locator 不可变写回当前编辑步骤的目标字段，再退出点选态。 */
+  private applyPick(loc: Locator): void {
+    const t = this.pickTarget;
+    if (!t) return;
+    // 边界兜底：跨 WS 的 locator 可能带 null 字段，统一还原为 undefined（§4.1）。
+    const clean: Locator = {};
+    for (const [k, v] of Object.entries(loc)) {
+      if (v !== null && v !== undefined) (clean as Record<string, unknown>)[k] = v;
+    }
+    const step = this.findStep(t.stepId);
+    let patch: Partial<Step>;
+    if (t.field === 'assertion-locator') {
+      const assertion = step?.params?.assertion ?? { kind: 'visible' as const };
+      patch = { params: { ...step?.params, assertion: { ...assertion, locator: clean } } };
+    } else {
+      const ctrl = step?.control ?? { kind: 'if' as const };
+      const condition = ctrl.condition ?? { kind: 'visible' as const };
+      patch = { control: { ...ctrl, condition: { ...condition, locator: clean } } };
+    }
+    this.script = ScriptEditor.updateNested(this.script, t.stepId, patch);
+    this.exitPickMode();
+  }
+
+  /** 退出点选态：退订事件、调内核 cancelPick、清目标、重渲染。
+   * @param cancelKernel 为 false 时不调 kernel.cancelPick（用于 startPick 本身失败时清理）。 */
+  private exitPickMode(cancelKernel = true): void {
+    const was = this.pickMode;
+    this.pickMode = false;
+    this.pickTarget = undefined;
+    this.kernel.off?.('pick', this.onPick);
+    if (cancelKernel && was) void this.kernel.cancelPick?.();
     this.render();
   }
 
@@ -862,6 +980,20 @@ export class UiShell {
       bar.className = 'ui-shell-banner' + (this.bannerDemo ? ' banner--demo' : '');
       bar.setAttribute('data-banner', 'true');
       bar.textContent = this.bannerText;
+      root.appendChild(bar);
+    }
+
+    // 点选态提示（spec §2.3）：进入点选后顶部提示用户切到靶机点击，并提供取消。
+    if (this.pickMode) {
+      const bar = document.createElement('div');
+      bar.className = 'ui-shell-banner banner--pick';
+      bar.setAttribute('data-pick-mode', 'true');
+      bar.textContent = '请在靶机中点击目标元素…';
+      const cancel = document.createElement('button');
+      cancel.className = 'ui-shell-pick-cancel';
+      cancel.textContent = '取消点选';
+      cancel.setAttribute('data-action', 'cancel-pick');
+      bar.appendChild(cancel);
       root.appendChild(bar);
     }
 

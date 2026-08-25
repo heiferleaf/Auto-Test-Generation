@@ -23,20 +23,20 @@ beforeAll(async () => {
   if (!LIVE) return;
   const adapter = new PlaywrightCdpAdapter();
   await adapter.connect({ port: PORT });
-  kernel = adapter as UiKernel;
+  kernel = adapter as unknown as UiKernel;
   shell = new UiShell({ kernel, mount: document.createElement('div') });
   await shell.connect({ port: PORT });
 }, 30_000);
 
 afterAll(async () => {
   if (!LIVE) return;
-  await (kernel as PlaywrightCdpAdapter).disconnect().catch(() => undefined);
+  await (kernel as unknown as PlaywrightCdpAdapter).disconnect().catch(() => undefined);
 });
 
 live('M3 UI 壳：真实连接并枚举多目标', () => {
   it('连接后状态为已连接，且至少枚举到一个目标', () => {
     expect(shell.isConnected()).toBe(true);
-    const targets = (kernel as PlaywrightCdpAdapter).listTargets();
+    const targets = (kernel as unknown as PlaywrightCdpAdapter).listTargets();
     expect(targets.length).toBeGreaterThan(0);
   });
 });

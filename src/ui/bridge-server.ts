@@ -135,6 +135,8 @@ export type BridgeAdapter = CdpAdapter & {
   locateVisual(loc: Locator): Promise<VisualRect>;
   startRecording(onEvent?: (ev: unknown) => void): void;
   stopRecording(): Promise<unknown[]>;
+  startPick(onPick: (locator: Locator) => void): void;
+  cancelPick(): void;
   playback(script: Script, onStep?: StepProgress): Promise<{ ok: boolean; failedStepId?: string }>;
 };
 
@@ -207,6 +209,18 @@ export function attachKernelBridge(
         if (method === 'startRecording') {
           // 注册实时回调：录制中每捕获一个交互即广播给所有客户端（边操作边长步骤）。
           adapter.startRecording((ev) => pushEvent('recording', ev));
+          send({ id: req.id, ok: true, result: undefined });
+          return;
+        }
+        if (method === 'startPick') {
+          // 点选子模式（spec §2.3）：命中后把完整 locator 经 'pick' 事件推给浏览器端，
+          // 由 UiShell 写回当前编辑步骤的 assertion.locator / control.condition.locator。
+          adapter.startPick((locator) => pushEvent('pick', { locator }));
+          send({ id: req.id, ok: true, result: undefined });
+          return;
+        }
+        if (method === 'cancelPick') {
+          adapter.cancelPick();
           send({ id: req.id, ok: true, result: undefined });
           return;
         }

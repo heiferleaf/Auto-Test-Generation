@@ -10,7 +10,7 @@ import type { Locator, Script } from '../types/step';
 import { runCli } from '../cli';
 export type { Locator } from '../types/step';
 import type { InteractionEvent } from '../recorder/recorder';
-import { RECORD_INJECT, RECORD_DRAIN } from '../recorder/inject';
+import { RECORD_INJECT, RECORD_DRAIN, PICK_INJECT, PICK_DRAIN, PICK_STOP } from '../recorder/inject';
 import {
   enumerateTargets,
   findTarget,
@@ -80,6 +80,18 @@ export interface Recordable {
   stopRecording(): Promise<InteractionEvent[]>;
 }
 
+/**
+ * 点选能力派生接口（ISP，spec §2.3）：仅"点选场景"的实现才需具备。
+ * waitUntil/assert/选择组条件共用一套点选子模式，命中后回调一次性触发。
+ * 旧内核可不实现，UI 侧点选按钮据此降级为禁用。
+ */
+export interface Pickable {
+  /** 进入点选态：注入一次性监听，用户在靶机点击元素后回调 onPick 并自动停止。 */
+  startPick(onPick: (locator: Locator) => void): void;
+  /** 取消点选：移除监听，丢弃未命中的会话。 */
+  cancelPick(): void;
+}
+
 export type ConnectOptions = {
   port?: number;
   appPath?: string;
@@ -114,7 +126,7 @@ export class CdpError extends Error {
   }
 }
 
-export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordable {
+export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordable, Pickable {
   private browser?: Browser;
   private child?: ChildProcess;
   private targets: TargetEntry[] = [];
@@ -175,6 +187,7 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     this.recording = false;
     this.recorded = [];
     this.stopTargetWatch();
+    this.cancelPick();
     await this.killChild();
   }
 
@@ -363,6 +376,54 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     }
     this.recorded = out;
     return out;
+  }
+
+  // ---- 点选（spec §2.3）----
+  /** 点选态：一次性会话，命中即停。与录制会话互斥（UI 侧保证不并发）。 */
+  private picking = false;
+  private pickListener: ((locator: Locator) => void) | null = null;
+  private pickTimer: number | null = null;
+
+  /**
+   * 进入点选态：向当前 target 注入一次性 click 监听，命中后构造完整 locator
+   * （含祖先链 css，与 §2.2.1 同源）回调 onPick。轮询 window.__pickResult 取回结果，
+   * 与录制 drain 同构，跨 webview 上下文一致。
+   */
+  startPick(onPick: (locator: Locator) => void): void {
+    this.cancelPick();
+    this.picking = true;
+    this.pickListener = onPick;
+    const target = this.currentTarget();
+    void target.evaluate(PICK_INJECT).catch(() => undefined);
+    this.pickTimer = setInterval(() => {
+      if (!this.picking) return;
+      void target
+        .evaluate<any>(PICK_DRAIN)
+        .catch(() => null)
+        .then((r) => {
+          if (!this.picking || !r) return;
+          this.picking = false;
+          this.stopPickTimer();
+          const loc = sanitizePickLocator(r);
+          this.pickListener?.(loc);
+          this.pickListener = null;
+        });
+    }, 200) as unknown as number;
+  }
+
+  /** 取消点选：移除监听、清缓冲、停轮询。已回调的会话不受影响（picking 已 false）。 */
+  cancelPick(): void {
+    this.picking = false;
+    this.stopPickTimer();
+    this.pickListener = null;
+    void this.currentTarget().evaluate(PICK_STOP).catch(() => undefined);
+  }
+
+  private stopPickTimer(): void {
+    if (this.pickTimer !== null) {
+      clearInterval(this.pickTimer);
+      this.pickTimer = null;
+    }
   }
 
   /**
@@ -621,6 +682,20 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     }
     this.child = undefined;
   }
+}
+
+/** 跨 CDP/JSON 边界兜底：页面内构造的 locator 经 JSON 序列化后 undefined 字段被丢弃，但 null 不会；
+ *  把 null 字段还原为 undefined，避免下游 `loc.name ?? ''` 之类兜底失效（§4.1）。 */
+function sanitizePickLocator(loc: unknown): Locator {
+  const l = (loc ?? {}) as Record<string, unknown>;
+  const out: Locator = {};
+  if (l.role) out.role = String(l.role);
+  if (l.name) out.name = String(l.name);
+  if (l.text) out.text = String(l.text);
+  if (l.testId) out.testId = String(l.testId);
+  if (l.css) out.css = String(l.css);
+  if (l.xpath) out.xpath = String(l.xpath);
+  return out;
 }
 
 /** 便捷入口：创建并连接一个适配器。 */

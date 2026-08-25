@@ -111,6 +111,10 @@ export class WsKernel implements UiKernel {
   startRecording(): Promise<void> { return this.call('startRecording'); }
   stopRecording(): Promise<InteractionEvent[]> { return this.call('stopRecording'); }
 
+  // ---- Pickable（spec §2.3，可选；旧内核不实现时 UI 侧按钮禁用）----
+  startPick(): Promise<void> { return this.call('startPick'); }
+  cancelPick(): Promise<void> { return this.call('cancelPick'); }
+
   // ---- UiKernel.playback ----
   playback(script: Script): Promise<PlaybackResult> { return this.call('playback', script); }
 }
