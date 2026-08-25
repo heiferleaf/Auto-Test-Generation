@@ -124,7 +124,7 @@ executor.runScript(adapter, script, onStep)   ← 进度在 Node 进程内产生
 
 #### 2.2.1 CFG 图形化视图（M3-R4，新增模块）
 
-> 来源：docs/design/visual-mask-ui-spec.md §2.7「控制流图」；测试规格 `test/cfg-view.test.ts`（47 例，纯 UI 壳内验证，不依赖内核/执行器）。
+> 来源：docs/design/visual-mask-ui-spec.md §2.6/§2.6.1「CFG 图形化控制流图」；测试规格 `test/cfg-view.test.ts`（47 例，纯 UI 壳内验证，不依赖内核/执行器）。
 
 **组件职责（SRP）**：新增 `src/ui/cfg-view.ts`，对外导出两样：
 - `buildCfgGraph(script): CfgGraph` —— 纯函数，把 `Script` 递归转为图模型 `{ nodes, edges }`（`nodes` 为顶层节点、嵌套经 `node.children` 递归；`edges` 为各层级扁平汇总）。与 DOM 解耦，便于单测。
@@ -139,6 +139,8 @@ executor.runScript(adapter, script, onStep)   ← 进度在 Node 进程内产生
 **`if` 约定依据的执行器引用**：`src/executor/executor.ts` 的 `runNode`（`chosen = result.passed ? branches[0] : branches[1]`）。图模型以此为准，保证可视化与真实执行一致。
 
 **边界安全（§4.1）**：`buildCfgGraph` 对 `children` 含 `null` 的坏数据跳过而非抛错（渲染路径崩了会白屏）；`setStatus` 对未知 stepId 静默跳过。
+
+**规模可读性（spec §2.6.1 新增要求，待实现）**：用户确认 Figma 原型后补充——步骤多时 CFG 仍须形象表现执行结构。`visual-mask-ui-spec.md` §2.6.1 现要求：打包组可折叠为单节点、画布缩放/平移、minimap 或滚动定位、运行时当前步自动滚入。当前 `cfg-view.ts`（M3-R4）只画固定竖向图，折叠/缩放/minimap 尚未实现，登记为后续子阶段，**不属本次文档改动落地范围**；架构上仍是 `CfgView` 渲染层职责，不新增内核概念、不改 `Step` schema。
 
 **`setStatus` 原地更新（避免高频重渲染，§4.1 清单 7）**：`CfgView` 缓存 `stepId → DOM 节点` 映射，`setStatus` 只改已有节点的 `data-cfg-status`/`class`，**不整树重建**（测试断言前后 `querySelector` 返回同一 DOM 引用）。`update` 幂等（先清再画，同脚本重复 update 不产生重复节点）。
 
