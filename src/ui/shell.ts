@@ -129,6 +129,22 @@ function pickFieldFor(step: Step): 'assertion-locator' | 'condition-locator' | u
   return undefined;
 }
 
+/**
+ * 详情区暴露给用户的断言类型子集（spec §2.3：断言元素可见/存在文本）。
+ * 完整 AssertionKind 含 titleIs/urlMatches/expr/screenshotMatches 等，留给 Agent/MCP 用；
+ * UI 只给最常用人可编辑的三类，避免把不适用的人工选项塞给用户。
+ */
+const ASSERTION_UI_KINDS: { value: AssertionKind; label: string }[] = [
+  { value: 'visible', label: '元素可见(visible)' },
+  { value: 'exists', label: '元素存在(exists)' },
+  { value: 'textContains', label: '包含文本(textContains)' },
+];
+
+/** 该断言类型需要用户填写期望值（textContains 的文本）；visible/exists 只需 locator。 */
+function assertionNeedsValue(kind: AssertionKind): boolean {
+  return kind === 'textContains' || kind === 'titleIs' || kind === 'urlMatches' || kind === 'expr';
+}
+
 export class UiShell {
   private kernel: UiKernel;
   private mount: HTMLElement;
@@ -521,6 +537,25 @@ export class UiShell {
     if (step.params?.durationMs !== undefined) {
       area.appendChild(this.editField(step, 'params.durationMs', '等待毫秒(durationMs)', String(step.params.durationMs)));
     }
+    // 断言/等待条件字段（spec §2.3）：断言类型选择 + 期望值 + 超时。
+    // waitUntil/assert 用 params.assertion；选择组(if)用 control.condition（同为 Assertion）。
+    const assertion = step.params?.assertion;
+    if (assertion) {
+      area.appendChild(this.editSelect(step, 'assertion.kind', '断言类型', ASSERTION_UI_KINDS, assertion.kind, (v) => this.onKindChange(step.id, 'assertion', v)));
+      if (assertionNeedsValue(assertion.kind)) {
+        area.appendChild(this.editField(step, 'assertion.value', '期望值(value)', assertion.value ?? ''));
+      }
+      if (step.type === 'waitUntil' && step.params?.timeoutMs !== undefined) {
+        area.appendChild(this.editField(step, 'params.timeoutMs', '超时毫秒(timeoutMs)', String(step.params.timeoutMs)));
+      }
+    }
+    const condition = step.control?.condition;
+    if (step.control?.kind === 'if' && condition) {
+      area.appendChild(this.editSelect(step, 'condition.kind', '条件类型', ASSERTION_UI_KINDS, condition.kind, (v) => this.onKindChange(step.id, 'condition', v)));
+      if (assertionNeedsValue(condition.kind)) {
+        area.appendChild(this.editField(step, 'condition.value', '条件值(value)', condition.value ?? ''));
+      }
+    }
 
     // 保存 / 删除（保存走统一 data-action 委托，见 saveEdit；删除保留行内处理）
     const save = document.createElement('button');
@@ -553,7 +588,25 @@ export class UiShell {
       else if (path === 'locator.role') patch.locator = { ...(patch.locator ?? step.locator), role: v };
       else if (path === 'params.value') patch.params = { ...(patch.params ?? step.params), value: v };
       else if (path === 'params.durationMs') patch.params = { ...(patch.params ?? step.params), durationMs: Number(v) || 0 };
-      else if (path === 'control.name') patch.control = { ...(patch.control ?? step.control!), name: v };
+      else if (path === 'params.timeoutMs') patch.params = { ...(patch.params ?? step.params), timeoutMs: Number(v) || 0 };
+      else if (path === 'assertion.kind') {
+        // 保留同次保存已写入的 params 字段与 assertion 子字段（value 等），不互相覆盖。
+        const baseParams = patch.params ?? step.params ?? {};
+        const baseAssert = (patch.params?.assertion ?? step.params?.assertion) ?? ({ kind: 'visible' } as Assertion);
+        patch.params = { ...baseParams, assertion: { ...baseAssert, kind: v as AssertionKind } };
+      } else if (path === 'assertion.value') {
+        const baseParams = patch.params ?? step.params ?? {};
+        const baseAssert = (patch.params?.assertion ?? step.params?.assertion) ?? ({ kind: 'visible' } as Assertion);
+        patch.params = { ...baseParams, assertion: { ...baseAssert, value: v } };
+      } else if (path === 'condition.kind') {
+        const baseCtrl = patch.control ?? step.control!;
+        const baseCond = (patch.control?.condition ?? step.control?.condition) ?? ({ kind: 'visible' } as Assertion);
+        patch.control = { ...baseCtrl, condition: { ...baseCond, kind: v as AssertionKind } };
+      } else if (path === 'condition.value') {
+        const baseCtrl = patch.control ?? step.control!;
+        const baseCond = (patch.control?.condition ?? step.control?.condition) ?? ({ kind: 'visible' } as Assertion);
+        patch.control = { ...baseCtrl, condition: { ...baseCond, value: v } };
+      } else if (path === 'control.name') patch.control = { ...(patch.control ?? step.control!), name: v };
       else if (path === 'control.loopCount') patch.control = { ...(patch.control ?? step.control!), loopCount: Number(v) || 1 };
     });
     this.script = ScriptEditor.updateNested(this.script, stepId, patch);
@@ -574,6 +627,47 @@ export class UiShell {
     row.appendChild(span);
     row.appendChild(input);
     return row;
+  }
+
+  /** 生成一个下拉选择行（label + select），select 带 data-edit-field 供保存时读取。
+   * 选「断言/条件类型」时即时 onChange：把新 kind 写回步骤并重渲染编辑区，
+   * 让 textContains 的「期望值」输入框立刻出现（否则要保存后才出现，交互不直观）。 */
+  private editSelect(step: Step, path: string, label: string, options: { value: string; label: string }[], current: string, onChange?: (v: string) => void): HTMLElement {
+    const row = document.createElement('label');
+    row.className = 'ui-shell-edit-field';
+    const span = document.createElement('span');
+    span.textContent = label;
+    const sel = document.createElement('select');
+    sel.setAttribute('data-edit-field', path);
+    for (const o of options) {
+      const opt = document.createElement('option');
+      opt.value = o.value;
+      opt.textContent = o.label;
+      if (o.value === current) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    if (onChange) sel.addEventListener('change', () => onChange(sel.value));
+    row.appendChild(span);
+    row.appendChild(sel);
+    return row;
+  }
+
+  /** 断言/条件类型变更：即时写回步骤并重渲染编辑区（让期望值字段按需出现/隐藏）。 */
+  private onKindChange(stepId: string, which: 'assertion' | 'condition', kind: string): void {
+    const step = this.findStep(stepId);
+    if (!step) return;
+    let patch: Partial<Step>;
+    if (which === 'assertion') {
+      const assertion = step.params?.assertion ?? ({ kind: 'visible' } as Assertion);
+      patch = { params: { ...step.params, assertion: { ...assertion, kind: kind as AssertionKind } } };
+    } else {
+      const condition = step.control?.condition ?? ({ kind: 'visible' } as Assertion);
+      patch = { control: { ...step.control!, condition: { ...condition, kind: kind as AssertionKind } } };
+    }
+    this.script = ScriptEditor.updateNested(this.script, stepId, patch);
+    // 重渲染编辑区：用更新后的步骤，使期望值字段随 kind 显隐。
+    const updated = this.findStep(stepId);
+    if (updated) this.renderEditArea(updated);
   }
 
   /** 手动步骤类型：spec §2.4 仅暴露 3 类（wait/waitUntil/assert）；循环走组操作（§2.5）。 */
@@ -857,7 +951,21 @@ export class UiShell {
     if (!this.sawProgress) this.backfillStatus(res);
     this.lastFailedStepId = res.ok ? undefined : res.failedStepId;
     this.render();
+    // 失败高亮（spec §2.7）：把失败步滚入视口，让用户一眼定位到崩点。
+    if (!res.ok && res.failedStepId) this.scrollStepIntoView(res.failedStepId);
     return res;
+  }
+
+  /** 把某步的 CFG 节点与列表项滚入视口（失败高亮用；运行跟随由 CFG setStatus 处理）。 */
+  private scrollStepIntoView(stepId: string): void {
+    const cfgNode = this.mount.querySelector(`[data-cfg-node="${stepId}"]`) as HTMLElement | null;
+    if (cfgNode && typeof cfgNode.scrollIntoView === 'function') {
+      cfgNode.scrollIntoView({ block: 'nearest' });
+    }
+    const listItem = this.mount.querySelector(`[data-step-item][data-step-id="${stepId}"]`) as HTMLElement | null;
+    if (listItem && typeof listItem.scrollIntoView === 'function') {
+      listItem.scrollIntoView({ block: 'nearest' });
+    }
   }
 
   /** 兼容旧「回放」入口（既有调用方零改动）。 */
