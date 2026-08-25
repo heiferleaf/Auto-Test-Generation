@@ -64,7 +64,7 @@ git worktree add -b feat/<name> .cursor/worktree/<name> master
 |---|---|---|
 | test | `test-first-dev` | 先有测试，再实现；`npm test` / `npm run typecheck` 通过 |
 | code-review | `code-review-standard` | 设计/SOLID/架构文档同步；**用户可见功能必须做产品符合度审查** |
-| runtime-runnability | `runtime-runnability-review` | 编译和单测全绿但真实路径会崩的盲区 |
+| runtime-runnability | `runtime-runnability-review` | 真实路径会崩的盲区 + 跨边界 undefined→null；接口/功能不变前提下的执行性能与时间/空间复杂度审查（优化须先有测试守住功能） |
 
 产品符合度：对照 `docs/design/visual-mask-ui-spec.md` §2.x 交互逻辑逐条验收，不要只看代码质量。UI 主链路必须走 jsdom 里 `app.boot()` + 模拟 `[data-action]` 点击（`npm test -- test/ui-core-e2e.test.ts`），禁止只用内部 API 直调冒充用户路径。
 

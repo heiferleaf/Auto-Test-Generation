@@ -10,5 +10,6 @@ alwaysApply: true
 - 有代码改动就必须跑三个角色，对应 skill：`test-first-dev`、`code-review-standard`、`runtime-runnability-review`。
 - 用户可见功能必须对照 `docs/design/visual-mask-ui-spec.md` 做产品符合度审查；UI 主链路走 `test/ui-core-e2e.test.ts`，禁止只用内部 API 直调冒充用户路径。
 - 跨 WS/JSON/CDP 边界必须用 `x = x ?? {}` 兜底，不能依赖函数默认参数（`undefined` 经 JSON 会变成 `null`）。
+- 性能优化必须先有测试守住功能，再动实现；接口/功能/schema 不变，降阶才算优化，同阶常数优化需有证据。
 - 注释写行为与原因，不要只写需求/设计编号。
 - **在用户整理完需求用例之前，不要改 M3 业务实现，也不要开始封装 MCP Server。** 现阶段只做配置迁移、文档对齐、靶机启动脚本这类基础设施。
