@@ -111,10 +111,14 @@ executor.runScript(adapter, script, onStep)   ← 进度在 Node 进程内产生
 **已知限制（P3，M4 修）**：`pushEvent` 向所有客户端广播，无 runId/客户端过滤。多标签页同时运行会串扰（各自看到对方进度）。M3 单客户端场景可接受，已记于 `docs/plan/plan.md`。
 
 **Git 式版本层（与 CFG 融合）**
-- **版本节点 = 最外层顺序组**（Sequential Group），非单个 Step；仅最外层顺序组支持切分支（选择/循环组内不可切，保控制流合法）。
+- **版本节点 = 最外层顺序组**（Sequential Group），非单个 Step；仅最外层顺序组支持切分支（选择/循环组内不可切，保控制流合法）。`isVersionNode(step, topIndex)` 据此判定（`topIndex===0` 且 `control.kind==='sequence'`）。
 - 一个 Script = 一条分支链（含嵌套控制结构）；整个脚本库 = 一个仓库。
 - 功能 7 项：commit / branch / switch / cherry-pick / history(CFG 融合图) / tag / diff；砍 reset / merge / rebase。
-- 落点：新增 `src/script/version-store.ts`（提交树 + 不可变更新），UI 壳 `src/ui/version-panel.ts`（SRP）；`UiKernel` **不**上提版本操作（保持 DIP，版本状态在 UI 侧/本地）。
+- 落点：
+  - `src/script/version-store.ts`（**纯数据，无 UI / 无内核依赖**）：提交树（`VersionStore{branches,commits,currentBranch,seq}`）+ 不可变更新。所有写操作（commit/branch/switch/cherryPick/tag）返回**新** store，入参 `Script` 与原 store 均不被 mutate —— 防版本层静默改写历史（cherry-pick 改参落入新提交而非污染源分支）。脏数据入口抛 `VersionStoreError`（与 io.ts `ScriptError` 同族，但限定版本语义）。
+  - `src/ui/version-panel.ts`（SRP 渲染组件）：只把 `VersionStore` 画出来 + 把操作经回调上报，`onSwitch`/`onCherryPick` 由 `UiShell` 接回 `version-store` 纯函数；mount 级单一点击委托 + `closest`（复用 CfgView 已验证模式，避免 e.target===currentTarget 掩盖真实点击）。**不 import UiKernel / 执行器**（DIP）。
+  - `UiShell` 持有 `versionStore` 并编排版本操作（调 `version-store` 纯函数），再把新 store 喂回面板 `update` 重绘；`UiKernel` **不**上提版本（保持 DIP，版本状态在 UI 侧/本地）。
+- `diffScripts(a,b)` **递归**展平所有层级步（含嵌套 children）后按 id 对齐，返回 `added/removed/modified` —— 因版本节点是 sequence 组，其 children 含嵌套步，改一个嵌套步的字段（如 R6 版本更新修复参数）必须被捕获。不抛错：相同脚本返回空差异，空脚本也不崩。
 
 **增量渲染**：`UiShell.render()` 当前全量 `innerHTML=''`，实时生成与逐步状态会带来高频重渲染；须改为增量 DOM 更新（按 stepId diff）或视图虚拟化，避免步骤多时卡顿（CODEBUDDY.md §4.1 清单 7）。
 
@@ -181,7 +185,8 @@ executor.runScript(adapter, script, onStep)   ← 进度在 Node 进程内产生
 | UI 壳 | `src/ui/shell.ts` | 编排 + 增量渲染 + 选中态真相源 | 增量 append + CFG 视图挂载；**R3**：`runAll()` + 运行态 `Map`（不入 Step 模型）+ 高亮跟随 + generation token 作废迟到定位；**R4**：新增 `selectedStepId`/`selectStep`/`getSelectedStepId` 选中态唯一真相源，内部事件委托双向联动列表项与 CFG 节点，进度回调经 `CfgView.setStatus` 同步图节点状态（同一 `stepStatus` Map） |
 | CFG 视图 | `src/ui/cfg-view.ts`（已实现，M3-R4） | 图形化控制流 | 新增组件（SRP）：`buildCfgGraph` 纯函数（图模型，与 DOM 解耦）+ `CfgView` DOM 渲染（只画图与上报点击，DIP 不 import 执行器/内核）；`setStatus` 原地更新避免高频重渲染；坏数据（`children` 含 null）跳过不抛错 |
 | 展示文案 | `src/ui/step-label.ts`（已实现，M3-R4） | Step→人话文案 | 新增（SRP）：`TYPE_LABEL`/`describeLocator`/`describeStepBrief` 单一真相源，步骤列表与 CFG 视图共用，避免两处各存一份而显示不一致 |
-| 版本面板 | `src/ui/version-panel.ts`（新） | Git 式版本操作 | 新增组件（SRP） |
+| 版本库（数据） | `src/script/version-store.ts`（已实现，M3-R5） | 提交树 + 不可变版本操作 | 新增（纯数据，无 UI/内核依赖）：`createStore/commit/branch/switchTo/cherryPick/tag/getHistory/getBranches/getTags/getCurrentScript/diffScripts` + `isVersionNode` 判定；写操作均返回新 store（不可变），脏数据抛 `VersionStoreError`；`diffScripts` 递归展平比对 |
+| 版本面板 | `src/ui/version-panel.ts`（已实现，M3-R5） | Git 式版本操作 UI | 新增组件（SRP）：仅消费 `VersionStore` + 回调上报，mount 级委托 + `closest`，不 import 内核/执行器（DIP）；`UiShell` 持有 store 并编排 |
 | WS 桥 | `src/ui/bridge-server.ts` + `ws-kernel.ts` | RPC + 推送 | 加 event/push 消息类型 + `sanitizeArgs` 兜底；**R3**：`playback` 专用分支 + `pushEvent('step-progress')` + `assertRunnableScript` 递归深度校验 + adapter 可注入（DIP，使 WS 线路可测） |
 | 页面 | `src/ui/index.html` | 四区→加 cfg/version 区 | CSS 扩展；**R3**：步骤运行态 class + 失败提示 + 待定位高亮样式 |
 

@@ -213,7 +213,7 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 | M3-R2 嵌入实时录制 | ✅ 已合并 | `feat/ws-push-channel` | `a654faa` | `test/ui-shell-live-recording.test.ts` 4 通过 |
 | M3-R3 运行全部 + 步骤态 + 高亮跟随 | ✅ 已合并 | `feat/run-all` | 见合并记录 | `ui-shell-run-all` 22 + `executor-progress` 11 + `bridge-ws-progress` 7（真 WS）+ `bridge-push` 25 通过 |
 | M3-R4 CFG 图形化视图 | ✅ 已合并 | `feat/cfg-view` | `883fe1e` | `test/cfg-view.test.ts` 47 通过（含特殊字符 id / 点击内部子元素 / OCP 穷尽性 / 导入期 kind 校验 / 未知 kind 不白屏） |
-| M3-R5 Git 式版本层 | ⬜ 未开始 | `feat/git-version` | — | — |
+| M3-R5 Git 式版本层 | 🔍 审查中（待合并） | `feat/git-version` | — | `version-store` 23 + `version-panel` 8 + `version-shell` 4 通过（共 35 例） |
 
 > **测试代码权威性纪律（新增，因本轮违规而补）**：既有测试文件（含其 mock 基建，如 `test/ui-shell.test.ts` 的 `makeMockKernel`）**不得为迁就新实现而修改**。新能力需要新的 mock 行为时，新建独立测试文件并自带 mock，不动既有基建。
 
@@ -285,11 +285,14 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 - **校验**：`npm test` 211 通过 / 17 跳过；`npm run typecheck` 干净；三校验角色结论见合并记录 `883fe1e`。
 - **未做**：真机端到端冒烟（需 9222 靶机）。
 
-### 阶段 M3-R5：Git 式版本层（§2.2/§6）
+### 阶段 M3-R5：Git 式版本层（§2.2/§6）— 🔍 审查中（待合并）
 - **worktree**：`feat/git-version`
-- **测试先行**：`test/git-version.test.ts` 覆盖 commit/branch(仅最外层顺序组)/switch/cherry-pick/diff，断言版本树还原一致；跨分支 cherry-pick 后改参落新提交。
-- **实现**：新 `src/script/version-store.ts`（提交树 + 不可变更新，版本节点=最外层顺序组）；新 `src/ui/version-panel.ts`（SRP）分支切换/cherry-pick/tag/diff（融合 CFG 视图）；`UiKernel` 不上提版本（保 DIP）。
-- **校验**：code-review 查 DIP/架构同步；runtime-runnability 真机版本操作冒烟。
+- **测试先行**（**先写** `test/git-version.test.ts` + `test/version-panel.test.ts` + `test/version-shell.test.ts`，再写实现；未改任何既有测试）：
+  - `version-store`（23 例）：`isVersionNode` 仅顶层 sequence 为真（嵌套/if/while/叶子均否）；`commit` 不可变（入参 Script 引用不变、history 倒序）；`branch` 派生 + 同名报错 + 不改源；`switchTo` 还原脚本 + 不存在分支报错；`cherryPick` 跨分支摘节点、源不变、改参落新提交而非改写源、不存在节点报错；`tag` 列出 + 重复报错 + 空名报错；`diffScripts` 递归展平比对（增/删/改）、相同脚本空差异不崩；边界硬失败（§4.1）入口抛 `VersionStoreError` 而非 UI 白屏。
+  - `version-panel`（8 例，jsdom）：渲染分支/标签/历史；点击 chip 内部文字经 mount 委托上报 `onSwitch`；点击历史 cherry-pick 按钮上报 `onCherryPick`；`canCherryPick` 控按钮显隐；`update` 幂等；空/单提交不崩。
+  - `version-shell`（4 例，jsdom）：render 后面板挂载含 main chip；`versionBranch` 后新 chip 出现；点 chip 经 shell 切回 store 并刷新高亮；`versionCommit` 后历史 +1。
+- **实现**：新 `src/script/version-store.ts`（纯数据，无 UI/内核依赖，提交树 + 不可变更新，版本节点=最外层顺序组，`VersionStoreError` 入口硬失败，`diffScripts` 递归展平）；新 `src/ui/version-panel.ts`（SRP，仅消费 store + 回调，mount 委托，DIP 不 import 内核）；`shell.ts` 持有 `versionStore` 并编排（接回 version-store 纯函数），暴露 `versionCommit/versionBranch/versionTag`；`index.html` 补版本面板 CSS；`UiKernel` 不上提版本（保 DIP）。
+- **校验**：test 全绿(246/17 skip) + typecheck 干净；code-review 查 DIP/架构同步（§5.2 已同步 architecture.md §2.2 + §2.3）；runtime-runnability 真机版本操作冒烟（需靶机则 skip）。
 
 ### 合并纪律
 - 各阶段在 worktree 内过三角色校验后合并 master（保留 worktree 目录，用户要求不删）。

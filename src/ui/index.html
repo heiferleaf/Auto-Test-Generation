@@ -118,6 +118,18 @@
     .ui-shell-cfg-loop-mark { color: var(--accent); font-weight: bold; }
     .ui-shell-cfg-while-body { margin: 4px 0 4px 14px; padding-left: 8px; border-left: 2px dashed var(--accent); display: flex; flex-direction: column; gap: 4px; }
     .ui-shell-cfg-seq-body { margin: 4px 0 4px 14px; padding-left: 8px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+
+    /* ── M3-R5 Git 式版本面板 ── */
+    .ui-shell-version { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel); display: flex; flex-direction: column; gap: 8px; }
+    .ui-shell-ver-title { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
+    .ui-shell-ver-branches, .ui-shell-ver-tags, .ui-shell-ver-history { display: flex; flex-direction: column; gap: 4px; }
+    .ui-shell-ver-branch { display: inline-block; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--fg); cursor: pointer; font-size: 13px; }
+    .ui-shell-ver-branch.is-current { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+    .ui-shell-ver-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; background: #2d333b; color: var(--fg); font-size: 12px; }
+    .ui-shell-ver-commit { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 6px; border-radius: 5px; background: #21262d; font-size: 13px; }
+    .ui-shell-ver-commit-msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ui-shell-ver-cp { padding: 2px 8px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--fg); cursor: pointer; font-size: 12px; }
+    .ui-shell-ver-cp:hover { border-color: var(--accent); color: var(--accent); }
   </style>
 </head>
 <body>

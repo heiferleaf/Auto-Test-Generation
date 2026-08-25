@@ -19,6 +19,18 @@ import { ScriptEditor } from '../editor/editor';
 import { SCRIPT_SCHEMA } from '../types/step';
 import { CfgView } from './cfg-view';
 import { TYPE_LABEL, describeLocator } from './step-label';
+import {
+  createStore,
+  commit as vCommit,
+  branch as vBranch,
+  switchTo as vSwitchTo,
+  cherryPick as vCherryPick,
+  tag as vTag,
+  getBranches,
+  getCurrentScript,
+  type VersionStore,
+} from '../script/version-store';
+import { VersionPanel } from './version-panel';
 
 /** 回放结果（与 cli.CliResult 同构，但由内核产生，UI 壳不依赖 cli 模块）。 */
 export type PlaybackResult = { ok: boolean; failedStepId?: string };
@@ -114,6 +126,16 @@ export class UiShell {
   /** CFG 视图挂载区（render 时创建，update 复用）。 */
   private cfgMount?: HTMLElement;
   /**
+   * Git 式版本库（M3-R5）：版本状态在 UI 侧/本地，UiKernel 不上提版本（DIP）。
+   * UiShell 持有 store 并编排版本操作（调 version-store 纯函数），再把新 store
+   * 喂给 VersionPanel 重绘。版本库以"当前编辑脚本"初始化首个提交。
+   */
+  private versionStore: VersionStore;
+  /** 版本面板（SRP 组件，仅消费 store + 回调，不依赖内核）。 */
+  private versionPanel?: VersionPanel;
+  /** 版本面板挂载区（render 时创建，update 复用）。 */
+  private versionMount?: HTMLElement;
+  /**
    * 选中态唯一真相源：列表视图与 CFG 视图都订阅它（兄弟视图互不依赖）。
    * 避免两个兄弟视图互相同步产生的双向耦合与状态分叉。
    */
@@ -127,6 +149,8 @@ export class UiShell {
       app: { name: 'Unnamed', version: '0.0.0' },
       steps: [],
     };
+    // M3-R5：以当前脚本在 main 分支建首个提交（版本库入口，不可变）。
+    this.versionStore = createStore(this.script, 'init');
     // 在 UiShell 内部挂**一处**事件委托：列表项点击 → 选中（反向联动），
     // 不依赖 app.ts。用 closest 就近命中，兼容点击列表项内部文字。
     this.mount.addEventListener('click', (e) => {
@@ -721,6 +745,42 @@ export class UiShell {
     // 重建后恢复当前选中态（若运行/编辑期间有选中）。
     if (this.selectedStepId) this.cfgView.setSelected(this.selectedStepId);
     root.appendChild(cfg);
+
+    // 版本面板（M3-R5）：独立 SRP 组件，UiShell 把版本操作回调接回 version-store
+    // 纯函数，再把新 store 喂回面板重绘。版本状态在 UI 侧（DIP，UiKernel 不上提版本）。
+    const ver = document.createElement('div');
+    ver.className = 'ui-shell-version';
+    ver.setAttribute('data-version', 'true');
+    if (!this.versionPanel) {
+      this.versionPanel = new VersionPanel({
+        mount: ver,
+        store: this.versionStore,
+        onSwitch: (name) => this.applyVersionStore(vSwitchTo(this.versionStore, name)),
+        onCherryPick: (hash) => this.applyVersionStore(vCherryPick(this.versionStore, hash)),
+        canCherryPick: () => this.versionStore.currentBranch !== 'main' || getBranches(this.versionStore).length > 1,
+      });
+    } else {
+      this.versionPanel.rebindMount(ver);
+      this.versionPanel.update(this.versionStore);
+    }
+    root.appendChild(ver);
+  }
+
+  /** 应用版本库新状态：写回 store 并刷新面板（不可变：新 store 替换旧引用）。 */
+  private applyVersionStore(next: VersionStore): void {
+    this.versionStore = next;
+    this.versionPanel?.update(next);
+  }
+
+  /** 暴露版本库入口操作给外部（如录制落盘时提交、UI 按钮创建分支/标签）。 */
+  versionCommit(message: string): void {
+    this.applyVersionStore(vCommit(this.versionStore, message, this.script));
+  }
+  versionBranch(name: string): void {
+    this.applyVersionStore(vBranch(this.versionStore, name));
+  }
+  versionTag(name: string): void {
+    this.applyVersionStore(vTag(this.versionStore, name));
   }
 
   /** 构造单条步骤 DOM 项（render 与增量 append 复用）。 */
