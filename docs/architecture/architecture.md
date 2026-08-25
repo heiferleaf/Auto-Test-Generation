@@ -37,7 +37,7 @@ text
 ### 2.1 可视化蒙版 UI 壳（M3.3）
 
 UI 壳是「人操作界面」，与内核（CDP 适配层 / 录制 / 执行器）解耦，遵循 DIP：只依赖 `UiKernel` 抽象接口
-（`CdpAdapter & VisualCapable & Recordable & { playback }`），不感知 `PlaywrightCdpAdapter` 具体实现。
+（`CdpAdapter & VisualCapable & Recordable & { playback, startPick?, cancelPick? }`），不感知 `PlaywrightCdpAdapter` 具体实现。`startPick`/`cancelPick` 为可选（`Pickable`，ISP）：旧内核不实现时 UI 侧点选按钮禁用。
 
 ```
 ┌─ 浏览器面板 (src/ui/index.html + app.ts) ─────────────┐
@@ -56,7 +56,7 @@ UI 壳是「人操作界面」，与内核（CDP 适配层 / 录制 / 执行器�
 要点：
 - **浏览器无法直接运行 `PlaywrightCdpAdapter`**（依赖 Node 原生模块），故真机经 WebSocket 桥：页面 `WsKernel` 把 `UiKernel` 调用序列化为 RPC，Node 侧 `bridge-server` 代理到 `PlaywrightCdpAdapter`。
 - **演示模式** `DemoKernel` 让 UI 形态/交互可在无真机时查看（供 UI 设计）。
-- **录制/回放能力上提至内核**：`UiKernel.playback(script)` 由 `PlaywrightCdpAdapter` 实现（内部 `runCli`），UI 壳不 import 执行器/playwright 链——满足 §4 SOLID/DIP 基线。
+- **录制/回放能力上提至内核**：`UiKernel.playback(script, fromStepId?)` 由 `PlaywrightCdpAdapter` 实现（内部 `runCli`），UI 壳不 import 执行器/playwright 链——满足 §4 SOLID/DIP 基线。`fromStepId` 为「从此处运行」起点（spec §2.7），可选。
 - 关键修复：adpater 连接统一用 `127.0.0.1`（避免 `localhost` 解析 `::1` IPv6 导致 `ECONNREFUSED`）。
 - **跨进程截图序列化**：`screenshot()` 返回 Node `Buffer`，经 WS 会变成 `{type:'Buffer',data:[...]}`（浏览器无法解码）。修复：`bridge-server.ts:serializeBuffers` 把结果中的 Buffer 递归转 base64（`{__base64}`），`ws-kernel.ts` 还原为浏览器可用的 base64 字符串；`UiShell.startFrameStream` 据此渲染到舞台 `<img>`，解决"蒙版看不到软件页面"。截图流数据路径由 `scripts/verify-ui-live.mjs` 硬断言保护（base64 长度 < 1000 即失败）。
 
@@ -68,7 +68,8 @@ UI 壳是「人操作界面」，与内核（CDP 适配层 / 录制 / 执行器�
 **范式**：蒙版**嵌入靶机叠加层**，用户在软件内直接操作 → 交互经 WS 回传 → **实时追加步骤到 UI 列表**（非停止后批量）。截图流仅用于单步/运行态高亮查看。
 
 **步骤模型（CFG 树，加法式升级 `src/types/step.ts`）**
-- `Step` 增加可选递归字段：`children?: Step[]`、`control?: { kind: 'sequence'|'if'|'while'; condition?: Assertion; loopCount?: number }`。
+- `Step` 增加可选递归字段：`children?: Step[]`、`control?: { kind: 'sequence'|'if'|'while'; name?: string; condition?: Assertion; loopCount?: number }`。
+  - `control.name`：组名（spec §2.5/D5）。UI 把每个节点当组操作，组名供人识别与 CFG 节点展示，非内部实现 id；可选，不参与执行语义。
 - 叶子步骤 = 现有 8 个 `StepType`（click/fill/select/wait/assert/hover/eval/snapshot）。
 - `assert` 复用为"选择组"的判断条件；`wait` 分 `wait(waitMs)` 与 `waitUntil(assertion,timeoutMs)`；`repeat` 由 `control.kind='while'` + `loopCount` 表达（循环体=children）。
 - `Script.steps` 仍为 `Step[]`（元素自身可带 children），旧脚本向后兼容。
@@ -76,6 +77,7 @@ UI 壳是「人操作界面」，与内核（CDP 适配层 / 录制 / 执行器�
 
 **执行器（递归 `runNode`，`src/executor/executor.ts`）**
 - `runScript` 改为对每元素调用新增递归 `runNode(node)`：sequence 遍历 children、if 求值 `condition` 后分支、while 按 `loopCount` 回退 children。
+- `runScript(adapter, script, onStep?, fromStepId?)` 增可选 `fromStepId`（spec §2.7「从此处运行」）：前序跳过起点之前的步骤，命中起点（叶或组）后正常执行其后序节点。未 started 时下钻 sequence/while 寻找起点；if 仅当起点在其子树内才求值条件（避免无副作用跳过）；叶子处 gate 执行与进度上报。未传时从头执行（向后兼容）。
 - 单叶子步骤逻辑（`selectTarget` + 断言/动作分发）原样复用；`actions.ts`/`assert.ts` 注册表不动（OCP）。
 
 **WS 桥主动推送通道（§2.3 关键设施）— 已实现（R1 录制增量 / R3 运行进度）**
@@ -86,21 +88,23 @@ UI 壳是「人操作界面」，与内核（CDP 适配层 / 录制 / 执行器�
 |---|---|---|---|
 | `recording` | `adapter.startRecording(onEvent)` 增量回调 | 边操作边追加步骤（实时生成） | R1 |
 | `step-progress` | 执行器 `runScript(…, onStep)` 逐叶子上报 | 运行全部时逐步 running/pass/fail 回显 + 高亮跟随 | R3 |
+| `pick` | `adapter.startPick(onPick)` 一次性命中回调 | 嵌入式点选（waitUntil/assert/选择组条件）命中后把完整 locator 写回当前编辑步骤 | R5 |
 
-**关键架构约束：进度源必须在 Node 进程内产生，`UiKernel.playback` 必须保持单参数。**
-`UiKernel` 有跨 WebSocket 实现（`WsKernel`），**函数无法 JSON 序列化** —— 若把进度回调放进 `playback(script, cb)` 的参数位，真机上回调 100% 丢失，且 `tsc` 与单测（Mock 内核不过 WS）全绿，属 CODEBUDDY.md §4.1 盲区（R3 首版曾因此被打回）。故数据流固定为**单向下行**：
+**关键架构约束：进度源必须在 Node 进程内产生，`UiKernel.playback` 的进度回调不得入参位。**
+`UiKernel` 有跨 WebSocket 实现（`WsKernel`），**函数无法 JSON 序列化** —— 若把进度回调放进 `playback(script, cb)` 的参数位，真机上回调 100% 丢失，且 `tsc` 与单测（Mock 内核不过 WS）全绿，属 CODEBUDDY.md §4.1 盲区（R3 首版曾因此被打回）。故数据流固定为**单向下行**。`playback` 的可序列化参数仅 `(script, fromStepId?)`——`fromStepId` 是普通字符串，跨 WS 安全（`undefined` 经 JSON 变 `null`，桥端 `null/undefined → undefined` 兜底还原）：
 
 ```
-executor.runScript(adapter, script, onStep)   ← 进度在 Node 进程内产生（进程内传函数合法）
-  → cli.runCli({ onStep })
-  → adapter.playback(script, onStep)
-  → bridge-server 的 playback 专用分支注册回调
+executor.runScript(adapter, script, onStep, fromStepId?)   ← 进度在 Node 进程内产生（进程内传函数合法）
+  → cli.runCli({ onStep, fromStepId })
+  → adapter.playback(script, onStep, fromStepId)
+  → bridge-server 的 playback 专用分支注册回调（args[1] 取 fromStepId，兜底 null→undefined）
   → pushEvent('step-progress', { stepId, status })   ← 跨 WS 只传可序列化数据
   → ws-kernel.on('step-progress')
-  → UiShell.runAll() 消费（更新步骤态 + 高亮跟随）
+  → UiShell.runAll(fromStepId?) 消费（更新步骤态 + 高亮跟随）
 ```
 
-- **`playback` 走专用分支**（同 `startRecording`），不落通用反射转发 `fn.apply`，因需在桥端注册进度回调。
+- **`playback` 走专用分支**（同 `startRecording`/`startPick`），不落通用反射转发 `fn.apply`，因需在桥端注册进度回调。
+- **`startPick`/`cancelPick` 走通用反射转发**：无回调入参位（命中经 `pick` 事件回推），故可落 `fn.apply`；桥端 `BridgeAdapter` 类型补 `startPick`/`cancelPick` 声明。`Pickable` 为可选能力（ISP）：旧内核不实现时 UI 侧「在软件中点选」按钮禁用，不崩溃。
 - **运行态不入 `Step` 模型**：`StepRunStatus`（pending/running/pass/fail）存于 `UiShell` 内的 `Map<stepId, StatusI>`。理由 SRP —— `Step` 会被持久化（导出 / 版本 diff），运行态是瞬时 UI 态，混入会污染脚本产物。
 - **向后兼容（OCP）**：老内核不发 `step-progress` 时，`runAll` 依 `{ok, failedStepId}` 回填状态（`backfillStatus`），行为不退化。
 - **边界兜底**：桥端反射转发 `fn.apply(adapter, sanitizeArgs(req.args))`，`sanitizeArgs` 把 JSON 产生的 `null` 还原为 `undefined`，杜绝服务端默认参数失效的 `null` 陷阱（§4.1）。
@@ -179,17 +183,17 @@ executor.runScript(adapter, script, onStep)   ← 进度在 Node 进程内产生
 | 模块 | 文件 | 职责 | 本次改动 |
 |---|---|---|---|
 | 步骤类型 | `src/types/step.ts` | CFG 递归字段 + v2 schema | 加法扩展（兼容 v1）；**R3**：`STEP_TYPES`/`CONTROL_KINDS` 改为运行时常量，类型由其反推（单一真相源） |
-| 执行器 | `src/executor/executor.ts` | 线性→递归 `runNode` | 新增递归调度，复用 `runStep`；**R3**：新增 `StepProgress` 逐叶子进度上报（控制流节点自身不报）+ `childrenOf` 坏子节点守卫 |
-| CLI | `src/cli.ts` | 汇总运行结果 | **R3**：`onStep` 透传给 `runScript` |
-| CDP 适配层 | `src/cdp/adapter.ts` | 真机控制 | **R3**：`playback(script, onStep?)` 进程内可选进度回调（跨 WS 不传，函数不可序列化） |
+| 执行器 | `src/executor/executor.ts` | 线性→递归 `runNode` | 新增递归调度，复用 `runStep`；**R3**：新增 `StepProgress` 逐叶子进度上报（控制流节点自身不报）+ `childrenOf` 坏子节点守卫；**R6**：`runScript(…, fromStepId?)` 从此处运行（前序跳过 + 下钻寻起点 + if 子树守卫） |
+| CLI | `src/cli.ts` | 汇总运行结果 | **R3**：`onStep` 透传给 `runScript`；**R6**：`fromStepId` 透传 |
+| CDP 适配层 | `src/cdp/adapter.ts` | 真机控制 | **R3**：`playback(script, onStep?)` 进程内可选进度回调（跨 WS 不传，函数不可序列化）；**R5**：实现 `Pickable`（`startPick(onPick)`/`cancelPick`，注入 `PICK_INJECT` + 轮询 `PICK_DRAIN`，`disconnect` 兜底 `cancelPick`）；**R6**：`playback(script, onStep, fromStepId?)` |
 | 脚本 IO | `src/script/io.ts` | schema 校验 + 往返 | 增 v2 常量、children 递归校验；**R4**：递归校验 `control.kind ∈ CONTROL_KINDS`（本地导入路径的边界门槛，与桥边界 `assertRunnableScript` 对等，防未知 kind 静默错渲 / 被执行器跳过） |
-| 录制内核 | `src/recorder/recorder.ts` + `inject.ts` | 产出扁平叶子 | 不改（仍产叶子）；增量推送在桥/UI 层 |
-| UI 壳 | `src/ui/shell.ts` | 编排 + 增量渲染 + 选中态真相源 | 增量 append + CFG 视图挂载；**R3**：`runAll()` + 运行态 `Map`（不入 Step 模型）+ 高亮跟随 + generation token 作废迟到定位；**R4**：新增 `selectedStepId`/`selectStep`/`getSelectedStepId` 选中态唯一真相源，内部事件委托双向联动列表项与 CFG 节点，进度回调经 `CfgView.setStatus` 同步图节点状态（同一 `stepStatus` Map） |
-| CFG 视图 | `src/ui/cfg-view.ts`（已实现，M3-R4） | 图形化控制流 | 新增组件（SRP）：`buildCfgGraph` 纯函数（图模型，与 DOM 解耦）+ `CfgView` DOM 渲染（只画图与上报点击，DIP 不 import 执行器/内核）；`setStatus` 原地更新避免高频重渲染；坏数据（`children` 含 null）跳过不抛错 |
+| 录制内核 | `src/recorder/recorder.ts` + `inject.ts` | 产出扁平叶子 | 不改（仍产叶子）；增量推送在桥/UI 层；**R5**：`inject.ts` 抽 `ATG_LOCATOR_HELPERS` 共享片段（录制/点选同源 cssPath + 可交互祖先解析），修 ASI 串接 bug |
+| UI 壳 | `src/ui/shell.ts` | 编排 + 增量渲染 + 选中态真相源 | 增量 append + CFG 视图挂载；**R3**：`runAll()` + 运行态 `Map`（不入 Step 模型）+ 高亮跟随 + generation token 作废迟到定位；**R4**：新增 `selectedStepId`/`selectStep`/`getSelectedStepId` 选中态唯一真相源，内部事件委托双向联动列表项与 CFG 节点，进度回调经 `CfgView.setStatus` 同步图节点状态（同一 `stepStatus` Map）；**R5**：点选子模式（`pickMode`/`pickTarget`/`applyPick`，详情区「在软件中点选」按钮，未连接/旧内核禁用）；**R6**：`runAll(fromStepId?)` + 详情区「从此处运行」按钮 + 失败步 `scrollStepIntoView` |
+| CFG 视图 | `src/ui/cfg-view.ts`（已实现，M3-R4） | 图形化控制流 | 新增组件（SRP）：`buildCfgGraph` 纯函数（图模型，与 DOM 解耦）+ `CfgView` DOM 渲染（只画图与上报点击，DIP 不 import 执行器/内核）；`setStatus` 原地更新避免高频重渲染；坏数据（`children` 含 null）跳过不抛错；**R6**：折叠/缩放平移/运行跟随滚入 + `stepIndex` O(1) 索引替 `findByStepId` 全树遍历 |
 | 展示文案 | `src/ui/step-label.ts`（已实现，M3-R4） | Step→人话文案 | 新增（SRP）：`TYPE_LABEL`/`describeLocator`/`describeStepBrief` 单一真相源，步骤列表与 CFG 视图共用，避免两处各存一份而显示不一致 |
 | 版本库（数据） | `src/script/version-store.ts`（已实现，M3-R5） | 提交树 + 不可变版本操作 | 新增（纯数据，无 UI/内核依赖）：`createStore/commit/branch/switchTo/cherryPick/tag/getHistory/getBranches/getTags/getCurrentScript/diffScripts` + `isVersionNode` 判定；写操作均返回新 store（不可变），脏数据抛 `VersionStoreError`；`diffScripts` 递归展平比对 |
 | 版本面板 | `src/ui/version-panel.ts`（已实现，M3-R5） | Git 式版本操作 UI | 新增组件（SRP）：仅消费 `VersionStore` + 回调上报，mount 级委托 + `closest`，不 import 内核/执行器（DIP）；`UiShell` 持有 store 并编排 |
-| WS 桥 | `src/ui/bridge-server.ts` + `ws-kernel.ts` | RPC + 推送 | 加 event/push 消息类型 + `sanitizeArgs` 兜底；**R3**：`playback` 专用分支 + `pushEvent('step-progress')` + `assertRunnableScript` 递归深度校验 + adapter 可注入（DIP，使 WS 线路可测） |
+| WS 桥 | `src/ui/bridge-server.ts` + `ws-kernel.ts` | RPC + 推送 | 加 event/push 消息类型 + `sanitizeArgs` 兜底；**R3**：`playback` 专用分支 + `pushEvent('step-progress')` + `assertRunnableScript` 递归深度校验 + adapter 可注入（DIP，使 WS 线路可测）；**R5**：`startPick`/`cancelPick` RPC + `pick` 事件回推；**R6**：`playback` 取 `args[1]` 作 `fromStepId`（null→undefined 兜底） |
 | 页面 | `src/ui/index.html` | 四区→加 cfg/version 区 | CSS 扩展；**R3**：步骤运行态 class + 失败提示 + 待定位高亮样式 |
 
 **依赖方向**（DIP 不变）：`cfg-view` / `version-panel` / `shell` 仅依赖 `UiKernel` 抽象与 `Script`/`Step` 类型，不 import 执行器/playwright。
@@ -263,6 +267,11 @@ executor.runScript(adapter, script, onStep)   ← 进度在 Node 进程内产生
 - **动态 webview 自动覆盖**：录制中途应用若动态新增 webview，浏览器广播 `Target.targetCreated` → 适配器重新枚举（`refreshTargets`）并将录制监听器注入新 target，新 target 的交互同样被录到（事件按 `target` 标注来源）。`startRecording` 先排空上一轮残留缓冲，避免跨会话串扰；`injectedTargets` 守卫保证不重复注入。
 - 层级约束：部分 Electron 构建的浏览器级 target 不支持 `Target.createTarget`（"Not supported"），即测试/外部进程无法凭空铸造新 target；动态新增只能由应用自身运行时触发，走同一套 refresh+inject 路径。
 - 该能力已由 `test/integration-dynamic-webview.test.ts`（LIVE 门控，真机验证监听激活 + 注入覆盖全部已枚举 target）覆盖。
+
+**嵌入式点选实现要点（M3-R5，适配器层，spec §2.3）**
+- `PlaywrightCdpAdapter` 实现 `Pickable`：`startPick(onPick)` 向当前 target 注入一次性 click 监听（`PICK_INJECT`），命中后把完整 locator（role/name/testId/css 祖先链，与录制 §2.2.1 同源）写入 `window.__pickResult`，适配器轮询 `PICK_DRAIN` 取回，经 `onPick` 回调上抛；`cancelPick` 注入 `PICK_STOP` 解绑。一次性会话：命中即停，与录制会话互斥（UI 侧保证不并发）。
+- 跨 WS 边界：命中 locator 经 JSON 后 null 字段不丢，`sanitizePickLocator` 把 null 还原 undefined，避免下游 `loc.name ?? ''` 兜底失效（§4.1）。
+- ISP：`Pickable` 为可选能力，旧内核不实现时 UI 侧「在软件中点选」按钮禁用（`kernel.startPick` 缺省即禁用），不崩溃。waitUntil/assert 的 `assertion.locator` 与选择组(if)的 `control.condition.locator` 三处共用一套点选子模式。
 
 ### G. 覆盖性与可靠性（回应两大顾虑）
 
