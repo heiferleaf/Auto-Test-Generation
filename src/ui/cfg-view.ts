@@ -186,10 +186,23 @@ export class CfgView {
   /** 已绑定委托的挂载元素（避免 rebindMount 后重复绑定造成一次点击多次上报）。 */
   private delegatedMounts = new WeakSet<HTMLElement>();
 
+  // ---- B4 规模可读性（spec §2.6.1）：视图态，不入 schema ----
+  /** 折叠态：哪些组节点被折叠（仅视图层，D6；脚本数据不变）。 */
+  private collapsed = new Set<string>();
+  /** 缩放与平移：Ctrl+滚轮缩放、空白拖拽平移，避免大脚本看不下。 */
+  private scale = 1;
+  private panX = 0;
+  private panY = 0;
+  /** 最近一次渲染的脚本：折叠/缩放后整树重渲染需要。 */
+  private lastScript: Script | undefined;
+  /** stepId → Step 的 O(1) 索引：nodeLabel 取叶子文案不再每节点全树遍历（O(n²)→O(n)）。 */
+  private stepIndex = new Map<string, Step>();
+
   constructor(opts: CfgViewOptions) {
     this.mount = opts.mount;
     this.onSelect = opts.onSelect;
     this.bindDelegation(this.mount);
+    this.bindZoomPan(this.mount);
   }
 
   /**
@@ -201,11 +214,68 @@ export class CfgView {
     if (this.delegatedMounts.has(mount)) return; // 幂等：同一 mount 只绑一次
     this.delegatedMounts.add(mount);
     mount.addEventListener('click', (e) => {
+      // 折叠按钮优先：点折叠不触发选中（否则折叠的同时会选中该组，行为相互干扰）。
+      const collapseHit = (e.target as HTMLElement | null)?.closest('[data-cfg-collapse]');
+      if (collapseHit && mount.contains(collapseHit)) {
+        const id = collapseHit.getAttribute('data-cfg-collapse');
+        if (id) this.toggleCollapse(id);
+        return;
+      }
       const hit = (e.target as HTMLElement | null)?.closest('[data-cfg-node]');
       if (!hit || !mount.contains(hit)) return;
       const id = hit.getAttribute('data-cfg-node');
       if (id) this.emitSelect(id);
     });
+  }
+
+  /** 折叠/展开组节点（视图态；切换后整树重渲染，选中态由 update 内部保留）。 */
+  private toggleCollapse(id: string): void {
+    if (this.collapsed.has(id)) this.collapsed.delete(id);
+    else this.collapsed.add(id);
+    if (this.lastScript) this.update(this.lastScript);
+  }
+
+  /**
+   * 缩放（Ctrl+滚轮）与平移（空白拖拽）：spec §2.6.1 规模可读性。
+   * 无 Ctrl 的滚轮交给浏览器原生滚动，避免劫持正常翻页。
+   */
+  private bindZoomPan(mount: HTMLElement): void {
+    mount.addEventListener('wheel', (e) => {
+      if (!e.ctrlKey) return; // 无 Ctrl 不劫持：让页面正常滚动
+      e.preventDefault();
+      // deltaY 向上为负 → 放大；步长按 0.1，钳在 0.25–2.5 防止缩到看不见或过大溢出。
+      const next = this.scale - Math.sign(e.deltaY) * 0.1;
+      this.scale = Math.min(2.5, Math.max(0.25, Math.round(next * 100) / 100));
+      this.applyTransform();
+    }, { passive: false });
+    // 空白拖拽平移：mousedown 落点不在任何节点上时启动。
+    let dragging = false;
+    let startX = 0, startY = 0, baseX = 0, baseY = 0;
+    mount.addEventListener('mousedown', (e) => {
+      const onNode = (e.target as HTMLElement | null)?.closest('[data-cfg-node],[data-cfg-collapse]');
+      if (onNode) return; // 点在节点上：让节点交互（选中/折叠）生效，不启动平移
+      dragging = true;
+      startX = e.clientX; startY = e.clientY; baseX = this.panX; baseY = this.panY;
+    });
+    mount.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      this.panX = baseX + (e.clientX - startX);
+      this.panY = baseY + (e.clientY - startY);
+      this.applyTransform();
+    });
+    const end = () => { dragging = false; };
+    mount.addEventListener('mouseup', end);
+    mount.addEventListener('mouseleave', end);
+  }
+
+  /** 把 scale/pan 写到当前 cfg 树的 transform 与 data 属性（供测试与样式断言）。 */
+  private applyTransform(): void {
+    const tree = this.mount.querySelector('.ui-shell-cfg-tree') as HTMLElement | null;
+    if (!tree) return;
+    tree.style.transform = `translate(${this.panX}px, ${this.panY}px) scale(${this.scale})`;
+    tree.setAttribute('data-cfg-scale', String(this.scale));
+    tree.setAttribute('data-cfg-pan-x', String(this.panX));
+    tree.setAttribute('data-cfg-pan-y', String(this.panY));
   }
 
   /**
@@ -228,6 +298,9 @@ export class CfgView {
     const keep = this.selectedId;
     this.nodeEls.clear();
     this.selectedId = undefined;
+    this.lastScript = script;
+    // O(1) 索引：一次展平建表，nodeLabel 取叶子文案不再每节点全树遍历（O(n²)→O(n)）。
+    this.stepIndex = buildStepIndex(script);
     // 同时清空态提示与旧树容器，否则空→非空时会残留"（无步骤，流程图为空）"。
     this.mount
       .querySelectorAll('[data-cfg-node], [data-cfg-empty], .ui-shell-cfg-tree')
@@ -247,9 +320,11 @@ export class CfgView {
     const root = document.createElement('div');
     root.className = 'ui-shell-cfg-tree';
     for (const n of graph.nodes) {
-      root.appendChild(this.renderNode(n, script));
+      root.appendChild(this.renderNode(n));
     }
     this.mount.appendChild(root);
+    // 重建后恢复缩放/平移（视图态跨 update 保留）。
+    this.applyTransform();
 
     // 恢复重建前的选中项（该步仍存在时）。setSelected 内部按 nodeEls 命中，
     // 步骤已被删除则自然无操作。
@@ -257,7 +332,7 @@ export class CfgView {
   }
 
   /** 递归渲染单个节点（组节点嵌套包含其子节点）。 */
-  private renderNode(node: CfgNode, script: Script): HTMLElement {
+  private renderNode(node: CfgNode): HTMLElement {
     const el = document.createElement('div');
     el.className = `ui-shell-cfg-node is-${'pending'}`;
     el.setAttribute('data-cfg-node', node.id);
@@ -267,12 +342,24 @@ export class CfgView {
       const known = (CONTROL_KINDS as readonly string[]).includes(node.kind);
       el.setAttribute('data-cfg-kind', known ? node.kind : 'unknown');
       if (!known) el.classList.add('is-unknown');
+      // 折叠态属性（视图层）：供测试与样式断言。
+      const isCollapsed = this.collapsed.has(node.id);
+      el.setAttribute('data-cfg-collapsed', String(isCollapsed));
     }
 
     const label = document.createElement('span');
     label.className = 'ui-shell-cfg-label';
-    label.textContent = this.nodeLabel(node, script);
+    label.textContent = this.nodeLabel(node);
     el.appendChild(label);
+
+    // 组节点折叠按钮（spec §2.6.1）：点击切换折叠态；叶子无此按钮。
+    if (!node.isLeaf) {
+      const tog = document.createElement('span');
+      tog.className = 'ui-shell-cfg-collapse';
+      tog.setAttribute('data-cfg-collapse', node.id);
+      tog.textContent = this.collapsed.has(node.id) ? '▶' : '▼';
+      el.appendChild(tog);
+    }
 
     // 点击不在此处逐节点绑定：改由 mount 级单一事件委托（见 bindDelegation），
     // 用 `closest('[data-cfg-node]')` 就近命中。原因：真实用户点的是节点**内部的文字**，
@@ -280,6 +367,12 @@ export class CfgView {
     // 会导致点文字无反应（而 `el.click()` 的合成事件恰好 target===el，把该缺陷掩盖了）。
 
     if (node.isLeaf) {
+      this.nodeEls.set(node.id, el);
+      return el;
+    }
+
+    // 折叠态：不渲染子节点（label 已含子节点计数），节省大脚本渲染量。
+    if (this.collapsed.has(node.id)) {
       this.nodeEls.set(node.id, el);
       return el;
     }
@@ -294,8 +387,8 @@ export class CfgView {
     switch (kind) {
       case 'if': {
         const [thenChild, elseChild] = node.children;
-        if (thenChild) el.appendChild(this.branchWrap('true', thenChild, script));
-        if (elseChild) el.appendChild(this.branchWrap('false', elseChild, script));
+        if (thenChild) el.appendChild(this.branchWrap('true', thenChild));
+        if (elseChild) el.appendChild(this.branchWrap('false', elseChild));
         break;
       }
       case 'while': {
@@ -304,16 +397,16 @@ export class CfgView {
         loop.setAttribute('data-cfg-loop', 'true');
         loop.textContent = '↻'; // 回环视觉标记
         el.appendChild(loop);
-        el.appendChild(this.childrenWrap('ui-shell-cfg-while-body', node.children, script));
+        el.appendChild(this.childrenWrap('ui-shell-cfg-while-body', node.children));
         break;
       }
       case 'sequence':
-        el.appendChild(this.childrenWrap('ui-shell-cfg-seq-body', node.children, script));
+        el.appendChild(this.childrenWrap('ui-shell-cfg-seq-body', node.children));
         break;
       default:
         // 运行时脏数据：仍把子节点画出来（不让它们凭空消失），但不声称任何控制语义。
         warnUnknownControlKind(kind);
-        el.appendChild(this.childrenWrap('ui-shell-cfg-seq-body', node.children, script));
+        el.appendChild(this.childrenWrap('ui-shell-cfg-seq-body', node.children));
     }
 
     this.nodeEls.set(node.id, el);
@@ -321,39 +414,46 @@ export class CfgView {
   }
 
   /** if 分支包裹层（真/假两枝的唯一构造处，避免两处重复）。 */
-  private branchWrap(branch: 'true' | 'false', child: CfgNode, script: Script): HTMLElement {
+  private branchWrap(branch: 'true' | 'false', child: CfgNode): HTMLElement {
     const b = document.createElement('div');
     b.className = `ui-shell-cfg-branch ui-shell-cfg-branch-${branch}`;
     b.setAttribute('data-cfg-branch', branch);
-    b.appendChild(this.renderNode(child, script));
+    b.appendChild(this.renderNode(child));
     return b;
   }
 
   /** 子节点容器（sequence/while 复用）。 */
-  private childrenWrap(className: string, children: CfgNode[], script: Script): HTMLElement {
+  private childrenWrap(className: string, children: CfgNode[]): HTMLElement {
     const body = document.createElement('div');
     body.className = className;
-    for (const c of children) body.appendChild(this.renderNode(c, script));
+    for (const c of children) body.appendChild(this.renderNode(c));
     return body;
   }
 
-  /** 节点展示文本（叶子用步骤描述，组标注结构类型与循环次数）。 */
-  private nodeLabel(node: CfgNode, script: Script): string {
+  /** 节点展示文本（叶子用步骤描述，组标注结构类型与循环次数；折叠组附子节点计数）。 */
+  private nodeLabel(node: CfgNode): string {
     if (node.isLeaf) {
-      const step = findByStepId(script, node.id);
+      // O(1) 命中：从 update 时建好的 stepIndex 取，不再每节点全树遍历。
+      const step = this.stepIndex.get(node.id);
       return step ? describeStepBrief(step) : node.id;
     }
     // 同上：穷尽性 switch，新增控制流类型时编译期报错而非静默标成"顺序 sequence"。
     const kind: ControlKind = node.kind;
+    let base: string;
     switch (kind) {
-      case 'while': return `循环 while ×${node.loopCount ?? 1}`;
-      case 'if': return '选择 if';
-      case 'sequence': return '顺序 sequence';
+      case 'while': base = `循环 while ×${node.loopCount ?? 1}`; break;
+      case 'if': base = '选择 if'; break;
+      case 'sequence': base = '顺序 sequence'; break;
       default:
         // 运行时脏数据：明确显示"未知"，绝不伪装成"顺序 sequence"（那会误导用户）。
         warnUnknownControlKind(kind);
-        return `未知控制结构（${String(kind)}）`;
+        base = `未知控制结构（${String(kind)}）`;
     }
+    // 折叠时附子节点计数，让用户不展开也能判断组规模。
+    if (this.collapsed.has(node.id)) {
+      base += `（${countLeaves(node)} 步）`;
+    }
+    return base;
   }
 
   private emitSelect(stepId: string): void {
@@ -363,6 +463,8 @@ export class CfgView {
   /**
    * 原地更新某节点的运行状态（不整树重建）。
    * 测试断言：调用前后同一 DOM 引用不变。
+   * 运行态自动滚入视口（spec §2.6.1）：running 时把当前节点 scrollIntoView，
+   * 让大脚本运行时用户视线自动跟随；pass/fail 不抢焦点（避免每步都跳）。
    */
   setStatus(stepId: string, status: StepRunStatus): void {
     const el = this.nodeEls.get(stepId);
@@ -371,6 +473,9 @@ export class CfgView {
     // className 同步运行态 class（保留 is-fail 等以供测试 .className 断言）。
     el.classList.remove('is-pending', 'is-running', 'is-pass', 'is-fail');
     el.classList.add(`is-${status}`);
+    if (status === 'running' && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ block: 'nearest' });
+    }
   }
 
   /** 设置选中态（同时只有一个）。 */
@@ -396,18 +501,27 @@ export class CfgView {
 
 // ───────────────────────── 复用 shell 的展示工具（避免重复实现）─────────────────────────
 
-function findByStepId(script: Script, id: string): Step | undefined {
-  const walk = (steps: Step[]): Step | undefined => {
+/** 一次展平建 stepId → Step 索引（O(n)），供 nodeLabel O(1) 取叶子文案。 */
+function buildStepIndex(script: Script): Map<string, Step> {
+  const idx = new Map<string, Step>();
+  const walk = (steps: Step[] | undefined): void => {
+    if (!steps) return;
     for (const s of steps) {
-      if (s.id === id) return s;
-      if (s.children?.length) {
-        const f = walk(s.children);
-        if (f) return f;
-      }
+      if (s == null) continue; // 坏数据兜底（§4.1）
+      idx.set(s.id, s);
+      if (s.children?.length) walk(s.children);
     }
-    return undefined;
   };
-  return walk(script.steps);
+  walk(script.steps);
+  return idx;
+}
+
+/** 折叠组附子节点计数：只数叶子（用户关心的"几步"），不计中间组。 */
+function countLeaves(node: CfgNode): number {
+  if (node.isLeaf) return 1;
+  let n = 0;
+  for (const c of node.children) n += countLeaves(c);
+  return n;
 }
 
 // describeStepBrief 已收敛到 ./step-label（与步骤列表共用同一份文案真相源）。
