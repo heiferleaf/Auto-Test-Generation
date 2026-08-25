@@ -1,5 +1,5 @@
-// 统一步骤模型（M1 design.md §4）
-// 录制 / Agent 轨迹 / 导入导出 / MCP Tool / 执行器 共用此结构。
+// 统一步骤模型：录制 / Agent 轨迹 / 导入导出 / MCP Tool / 执行器 共用此结构。
+// 运行时常量（STEP_TYPES / CONTROL_KINDS）为类型唯一真相源，类型由其反推。
 
 // 运行时常量为唯一真相源，类型由其反推（`typeof ARR[number]`）。
 // 理由：TS 联合类型在运行时不存在，跨进程边界校验（bridge-server）必须有运行时值可查。

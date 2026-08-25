@@ -1,5 +1,5 @@
-// 脚本导入/导出（M1 design.md §7）
-// 与 MCP Tool（script.import / script.export）语义一致。
+// 脚本导入/导出：解析 JSON 为 Script 并校验 schema/steps/control.kind，导出则序列化为 JSON 字符串。
+// 与 MCP Tool（script.import / script.export）语义一致；校验失败抛 ScriptError（边界硬失败）。
 
 import { SCRIPT_SCHEMAS, CONTROL_KINDS, type Script } from '../types/step';
 

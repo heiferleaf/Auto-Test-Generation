@@ -1,13 +1,13 @@
-// M3-R5 Git 式版本层 —— 提交树 + 不可变更新（纯数据，无 UI / 无内核依赖）。
+// Git 式版本层：提交树 + 不可变更新（纯数据，无 UI / 无内核依赖）。
 //
-// 设计契约（架构文档 §2.2）：
-//   - 版本节点 = 最外层顺序组（`Step` 且 `control.kind==='sequence'`，位于 `script.steps` 顶层）。
-//   - 一个 Script = 一条分支链；整个脚本库 = 一个仓库。
-//   - 7 项操作：commit / branch / switch / cherry-pick / history / tag / diff。
-//     砍 reset / merge / rebase。
-//   - `UiKernel` 不上提版本（DIP）：本模块只管"版本库状态"，UI 侧 `version-panel` 负责编排。
+// 本模块只管"版本库状态"，不碰 DOM 也不依赖执行器/内核；UI 侧 `version-panel`
+// 负责把状态画出来并把用户操作回调给这里（保 DIP：UiKernel 不上提版本）。
+// 版本节点 = 最外层顺序组（control.kind==='sequence' 且位于 script.steps 顶层）；
+// 一个 Script = 一条分支链，整个脚本库 = 一个仓库。7 项操作：commit/branch/
+// switch/cherry-pick/history/tag/diff（砍 reset/merge/rebase）。
+// 完整设计见 architecture.md §2.2。
 //
-// 不可变性（SRP + 防静默改写历史）：
+// 不可变性（防静默改写历史）：
 //   所有写操作返回**新** store，入参 `Script` 与原 store 均不被 mutate。
 //   版本层若可原地改写，cherry-pick 改参就会污染源分支历史 —— 故强制不可变。
 //
