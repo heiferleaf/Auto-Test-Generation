@@ -139,10 +139,10 @@ describe('连接流程', () => {
 });
 
 describe('录制流程', () => {
-  it('startRecording 调用内核 startRecording 并标记录制中', () => {
+  it('startRecording 调用内核 startRecording 并标记录制中', async () => {
     const k = makeMockKernel();
     const shell = new UiShell({ kernel: k as any, mount: document.createElement('div') });
-    shell.startRecording();
+    await shell.startRecording();
     expect(k.startRecording).toHaveBeenCalledTimes(1);
     expect(shell.isRecording()).toBe(true);
   });
@@ -154,7 +154,7 @@ describe('录制流程', () => {
     ];
     const k = makeMockKernel(evs);
     const shell = new UiShell({ kernel: k as any, mount: document.createElement('div') });
-    shell.startRecording();
+    await shell.startRecording();
     await shell.stopRecording();
     expect(k.stopRecording).toHaveBeenCalledTimes(1);
     expect(shell.isRecording()).toBe(false);

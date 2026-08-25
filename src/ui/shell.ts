@@ -153,6 +153,8 @@ export class UiShell {
   private enableVersionPanel: boolean;
   /** 顶部提示横幅文本（演示模式说明 / 未连接真机录制警告）。render 会据此重建，故不会被后续 render 冲掉。 */
   private bannerText?: string;
+  /** 横幅样式变体：true=琥珀色（显式演示），false=红色（降级/错误）。 */
+  private bannerDemo = false;
 
   constructor(opts: UiShellOptions) {
     this.kernel = opts.kernel;
@@ -213,7 +215,7 @@ export class UiShell {
         break;
       case 'toggle-record':
         if (this.isRecording()) void this.stopRecording();
-        else this.startRecording();
+        else void this.startRecording();
         this.render();
         break;
       case 'run-all':
@@ -284,26 +286,30 @@ export class UiShell {
     return JSON.stringify({ t: ev.type, l: ev.locator, p: ev.params, tg: ev.target });
   }
 
-  startRecording(): void {
+  async startRecording(): Promise<void> {
     // 录制依赖真机内核实时回传交互事件（click/fill 等仅由录制产生，见 spec §2.3.1）。
-    // 演示模式（未连接真机）下 DemoKernel.startRecording 无真实事件源，录制不会产出任何步骤。
-    // 若不提示，用户点「开始录制」后毫无反应、也录不到东西，会被误判为「功能失效」。
-    // 故未连接时给出明确横幅，指引用户用 ?live=1 连真机；录制态仍照常进入（按钮联动不受影响）。
-    if (!this.connected) {
-      this.setBanner('当前为演示模式（未连接真机），录制不会产生真实步骤。如需录制真实操作，请访问 ?live=1 连接靶机。');
+    // kernel.startRecording 可能 reject（如 WsKernel 尚未连接靶机），必须捕获：
+    // 否则未捕获异常会中断 UI 交互、且用户看不到任何失败原因。
+    try {
+      await this.kernel.startRecording();
+    } catch (e) {
+      // 降级：连接失败时不进入录制态，给出明确红条提示（而非静默失效）。
+      const msg = e instanceof Error ? e.message : String(e);
+      this.setBanner(`录制失败：尚未连接靶机（${msg}）。请先启动软件调试端口，刷新页面后再试。`);
+      return;
     }
     this.recorder.reset();
     this.recordedKeys.clear();
-    this.kernel.startRecording();
-    this.recording = true;
-    // 订阅服务端实时推送：每捕获一个交互即增量生成步骤（边操作边长步骤）。
     this.kernel.on?.('recording', (ev) => this.onRecordingEvent(ev as InteractionEvent));
+    this.recording = true;
     this.render();
   }
 
-  /** 设置顶部提示横幅（持久于实例，render 会据此重建，故不被后续 render 冲掉）。 */
-  setBanner(text: string): void {
+  /** 设置顶部提示横幅（持久于实例，render 会据此重建，故不被后续 render 冲掉）。
+   * @param demo 为 true 时用琥珀色变体（显式演示模式），否则默认红色（降级/错误）。 */
+  setBanner(text: string, demo = false): void {
     this.bannerText = text;
+    this.bannerDemo = demo;
     this.render();
   }
 
@@ -853,7 +859,7 @@ export class UiShell {
     // 否则 insertStep 等后续 render 会把它冲掉（此前 banner 在 render 外 prepend 即被此问题吞掉）。
     if (this.bannerText) {
       const bar = document.createElement('div');
-      bar.className = 'ui-shell-banner';
+      bar.className = 'ui-shell-banner' + (this.bannerDemo ? ' banner--demo' : '');
       bar.setAttribute('data-banner', 'true');
       bar.textContent = this.bannerText;
       root.appendChild(bar);

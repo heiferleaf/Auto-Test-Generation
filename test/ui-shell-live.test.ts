@@ -54,7 +54,7 @@ live('M3 UI 壳：录制真实操作并转为步骤', () => {
     })()`);
 
     // 2) 开始录制（内核注入交互监听）
-    shell.startRecording();
+    await shell.startRecording();
     expect(shell.isRecording()).toBe(true);
 
     // 3) 真实操作：填入文本并点击按钮
