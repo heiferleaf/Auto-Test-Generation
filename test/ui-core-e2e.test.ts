@@ -108,7 +108,7 @@ describe('UI 主链路 e2e（DOM 事件委托入口）', () => {
     const a = shell.getScript().steps.find((s: Step) => s.id === 'a');
   });
 
-  it('建组：多选 2 步 → 包成 if → CFG 视图出现 true/false 两枝', () => {
+  it('建组：多选 2 步 → 包成 if → 两步进 True 分支，False 为空（A2 正确形态）', () => {
     const { shell, mount } = bootShell(kernel, seed);
     // 多选 a、b
     click(mount.querySelector('[data-step-item][data-step-id="a"]'));
@@ -118,7 +118,11 @@ describe('UI 主链路 e2e（DOM 事件委托入口）', () => {
     expect(shell.getScript().steps).toHaveLength(1);
     const grp = shell.getScript().steps[0];
     expect(grp.control?.kind).toBe('if');
-    expect(grp.children?.map((c: Step) => c.id)).toEqual(['a', 'b']);
+    // children[0]=True（含 a、b 的顺序组），children[1]=False（空顺序组）
+    expect(grp.children).toHaveLength(2);
+    expect(grp.children?.[0].control?.kind).toBe('sequence');
+    expect(grp.children?.[0].children?.map((c: Step) => c.id)).toEqual(['a', 'b']);
+    expect(grp.children?.[1].children).toEqual([]);
     // CFG 视图应渲染出 true/false 两枝标识
     const cfg = mount.querySelector('[data-cfg]');
     expect(cfg?.querySelector('[data-cfg-branch="true"]')).toBeTruthy();

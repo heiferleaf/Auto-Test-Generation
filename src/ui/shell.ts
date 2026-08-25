@@ -240,6 +240,20 @@ export class UiShell {
       case 'wrap-while':
         this.wrapSelection('while');
         break;
+      case 'wrap-sequence':
+        this.wrapSelection('sequence');
+        break;
+      case 'unpack': {
+        const id = el.getAttribute('data-step-id') ?? '';
+        if (id) { this.script = ScriptEditor.unpack(this.script, id); this.render(); }
+        break;
+      }
+      case 'set-group-kind': {
+        const id = el.getAttribute('data-step-id') ?? '';
+        const kind = el.getAttribute('data-group-kind') as 'sequence' | 'if' | 'while' | null;
+        if (id && kind) { this.script = ScriptEditor.setGroupKind(this.script, id, kind); this.render(); }
+        break;
+      }
       case 'pick': {
         const stepId = el.getAttribute('data-pick-step-id') ?? '';
         const field = el.getAttribute('data-pick-field') as 'assertion-locator' | 'condition-locator';
@@ -462,6 +476,36 @@ export class UiShell {
       area.appendChild(pick);
     }
 
+    // 组节点详情（spec §2.5/§2.7）：组名、循环次数、设 kind、拆包。
+    if (step.control) {
+      area.appendChild(this.editField(step, 'control.name', '组名', step.control.name ?? ''));
+      if (step.control.kind === 'while') {
+        area.appendChild(this.editField(step, 'control.loopCount', '循环次数', String(step.control.loopCount ?? 1)));
+      }
+      // 设为其它 kind（选中组再设为选择/循环/顺序组）。
+      const allKinds: { kind: 'sequence' | 'if' | 'while'; label: string }[] = [
+        { kind: 'sequence', label: '设为顺序组' },
+        { kind: 'if', label: '设为选择组' },
+        { kind: 'while', label: '设为循环组' },
+      ];
+      const kinds = allKinds.filter((k) => k.kind !== step.control!.kind);
+      for (const k of kinds) {
+        const b = document.createElement('button');
+        b.className = 'ui-shell-group-kind-btn';
+        b.textContent = k.label;
+        b.setAttribute('data-action', 'set-group-kind');
+        b.setAttribute('data-step-id', step.id);
+        b.setAttribute('data-group-kind', k.kind);
+        area.appendChild(b);
+      }
+      // 拆包
+      const unpack = document.createElement('button');
+      unpack.textContent = '拆包';
+      unpack.setAttribute('data-action', 'unpack');
+      unpack.setAttribute('data-step-id', step.id);
+      area.appendChild(unpack);
+    }
+
     // 定位 name 字段（最常见的可编辑项，点击/填充/断言都带 locator.name）。
     if (step.locator) {
       area.appendChild(this.editField(step, 'locator.name', '定位名称(name)', step.locator.name ?? ''));
@@ -504,11 +548,13 @@ export class UiShell {
     area.querySelectorAll<HTMLInputElement>('[data-edit-field]').forEach((inp) => {
       const path = inp.getAttribute('data-edit-field')!;
       const v = inp.value;
-      // 多个 locator/params 字段须累加到同一 patch 对象，不能各自覆盖（否则后者丢失前者）。
+      // 多个 locator/params/control 字段须累加到同一 patch 对象，不能各自覆盖（否则后者丢失前者）。
       if (path === 'locator.name') patch.locator = { ...(patch.locator ?? step.locator), name: v };
       else if (path === 'locator.role') patch.locator = { ...(patch.locator ?? step.locator), role: v };
       else if (path === 'params.value') patch.params = { ...(patch.params ?? step.params), value: v };
       else if (path === 'params.durationMs') patch.params = { ...(patch.params ?? step.params), durationMs: Number(v) || 0 };
+      else if (path === 'control.name') patch.control = { ...(patch.control ?? step.control!), name: v };
+      else if (path === 'control.loopCount') patch.control = { ...(patch.control ?? step.control!), loopCount: Number(v) || 1 };
     });
     this.script = ScriptEditor.updateNested(this.script, stepId, patch);
     area.remove();
@@ -562,8 +608,8 @@ export class UiShell {
     this.insertStep(step);
   }
 
-  /** 把当前多选的步骤整体包成控制流组（spec §2.3.0）。空选集不操作（边界安全）。 */
-  private wrapSelection(kind: 'if' | 'while'): void {
+  /** 把当前多选的步骤整体包成控制流组（spec §2.5）。空选集不操作（边界安全）。 */
+  private wrapSelection(kind: 'sequence' | 'if' | 'while'): void {
     const ids = [...this.selectedIds];
     if (ids.length === 0) return;
     this.script = ScriptEditor.wrap(this.script, ids, kind);
@@ -1040,6 +1086,7 @@ export class UiShell {
     };
     addBtn('插入步骤', 'insert', 'primary');
     addBtn('开始录制', 'toggle-record');
+    addBtn('仅打包', 'wrap-sequence');
     addBtn('包成选择组', 'wrap-if');
     addBtn('包成循环组', 'wrap-while');
     addBtn('运行全部', 'run-all');

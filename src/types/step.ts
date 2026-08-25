@@ -75,6 +75,8 @@ export type Step = {
   /** 控制结构：顺序/选择/循环。叶子步骤省略此字段。 */
   control?: {
     kind: ControlKind;
+    /** 组名（spec §2.5/D5）：UI 把每个节点当组操作，组名供人识别与 CFG 节点展示，非内部实现 id。 */
+    name?: string;
     /** if 分支的判断条件（复用 Assertion）。 */
     condition?: Assertion;
     /** while 循环的重复次数。 */
