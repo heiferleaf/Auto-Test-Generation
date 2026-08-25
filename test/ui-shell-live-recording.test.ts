@@ -65,10 +65,10 @@ function makeR2Kernel(recordedEvents: any[] = []) {
 }
 
 describe('R2 嵌入实时录制', () => {
-  it('startRecording 后，每收到一个 recording 事件即实时增加脚本步骤', () => {
+  it('startRecording 后，每收到一个 recording 事件即实时增加脚本步骤', async () => {
     const k = makeR2Kernel();
     const shell = new UiShell({ kernel: k as any, mount: document.createElement('div') });
-    shell.startRecording();
+    await shell.startRecording();
     expect(k.startRecording).toHaveBeenCalledTimes(1);
     expect(k.on).toHaveBeenCalledWith('recording', expect.any(Function));
 
@@ -83,11 +83,11 @@ describe('R2 嵌入实时录制', () => {
     expect(steps[1].params?.value).toBe('tom');
   });
 
-  it('实时事件会增量追加到 DOM 步骤列表（非全量重渲染也能见）', () => {
+  it('实时事件会增量追加到 DOM 步骤列表（非全量重渲染也能见）', async () => {
     const k = makeR2Kernel();
     const mount = document.createElement('div');
     const shell = new UiShell({ kernel: k as any, mount });
-    shell.startRecording();
+    await shell.startRecording();
     k.emit('recording', { type: 'click', locator: { name: 'A' } });
     const items = mount.querySelectorAll('[data-step-item]');
     expect(items.length).toBe(1);
@@ -97,7 +97,7 @@ describe('R2 嵌入实时录制', () => {
   it('停止录制时，stopRecording 拉回的事件对实时已插入的做去重', async () => {
     const k = makeR2Kernel([{ type: 'click', locator: { name: 'B' } }]);
     const shell = new UiShell({ kernel: k as any, mount: document.createElement('div') });
-    shell.startRecording();
+    await shell.startRecording();
     k.emit('recording', { type: 'click', locator: { name: 'B' } }); // 实时已插入
     await shell.stopRecording();
     // 实时 1 条 + stop 拉回 1 条但去重 → 仍 1 条

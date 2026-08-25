@@ -5,13 +5,26 @@
 // 而测试从未执行过 app.ts —— 这正是「测试全绿、浏览器点不动」的盲区来源。
 //
 // 本文件在 import app.ts 之前先就位 #app 挂载点（贴近真实浏览器：
-// script type=module 执行时 DOM 已就绪），真正执行 boot()，再验证：
-//   1) 操作栏/开始录制按钮确实被渲染（boot 没静默失败）；
-//   2) 点击「开始录制」触发录制态（header 显示「录制中」）；
-//   3) 再次点击停止录制，态复位。
+// script type=module 执行时 DOM 已就绪），真正执行 boot()，覆盖两条用户真实路径：
+//   A) 默认模式（连真机）：无靶机时降级横幅 + 点击录制不进入态（正确降级，非崩溃）；
+//   B) ?demo=1 显式演示：DemoKernel，点击录制进入态、再点复位。
 // 禁止再用内部 API 直调冒充用户路径。
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+// jsdom 的 WebSocket 会真去连 localhost:5173/kernel-ws 并失败（行为不确定/慢）。
+// 这里 mock 成一个「构造即 onerror」的实现，让默认模式的「连不上靶机」降级路径确定可测。
+class MockWebSocket {
+  onopen: (() => void) | null = null;
+  onerror: ((e: unknown) => void) | null = null;
+  onmessage: ((e: unknown) => void) | null = null;
+  constructor(_url: string) {
+    // 下一个 tick 触发 onerror，模拟「靶机未启动、WS 连接失败」
+    setTimeout(() => this.onerror?.(new Error('mock ws connect failed')), 0);
+  }
+  send() {}
+  close() {}
+}
 
 describe('app.ts boot() 真实入口（用户实际打开的页面）', () => {
   beforeEach(() => {
@@ -22,14 +35,14 @@ describe('app.ts boot() 真实入口（用户实际打开的页面）', () => {
     // vi.resetModules：ESM import 有缓存，不 reset 则仅首个 case 真正执行 boot()。
     document.body.innerHTML = '';
     vi.resetModules();
+    (globalThis as any).WebSocket = MockWebSocket;
     const mount = document.createElement('div');
     mount.id = 'app';
     document.body.appendChild(mount);
   });
 
-  it('boot() 渲染出操作栏与「开始录制」按钮（入口未静默失败）', async () => {
+  it('默认模式：boot 渲染操作栏+开始录制按钮，无靶机时降级横幅（不崩溃）', async () => {
     await import('../src/ui/app');
-    // 给模块顶层 boot() 一个微任务窗口
     await new Promise((r) => setTimeout(r, 50));
 
     const actions = document.querySelector('[data-actions]');
@@ -37,37 +50,49 @@ describe('app.ts boot() 真实入口（用户实际打开的页面）', () => {
     const recBtn = document.querySelector('[data-action="toggle-record"]');
     expect(recBtn).toBeTruthy();
     expect(recBtn!.textContent).toContain('开始录制');
+
+    // 无靶机（mock WS 连不上）→ 应出现「未连接靶机」降级横幅，而非静默或崩溃。
+    const banner = document.querySelector('[data-banner]');
+    expect(banner).toBeTruthy();
+    expect(banner?.textContent).toContain('未连接靶机');
   });
 
-  it('点击「开始录制」→ 录入态生效（header 显示「录制中」），再次点击复位', async () => {
+  it('默认模式：点开始录制因未连真机而不进入录制态（降级提示，非失败崩溃）', async () => {
     await import('../src/ui/app');
     await new Promise((r) => setTimeout(r, 50));
 
-    // 关键：每次点击前都重新 query 按钮。render() 会 innerHTML='' 重建 DOM，
-    // 旧引用已脱离文档树，在其上派发事件不会冒泡到 mount 委托（这是测试陷阱，非产品 bug）。
     const recBtn = () => document.querySelector('[data-action="toggle-record"]') as HTMLElement;
     const dot = () => document.querySelector('.rec-dot');
 
     expect(dot()?.classList.contains('on')).toBe(false);
+    recBtn().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 50));
 
+    // 未连真机：startRecording 应被 try/catch 拦下，不进入录制态；banner 变「录制失败」提示。
+    expect(dot()?.classList.contains('on')).toBe(false);
+    expect(document.querySelector('[data-banner]')?.textContent).toContain('录制失败');
+  });
+
+  it('?demo=1：演示内核，点击开始录制进入态、再次点击复位', async () => {
+    // 模拟 ?demo=1：在 import 前改写 location.search
+    (globalThis as any).location = { ...(globalThis as any).location, search: '?demo=1' };
+    await import('../src/ui/app');
+    await new Promise((r) => setTimeout(r, 50));
+
+    const banner = document.querySelector('[data-banner]');
+    expect(banner?.textContent).toContain('演示模式');
+
+    const recBtn = () => document.querySelector('[data-action="toggle-record"]') as HTMLElement;
+    const dot = () => document.querySelector('.rec-dot');
+
+    expect(dot()?.classList.contains('on')).toBe(false);
     recBtn().dispatchEvent(new MouseEvent('click', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 30));
     expect(dot()?.classList.contains('on')).toBe(true);
     expect(document.querySelector('.ui-shell-header')?.textContent).toContain('录制中');
-    // 演示模式未连接真机时，应给出「录制不会产生真实步骤」的明确提示（而非静默失效）。
-    expect(document.querySelector('[data-banner]')?.textContent).toContain('演示模式');
 
-    // 再次点击 → 停止录制，态复位（用当前文档中的真实按钮引用）
     recBtn().dispatchEvent(new MouseEvent('click', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 200));
     expect(dot()?.classList.contains('on')).toBe(false);
-  });
-
-  it('演示模式（默认无 ?live）启动即展示模式说明横幅', async () => {
-    await import('../src/ui/app');
-    await new Promise((r) => setTimeout(r, 50));
-    const banner = document.querySelector('[data-banner]');
-    expect(banner).toBeTruthy();
-    expect(banner?.textContent).toContain('演示模式');
   });
 });

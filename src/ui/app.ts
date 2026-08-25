@@ -77,39 +77,49 @@ function log(...args: unknown[]) {
 
 function boot() {
   const mount = document.getElementById('app')!;
-  const live = new URLSearchParams(location.search).get('live') === '1';
+  // 产品需求：面板默认就驱动真实软件（经 WebSocket 桥 → PlaywrightCdpAdapter）。
+  // ?demo=1 为显式逃生通道（无靶机时纯演示），但默认不再是 demo。
+  const demo = new URLSearchParams(location.search).get('demo') === '1';
+  // 端口来源：URL 参数 ?cdp=9233 优先，回退默认 9222。浏览器环境无 process，不能直接读 env。
+  const cdpParam = new URLSearchParams(location.search).get('cdp');
+  const cdpPort = cdpParam ? Number(cdpParam) : 9222;
 
-  // 真机模式：WsKernel 经 WebSocket 桥接 Node 侧 PlaywrightCdpAdapter；
-  // 演示模式：DemoKernel（浏览器可运行，无需真机）。
+  // 真机内核：WsKernel 经 WebSocket 桥接 Node 侧 PlaywrightCdpAdapter；
+  // 显式 demo 模式：DemoKernel（浏览器可运行，无需真机，操作为模拟）。
   // 二者都满足 UiKernel 接口，UiShell 不感知差异（DIP）。
-  const kernel: UiKernel = live
-    ? new WsKernel(`ws://${location.host}/kernel-ws`)
-    : new DemoKernel();
+  const kernel: UiKernel = demo
+    ? new DemoKernel()
+    : new WsKernel(`ws://${location.host}/kernel-ws`);
 
   const shell = new UiShell({ kernel, mount });
 
-  // 真机模式：自动连接靶机并启动截图流（让中间区看到软件画面）
-  if (live) {
-    shell.connect({ port: 9222 })
+  // 刷新顶部录制指示灯（录制态变化后）。
+  const refreshHeader = () => {
+    const dot = mount.querySelector('.ui-shell-header .rec-dot') as HTMLElement | null;
+    if (dot) dot.classList.toggle('on', shell.isRecording());
+  };
+  mount.addEventListener('click', (e) => {
+    const el = (e.target as HTMLElement).closest('[data-action="toggle-record"]');
+    if (el) refreshHeader();
+  });
+
+  // 显式 demo：提示为模拟，不连真机。
+  if (demo) {
+    shell.setBanner('演示模式（显式 ?demo=1）：内置示例内核，操作为模拟，不驱动真实软件。');
+  } else {
+    // 默认连真机：连接成功 → 开截图流（中间区看到软件画面）；
+    // 失败 → 降级：顶部红条提示，但面板仍可手动插入/编辑步骤（操作不下发）。
+    shell.connect({ port: cdpPort })
       .then(() => { shell.startFrameStream(1000); refreshHeader(); })
       .catch((e) => {
-        // 不用 alert（jsdom/无头环境无实现，且不符合 spec 交互）；以控制台 + 顶部错误条提示。
-        console.error('[UiShell] 连接失败:', e instanceof Error ? e.message : e);
-        const errBar = document.createElement('div');
-        errBar.className = 'ui-shell-conn-error';
-        errBar.textContent = `连接失败: ${e instanceof Error ? e.message : String(e)}`;
-        mount.prepend(errBar);
+        // 不用 alert（jsdom/无头环境无实现，且不符合 spec 交互）；以横幅提示替代。
+        console.error('[UiShell] 连接靶机失败:', e instanceof Error ? e.message : e);
+        shell.setBanner(`未连接靶机：请先启动软件调试端口 ${cdpPort}（如 scripts/launch-codebuddy.cmd）。当前面板仅可手动插入/编辑步骤，操作不会下发到真实软件。`);
       });
   }
 
-  // 先渲染骨架
+  // 先渲染骨架（含可能的降级横幅）
   shell.render();
-
-  // 演示模式（默认，无 ?live）下无真机事件源：一进来就告知用户，
-  // 避免「点了录制却什么都没发生」被误判为功能失效（真实路径可用性反馈）。
-  if (!live) {
-    shell.setBanner('演示模式：内置示例内核，操作为模拟。要录制真实软件操作，请访问 http://localhost:5173/?live=1 连接靶机。');
-  }
 
   // 初始示例脚本（演示「录制产出的步骤形态」：click/fill 仅由录制产生，此处用种子数据替代真实录制回放）。
   shell.insertStep({ id: 'seed-1', type: 'click', source: 'recorded', locator: { role: 'button', name: '打开设置' } });
@@ -118,17 +128,7 @@ function boot() {
   // 用户交互（插入 4 类、编辑区、建组、运行、导出、录制……）全部由 UiShell 内部事件委托处理，
   // app.ts 不再用 prompt/alert 实现交互（避免 jsdom 不可测、且不符合 spec §2.6 真实编辑区）。
   // app.ts 仅负责：内核装配（DemoKernel / WsKernel）、真机连接与截图流、录制指示灯刷新。
-
-  // 录制指示灯跟随（内核录制态变化后刷新顶部指示）。
-  const refreshHeader = () => {
-    const dot = mount.querySelector('.ui-shell-header .rec-dot') as HTMLElement | null;
-    if (dot) dot.classList.toggle('on', shell.isRecording());
-  };
-  // 录制按钮在 shell 内部委托处理 start/stop，这里仅订阅录制态以刷新指示。
-  mount.addEventListener('click', (e) => {
-    const el = (e.target as HTMLElement).closest('[data-action="toggle-record"]');
-    if (el) refreshHeader();
-  });
+  // 录制指示灯刷新（refreshHeader）与 click 订阅已在上方 boot 开头定义。
 }
 
 if (document.readyState === 'loading') {
