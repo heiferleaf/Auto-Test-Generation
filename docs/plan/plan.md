@@ -213,7 +213,7 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 | M3-R2 嵌入实时录制 | ✅ 已合并 | `feat/ws-push-channel` | `a654faa` | `test/ui-shell-live-recording.test.ts` 4 通过 |
 | M3-R3 运行全部 + 步骤态 + 高亮跟随 | ✅ 已合并 | `feat/run-all` | 见合并记录 | `ui-shell-run-all` 22 + `executor-progress` 11 + `bridge-ws-progress` 7（真 WS）+ `bridge-push` 25 通过 |
 | M3-R4 CFG 图形化视图 | ✅ 已合并 | `feat/cfg-view` | `883fe1e` | `test/cfg-view.test.ts` 47 通过（含特殊字符 id / 点击内部子元素 / OCP 穷尽性 / 导入期 kind 校验 / 未知 kind 不白屏） |
-| M3-R5 Git 式版本层 | 🔍 审查中（待合并） | `feat/git-version` | — | `version-store` 23 + `version-panel` 8 + `version-shell` 4 通过（共 35 例） |
+| M3-R5 Git 式版本层 | ✅ 已合并 | `feat/git-version` | `11dcb6d` | `version-store` 23 + `version-panel` 8 + `version-shell` 4 通过（共 35 例） |
 
 > **测试代码权威性纪律（新增，因本轮违规而补）**：既有测试文件（含其 mock 基建，如 `test/ui-shell.test.ts` 的 `makeMockKernel`）**不得为迁就新实现而修改**。新能力需要新的 mock 行为时，新建独立测试文件并自带 mock，不动既有基建。
 
@@ -285,7 +285,7 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 - **校验**：`npm test` 211 通过 / 17 跳过；`npm run typecheck` 干净；三校验角色结论见合并记录 `883fe1e`。
 - **未做**：真机端到端冒烟（需 9222 靶机）。
 
-### 阶段 M3-R5：Git 式版本层（§2.2/§6）— 🔍 审查中（待合并）
+### 阶段 M3-R5：Git 式版本层（§2.2/§6）— ✅ 已合并（11dcb6d）
 - **worktree**：`feat/git-version`
 - **测试先行**（**先写** `test/git-version.test.ts` + `test/version-panel.test.ts` + `test/version-shell.test.ts`，再写实现；未改任何既有测试）：
   - `version-store`（23 例）：`isVersionNode` 仅顶层 sequence 为真（嵌套/if/while/叶子均否）；`commit` 不可变（入参 Script 引用不变、history 倒序）；`branch` 派生 + 同名报错 + 不改源；`switchTo` 还原脚本 + 不存在分支报错；`cherryPick` 跨分支摘节点、源不变、改参落新提交而非改写源、不存在节点报错；`tag` 列出 + 重复报错 + 空名报错；`diffScripts` 递归展平比对（增/删/改）、相同脚本空差异不崩；边界硬失败（§4.1）入口抛 `VersionStoreError` 而非 UI 白屏。
