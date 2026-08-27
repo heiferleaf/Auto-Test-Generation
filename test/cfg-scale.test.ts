@@ -73,14 +73,19 @@ describe('B4 CFG 规模可读性（§2.6.1）', () => {
     expect(tree.getAttribute('data-cfg-scale')).toBe(scale1);
   });
 
-  it('运行跟随：setStatus(running) 时该节点 scrollIntoView 被调用', () => {
+  it('运行跟随：setStatus(running) 时平滑把该步移到画布中心', () => {
     const s = script([leaf('a'), leaf('b'), leaf('c')]);
     const view = new CfgView({ mount: m });
     view.update(s);
     const el = m.querySelector('[data-cfg-node="b"]') as HTMLElement;
-    el.scrollIntoView = vi.fn();
+    el.getBoundingClientRect = () =>
+      ({ left: 80, top: 200, right: 160, bottom: 240, width: 80, height: 40, x: 80, y: 200, toJSON() {} }) as DOMRect;
+    m.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, right: 400, bottom: 300, width: 400, height: 300, x: 0, y: 0, toJSON() {} }) as DOMRect;
     view.setStatus('b', 'running');
-    expect(el.scrollIntoView).toHaveBeenCalled();
+    const tree = m.querySelector('.ui-shell-cfg-tree') as HTMLElement;
+    expect(tree.getAttribute('data-cfg-follow')).toBe('center');
+    expect(tree.style.transition).toMatch(/260ms/);
   });
 
   it('setStatus 非 running 不触发 scrollIntoView（避免 pass/pail 抢焦点）', () => {

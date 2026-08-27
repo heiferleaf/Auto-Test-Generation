@@ -52,4 +52,28 @@ describe('步骤执行器', () => {
     // 注：assert 引擎（src/executor/assert.ts）真实实现后，此处应断言抛错且含 stepId 's1'
     await expect(runScript(a, script)).rejects.toMatchObject({ stepId: 's1' });
   });
+
+  it('waitUntil 轮询 assertion 直到成立，不是只 sleep', async () => {
+    let n = 0;
+    const a = makeMockAdapter();
+    a.query = async () => {
+      n += 1;
+      return n >= 3 ? {} : null;
+    };
+    const script: Script = {
+      schema: 'electron-auto-test/step/v1',
+      app: { name: 'demo' },
+      steps: [{
+        id: 'w',
+        type: 'waitUntil',
+        source: 'manual',
+        params: {
+          timeoutMs: 2000,
+          assertion: { kind: 'exists', locator: { name: 'Ready' } },
+        },
+      }],
+    };
+    await runScript(a, script);
+    expect(n).toBeGreaterThanOrEqual(3);
+  });
 });

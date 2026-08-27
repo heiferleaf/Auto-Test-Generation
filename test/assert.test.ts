@@ -30,6 +30,27 @@ describe('断言引擎', () => {
     expect(r.passed).toBe(false);
   });
 
+  it('textContains 有 locator 时只搜该节点文本', async () => {
+    const a = stubAdapter({
+      snapshot: async () => ([
+        { role: 'button', name: '发送', text: '发送' },
+        { role: 'status', name: 'out', text: 'Welcome Dashboard' },
+      ]),
+    });
+    const miss = await runAssertion(a, {
+      kind: 'textContains',
+      value: 'Dashboard',
+      locator: { role: 'button', name: '发送' },
+    });
+    expect(miss.passed).toBe(false);
+    const hit = await runAssertion(a, {
+      kind: 'textContains',
+      value: '发送',
+      locator: { role: 'button', name: '发送' },
+    });
+    expect(hit.passed).toBe(true);
+  });
+
   it('exists 命中（query 非空）返回 true', async () => {
     const a = stubAdapter({ query: async () => ({}) });
     const r = await runAssertion(a, { kind: 'exists', locator: { css: '#btn' } });

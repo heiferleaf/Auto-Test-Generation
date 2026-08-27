@@ -6,6 +6,7 @@
 
 import type { Script, Step, StepType, Locator, StepSource } from '../types/step';
 import { SCRIPT_SCHEMA } from '../types/step';
+import { isNonActionableName, isNonActionableRole, sanitizeLocator } from './inject';
 
 /** 一次被捕获的用户交互（抽象，与具体事件源解耦）。 */
 export type InteractionEvent = {
@@ -64,7 +65,7 @@ export class Recorder {
       source: this.source,
     };
     if (ev.target !== undefined) step.target = ev.target;
-    if (ev.locator) step.locator = ev.locator;
+    if (ev.locator) step.locator = sanitizeLocator(ev.locator);
     if (ev.params) {
       step.params = { ...ev.params };
     }
@@ -85,4 +86,62 @@ export class Recorder {
       note,
     };
   }
+}
+
+/** 两 locator 是否视为同一输入框（跨 drain 窗口合并 fill 用）。 */
+export function sameFillLocator(a?: Locator, b?: Locator): boolean {
+  if (!a || !b) return false;
+  const nameOf = (l: Locator) => (isNonActionableName(l.name) ? null : (l.name ?? null));
+  return nameOf(a) === nameOf(b)
+    && (a.testId ?? null) === (b.testId ?? null)
+    && (a.css ?? null) === (b.css ?? null)
+    && (a.xpath ?? null) === (b.xpath ?? null);
+}
+
+/** 空 fill、装饰 role 点击不进脚本（宿主侧兜底，注入层已过滤一轮）。 */
+export function shouldKeepRecordingEvent(ev: InteractionEvent): boolean {
+  if (ev.type === 'fill') {
+    const v = ev.params?.value;
+    if (typeof v !== 'string' || v.trim().length === 0) return false;
+    if (v === '__ATG_EMPTY_FILL__') return false;
+    return true;
+  }
+  if (ev.type === 'click' || ev.type === 'hover' || ev.type === 'select') {
+    const role = ev.locator?.role;
+    if (isNonActionableRole(role)) return false;
+    const r = (role || '').toLowerCase();
+    if (r === 'generic' && !ev.locator?.name && !ev.locator?.testId && !ev.locator?.css) return false;
+  }
+  return true;
+}
+
+/**
+ * 把新事件并入已推送列表（spec §2.2.2）：同一输入框的连续 fill 就地改 value，
+ * 不追加。页面内 250ms 缓冲不够，drain 跨窗口仍必须在这一层合并。
+ * 空 fill / presentation 点击直接丢弃（返回原数组同一引用，调用方据此跳过 emit）。
+ */
+export function mergeRecordingEvent(prev: InteractionEvent[], ev: InteractionEvent): InteractionEvent[] {
+  if (!shouldKeepRecordingEvent(ev)) return prev;
+  const next: InteractionEvent = ev.locator
+    ? { ...ev, locator: sanitizeLocator(ev.locator) }
+    : ev;
+  if (!shouldKeepRecordingEvent(next)) return prev;
+  const last = prev[prev.length - 1];
+  if (next.type === 'fill' && last?.type === 'fill' && sameFillLocator(last.locator, next.locator)) {
+    const copy = prev.slice();
+    copy[copy.length - 1] = { ...last, params: { ...last.params, ...next.params } };
+    return copy;
+  }
+  return [...prev, next];
+}
+
+/**
+ * 增量 drain 是 async 的：await 回来时 stopRecording 可能已把 listener 置成 null。
+ * 直接 `listener(ev)` 会 TypeError 把整个 UI Node 进程打崩。
+ */
+export function emitRecordingEvent(
+  listener: ((e: InteractionEvent) => void) | null | undefined,
+  event: InteractionEvent,
+): void {
+  if (typeof listener === 'function') listener(event);
 }

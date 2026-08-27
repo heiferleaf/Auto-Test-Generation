@@ -13,8 +13,9 @@ import type { StepProgress } from '../executor/executor';
 import type { UiKernel } from './shell';
 import type { Script, Locator } from '../types/step';
 import { STEP_TYPES, CONTROL_KINDS } from '../types/step';
+import { importScript as loadScriptJson } from '../script/io';
 
-type RpcReq = { id: number; method: keyof UiKernel; args: unknown[] };
+type RpcReq = { id: number; method: keyof UiKernel | 'loadScript'; args: unknown[] };
 type RpcRes = { id: number; ok: true; result?: unknown } | { id: number; ok: false; error: string };
 /** 服务端主动推送消息（非请求/响应），用于录制增量事件、运行进度等。 */
 type WsEvent = { type: 'event'; event: string; data: unknown };
@@ -129,6 +130,19 @@ export function assertRunnableScript(v: unknown): Script {
   return v as Script;
 }
 
+/**
+ * 解析 loadScript 入参（对象或 JSON 字符串）。
+ * 跨 WS 的 null 还原成 {} 后再走 importScript，缺 schema 会明确失败，不会推进 UI。
+ */
+export function parseLoadScriptArg(raw: unknown): Script {
+  const v = raw ?? {};
+  if (typeof v === 'string') return loadScriptJson(v);
+  if (typeof v !== 'object') {
+    throw new Error(`loadScript 需要 script 对象或 JSON 字符串（实际: ${describeValue(raw)}）`);
+  }
+  return loadScriptJson(JSON.stringify(v));
+}
+
 /** 桥端所需的 adapter 能力（DIP：桥只依赖此抽象，不绑定 Playwright 实现）。 */
 export type BridgeAdapter = CdpAdapter & {
   screenshot(opts?: unknown): Promise<Buffer>;
@@ -155,7 +169,7 @@ export function attachKernelBridge(
   // 直接赋值（不用 as unknown as 强转）：若将来 BridgeAdapter 收窄而
   // PlaywrightCdpAdapter 未跟上，此处会**编译期报错**，而非被强转静默掩盖。
   adapter: BridgeAdapter = new PlaywrightCdpAdapter(),
-): { close: () => Promise<void> } {
+): { close: () => Promise<void>; loadScript: (raw: unknown) => Script } {
   let connected = false;
   const clients = new Set<WebSocket>();
 
@@ -224,6 +238,15 @@ export function attachKernelBridge(
           send({ id: req.id, ok: true, result: undefined });
           return;
         }
+        if (method === 'loadScript') {
+          // 把 Script JSON 推进当前工作台会话（将来 MCP script.open 一行调这里）。
+          // 不走 adapter：这是 UI 会话，不是 CDP。校验失败不广播。
+          const args = sanitizeArgs(req.args as unknown[]);
+          const script = parseLoadScriptArg(args[0]);
+          pushEvent('load-script', script);
+          send({ id: req.id, ok: true, result: { ok: true } });
+          return;
+        }
         if (method === 'playback') {
           // 运行全部 / 从此处运行（R3 / spec §2.7）：函数不可跨 WS 传递，故在桥端注册进度回调，
           // 用 R1 的单向推送通道把每步 running/pass/fail 下发给浏览器端。
@@ -269,6 +292,12 @@ export function attachKernelBridge(
     close: () => new Promise<void>((resolve) => {
       wss.close(() => resolve());
     }),
+    /** 进程内入口：将来 MCP `script.open` = 这一行。工作台导入按钮仍保留。 */
+    loadScript: (raw: unknown): Script => {
+      const script = parseLoadScriptArg(raw);
+      pushEvent('load-script', script);
+      return script;
+    },
   };
 }
 

@@ -77,7 +77,10 @@ async function runNode(adapter: CdpAdapter, node: Step, onStep: StepProgress, st
   if (!state.started && node.id === state.fromStepId) state.started = true;
 
   const ctrl = node.control;
-  if (!ctrl) {
+  // 叶子，或「原子顺序组」（spec §2.5：一步默认就是一个组，control.sequence 且无 children）：
+  // 节点自身仍是可执行动作，不能当成空 sequence 跳过，否则录制步全部不跑。
+  const atomicGroup = ctrl?.kind === 'sequence' && !(node.children?.length);
+  if (!ctrl || atomicGroup) {
     // 叶子：未到起点则跳过（不执行、不上报进度）。
     if (!state.started) return;
     onStep(node.id, 'running');
@@ -99,13 +102,24 @@ async function runNode(adapter: CdpAdapter, node: Step, onStep: StepProgress, st
     case 'if': {
       // 未 started 且起点不在本 if 子树时，整棵跳过 —— 避免无谓地求值条件（副作用/可能失败）。
       if (!state.started && state.fromStepId && !containsId(node, state.fromStepId)) break;
-      const result = ctrl.condition
-        ? await runAssertion(adapter, ctrl.condition)
-        : { passed: true };
-      const branches = childrenOf(node);
-      // children[0]=then, children[1]=else
-      const chosen = result.passed ? branches[0] : branches[1];
-      if (chosen) await runNode(adapter, chosen, onStep, state);
+      // 求值条件前先标 running：snapshot/定位可能很慢，不能让「运行全部」看起来没反应。
+      if (state.started) onStep(node.id, 'running');
+      try {
+        const result = ctrl.condition
+          ? await runAssertion(adapter, ctrl.condition)
+          : { passed: true };
+        if (state.started) onStep(node.id, 'pass');
+        const branches = childrenOf(node);
+        // children[0]=then, children[1]=else
+        const chosen = result.passed ? branches[0] : branches[1];
+        if (chosen) await runNode(adapter, chosen, onStep, state);
+      } catch (err) {
+        if (state.started) onStep(node.id, 'fail');
+        if (err instanceof AssertionError) throw err;
+        const wrapped = new Error(`step ${node.id} failed: ${(err as Error).message}`);
+        (wrapped as Error & { stepId?: string }).stepId = node.id;
+        throw wrapped;
+      }
       break;
     }
     case 'while': {

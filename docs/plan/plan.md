@@ -172,6 +172,11 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 - MCP Tool 契约测试：每个 Tool 的输入输出与执行器对齐。
 - record Tool 复用 M3 的 Recorder；update_step 复用 M3 的 ScriptEditor。
 
+### M4.3 第一刀状态（feat/pick-record，2026-08-27）
+- **已交付**：stdio MCP（`npm run mcp` / `.cursor/mcp.json`）1:1 包装内核。契约测试 `test/mcp-*.test.ts`：Tool 名、null 入参、`script.open`→`loadScript`、`launch-target` 不写死 9222、`waitUntil textContains`。
+- **已注册原子**：`launch-target` / `target.stop` / `workbench.start|stop`、`app.connect|disconnect|list_targets`、`page.snapshot|click|fill|wait|waitUntil|screenshot`、`actions.execute_steps`、`script.import|export|open`、`assert.run`、`record.start|stop|get_steps`。
+- **未做（故不称全量完成）**：Skill 正文（另 Agent 在改）、`script.update_step`、`agent.suggest_steps`、视觉断言专用 Tool、多标签页 `runId`（P1）。P2 的 UI「手动选连接目标」仍未做（本刀不改 `src/ui/**`）。
+
 ---
 
 ## M5 详细计划（Agent 生成与改写脚本）
@@ -211,6 +216,42 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 
 ---
 
+## M3 工作台对照原型（2026-08-26）
+
+验收以 `docs/design/m3-visual-panel-prototype.html` 时序为准，不以 mock 绿代替产品可用。测试入口：`test/spec-workbench.test.ts` + `test/ui-core-e2e.test.ts`（`app` 路径仍走 `data-action`）。
+
+| 时序 | 验收 |
+|---|---|
+| 布局 | CFG + 舞台 + 详情；无步骤列表 |
+| 输入 | 同一 locator 连续 fill 一条，值为最终文本 |
+| 组 | 一步一组可命名；仅打包提示组名；拆包；选中组设 if/while |
+| 点选 | 点选横幅；点击不写入录制步；详情显示封装名 |
+| 运行 | 未连接禁用运行全部；清空需确认；选中步舞台高亮 |
+
+---
+
+## M3 UI 重构（feat/pick-record，CFG 连线 + 定位展示）
+
+> 用户已批准开工。本回合只改渲染层，不改 schema、不封装 MCP。
+
+### 验收清单（先于实现）
+
+**A CFG 连线与执行一致**
+1. if/else：图模型 true/false 边只连到同层分支头；True 与 False 之间没有 flow。
+2. 分支 SVG 从条件头底边出发，不从组外框底边倒插入子节点（`isInwardVIntoGroup` 为假）。
+3. 循环：回环边 `data-to` 是循环头；路径从末步右侧绕出组框，不穿过 body。
+4. 画布无 `[data-cfg-minimap]`。
+5. 仍走 `[data-action]` / `[data-cfg-node]`；`test/ui-core-e2e.test.ts`、`test/workbench-ux.test.ts` 保持 `app.boot()` 或等价 `render()` + 模拟点击。
+
+**B 步骤卡片 / 详情定位**
+1. 卡片与详情显示 `role + [name] + 截断 css`。
+2. 空 name 不渲染成只有 `<textbox>`。
+3. 详情 css 可展开、可编辑、保存写回 `locator.css`。
+
+---
+
+---
+
 ## M3 重做实施计划（嵌入实时生成 + CFG + Git 版本）
 
 > 基于 `docs/design/visual-mask-ui-spec.md` 与 `architecture.md §2.2/§2.3`。
@@ -226,8 +267,21 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 | M3-R3 运行全部 + 步骤态 + 高亮跟随 | ✅ 已合并 | `feat/run-all` | 见合并记录 | `ui-shell-run-all` 22 + `executor-progress` 11 + `bridge-ws-progress` 7（真 WS）+ `bridge-push` 25 通过 |
 | M3-R4 CFG 图形化视图 | ✅ 已合并 | `feat/cfg-view` | `883fe1e` | `test/cfg-view.test.ts` 47 通过（含特殊字符 id / 点击内部子元素 / OCP 穷尽性 / 导入期 kind 校验 / 未知 kind 不白屏） |
 | M3-R5 Git 式版本层 | ✅ 已合并 | `feat/git-version` | `11dcb6d` | `version-store` 23 + `version-panel` 8 + `version-shell` 4 通过（共 35 例） |
+| M3 工作台补齐 | 进行中 | `feat/pick-record` | — | 录制注入全部窗口、导入 JSON 带 shots、if 夹具与 jsdom 运行全部 |
 
 > **测试代码权威性纪律（新增，因本轮违规而补）**：既有测试文件（含其 mock 基建，如 `test/ui-shell.test.ts` 的 `makeMockKernel`）**不得为迁就新实现而修改**。新能力需要新的 mock 行为时，新建独立测试文件并自带 mock，不动既有基建。
+
+#### 导入配图 + 录制不切窗口 + if 夹具（本轮）
+
+验收：
+
+1. 开始录制注入全部 target；下拉在录制中隐藏；步骤带事件所在 `target`。手动 snapshot 仍看当前窗口。
+2. 未连接导入带 `shots` 的 JSON：`getStepShots()` 有图，点步骤舞台 `<img>` 出图，不调 `screenshot`。无配图则仍为空。
+3. 已连接导入无配图：仍按叶子补拍（highlight / 整页）。
+4. `exportScript` 在根上写可选 `shots`（data URL），步骤对象没有 png。schema 仍是 v1。
+5. `scripts/fixtures/agent-generated-if.json`：条件为资源管理器 treeitem `settings.json` 是否存在（不是菜单「文件」）。jsdom 导入/`loadScript` + 点运行全部；9246 活着则 `adapter.playback`。True=点击该文件，False=等 200ms。
+6. 内核 `loadScript` + 桥 RPC：jsdom 推进 CFG；WS `loadScript` 广播 `load-script`。将来 MCP `script.open` 调这一行。导入按钮仍保留。
+7. `npm test` + `npm run typecheck`。
 
 ### 阶段 M3-R0：CFG 步骤模型（内核，无 UI）— ✅ 已完成
 - **worktree**：`feat/cfg-step-model`
@@ -360,7 +414,7 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
   - 新增 MCP Tool：`launch-target`（以 `--remote-debugging-port` 启动指定 Electron 应用并返回端口）、`connect-target`（按用户选择的 host/port 连接，非写死 9222）。
   - UI 壳连接区改为"用户选择/输入目标"→ 调用 `connect-target`，去掉硬编码。
 - **测试**：MCP Tool 契约测试（输入 host/port/exe 路径，输出连接句柄/端口）；UI 单测断言连接区不再写死端口。
-- **状态**：需求已记录，待 M4（MCP 全量 Tool）一并实现；当前 UI 暂保留 `?live=1` 自动连 9222 的便利分支（用户暂缓手动连接 UI 改动）。
+- **状态**：第一刀已交付 `launch-target`（包装 launch-*.cmd，返回实际端口，不写死 9222）与 `app.connect`（port 来自 launch-target / 内核探测）。UI 壳手动选目标（P3）仍待做，本刀不改 `src/ui/**`。未称 P2 全量完成。
 - **关联记忆**：`project_m3_tool_packaging.md`。
 
 ### P3 连接目标手动选择 UI（与 P2 配套）
@@ -380,6 +434,34 @@ M3 是一个**高内聚组件**：对内管理 Script（导入 / 编辑 / 录制
 - **影响**：**涉及架构变更**——脚本模型从"线性 Step[]"升级为"带版本的提交图"。实现前**必须**在 `docs/architecture/architecture.md` 与 `docs/requirements/requirements.md` 同步新增"脚本版本管理"小节，code-review 角色将据此核查。
 - **测试**：版本层单测（commit/branch/checkout/cherry-pick 后 Step[] 还原一致）；UI 单测（时间线渲染、分支切换后步骤列表同步）。
 - **状态**：概念登记，待细化设计后排入实现。
+
+### MVP：端口自探 + 运行全部反馈 + 录制 locator 可回放（worktree `feat/pick-record`）
+
+> 产品约束：面向任意 Electron（CDP），不是某一款 IDE 的驱动。用户反馈：工作台默认连 9222，「运行全部」未连接时零反馈；录制把无障碍帮助文案当 locator，连续 fill 膨胀且回放点不中真实输入。
+> **不改** `docs/design/visual-mask-ui-spec.md`。P1 高亮/CFG 箭头本轮不做。禁止把某 App 的 class / 端口号段写进 locator 或 playback。
+
+#### 验收清单
+1. 首选端口 `connectOverCDP` 失败时，并行探测 `/json`：本次端口、上次成功口、`CDP_PROBE_PORTS`、本机调试号段 9222–9260（须有 `webSocketDebuggerUrl`），连第一个活口；不必手输 `?cdp=`。
+2. 「运行全部」未连接时**不禁用**。用户点击 `[data-action=run-all]` 出现 `[data-run-notice]`（文案含「未连接靶机」），不调用 playback。
+3. 已连接时点击运行全部：失败步 `data-cfg-status=fail` 且出现 run-notice（主链路走按钮点击，见 `test/ui-core-e2e.test.ts`）。
+4. 录制从事件目标走到最近可交互节点（button/link/input/textarea/contenteditable/role=textbox 等；**不含** presentation/none/generic）。`aria-hidden` / `inert` / 零尺寸 overlay 跳过；看起来像屏幕阅读器帮助的 name 不写入 locator.name（保留 css/role）。负例：某段 overlay 长文案不得成为 name，但实现不得做成该 App 的中文词表。空 fill 丢弃；同一 locator 连续 fill 只留最新非空值。
+5. 同一 locator 连续 fill：keydown 不立刻灌 `__recBuf`，`RECORD_DRAIN` / blur / idle 只出一步最新值。
+6. `fillOnPage`：可见 input/textarea/contenteditable 走 Playwright fill；否则点看得见的节点再 insertText；隐藏节点点最近可见祖先。不硬编码某 App 的编辑器/聊天 class。`clickOnPage`/`fillOnPage` 不 `getByRole('presentation')`，装饰 role 走 css 再点可交互祖先。
+7. Agent 回复用通用 `waitUntil`（element exists / text appears），不是专用聊天面板 API。真机夹具可点通用 `role+name`（如 treeitem），不得依赖 App 专用 css fill。
+8. 网页级验收：工作台 `5173/?live=1&cdp=` 开始录制 → 靶机输入并发送 → 停止录制 → CFG 无空 fill、无 presentation 步 → 点 `[data-action=run-all]` → 靶机内步骤跑完。
+
+### UX 抛光（worktree `feat/pick-record`，本轮）
+
+交互优先；主链路仍走 `test/ui-core-e2e.test.ts` 的 `boot()` + `[data-action]`。
+
+1. 详情点「保存」后出现 `[data-save-notice]`（或按钮「已保存」），jsdom 可断言。
+2. 顶栏可见 **测试步骤中台** + **已连接/未连接**；完整靶机窗口 title 只放 tooltip，禁止把 `1.txt - cursor - Visual Studio Code` 当主文案。网页 `document.title` = 测试步骤中台。`listTargets().length <= 1` 时隐藏目标下拉；多目标时保留并标「当前窗口」。
+3. 舞台**没有**「预览不可操作靶机」横幅/遮罩，截图整张可见。该说明只在 Skill。
+4. CFG 栏标题 **步骤流图**；提示只留「拖拽调序 · 框选打包」。框选后紧凑浮动簇（`[data-pack-menu][data-pack-float][data-pack-anchor=bbox]`）贴在选区包围盒**右侧**（不够则上方），按节点 `getBoundingClientRect` 相对画布重算，不钉画布左上/底栏。点空白取消选区并隐藏浮动钮。点打包**立刻**以默认名建组，**不得** `window.prompt`、也不得内联组名确认；改名走详情组名。
+5. 详情是锚在选中节点旁的紧凑叠加层（`[data-detail-anchor=node]`），180ms opacity+translate；不盖预览、不占半幅抽屉、不制造画布中缝原生滚动条。弹层内 `[data-inspector-scroll]` 可滚；右上角 `[data-inspector-close]` 扇形 X，无取消钮。组节点不显示点选「尚未选取」。预览栏没有「编辑」。点节点=查看截图；点 `[data-action=edit]` 才打开详情。Esc / 点舞台或 CFG 空白关闭详情。保存后详情仍在。
+6. 壳根 `data-layout="flow"|"shot"`：录制中 / 详情打开 / 框选打包 → `flow`（流图主栏）；查看某步截图 → `shot`（截图主栏）。双栏宽度用 `grid-template-columns` 过渡，不要瞬切。`shot` 下点**单步**也在该步包围盒旁弹出同一组打包钮（顺序/分支/循环）。
+7. 第一步节点不得贴齐 CFG 树 (0,0)：树有 padding，jsdom 断言首个 `[data-cfg-node]` 的 offset/padding。`.ui-shell-cfg` / 画布 **不得** `overflow:auto`；详情弹层内部可以 `overflow:auto`。图靠 padding + 滚轮/拖拽平移（`overflow:hidden` + transform）。壳根 padding 在 shot/flow、有无选中时相同。
+8. 出现/消失约 180ms opacity/transform。页面壳是跟指针的雾块（`[data-app-field]` 内 2–4 个 `[data-fluid-blob]`）；**点阵铺满步骤流图画布**（`[data-cfg-dots]` 世界尺寸 ≥ 画布，间距约 22px、低透明），禁止只铺左上小补丁，禁止整页 16px 密点。if 枝列只有一个 True / 一个 False，枝内 sequence 包装不得再印 True/False 头。
 
 ### 排期建议
 - P1（高亮跟随）：M3 UI 壳后续子阶段，独立 worktree。

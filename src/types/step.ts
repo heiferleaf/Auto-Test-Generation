@@ -45,7 +45,7 @@ export type AssertionKind =
 
 export type Assertion = {
   kind: AssertionKind;
-  locator?: Locator;   // exists/visible/textContains 用
+  locator?: Locator;   // exists/visible 必填；textContains 可选（缺省=整页文本，执行器搜 snapshot）
   value?: string;      // textContains/titleIs/urlMatches/expr 用
   /** 检测前等待毫秒数（供 Agent 推理/异步渲染留时间，如"等待 N 秒后检测元素值"）。 */
   waitMs?: number;
@@ -95,6 +95,11 @@ export type Script = {
   steps: Step[];
   createdAt?: string;
   note?: string;
+  /**
+   * 可选配图：stepId → png data URL（或裸 base64）。
+   * 仍是同一份 v1 JSON，不是第二种格式；导入后舞台能看图，不必先连靶机。
+   */
+  shots?: Record<string, string>;
 };
 
 export const SCRIPT_SCHEMA = 'electron-auto-test/step/v1';

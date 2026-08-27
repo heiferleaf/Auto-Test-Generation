@@ -48,6 +48,13 @@ describe('可视化适配器接口契约（ISP：VisualCapable 派生）', () =>
     expect(a.lastScreenshotOpts).toEqual({ target: 'webview-1', element: loc, fullPage: true });
   });
 
+  it('screenshot 支持 highlight：拍摄前在靶机上画定位框', async () => {
+    const a = makeVisualMock();
+    const loc: Locator = { name: 'settings.json' };
+    await a.screenshot({ highlight: loc });
+    expect(a.lastScreenshotOpts).toEqual({ highlight: loc });
+  });
+
   it('locateVisual 返回含 rect 与 visible 的视觉位置', async () => {
     const a = makeVisualMock();
     const box = await a.locateVisual({ role: 'button', name: '侧栏' });

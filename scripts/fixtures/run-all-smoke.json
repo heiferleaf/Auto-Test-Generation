@@ -1,0 +1,17 @@
+{
+  "schema": "electron-auto-test/step/v1",
+  "app": {
+    "name": "Run-all smoke",
+    "version": "0.0.0"
+  },
+  "note": "Tiny runnable import: a single wait. Use this to verify Import → 运行全部 paints pass.",
+  "steps": [
+    {
+      "id": "smoke-wait",
+      "type": "wait",
+      "source": "manual",
+      "params": { "durationMs": 100 },
+      "control": { "kind": "sequence", "name": "等待 100ms" }
+    }
+  ]
+}

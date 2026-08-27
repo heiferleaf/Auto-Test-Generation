@@ -15,21 +15,16 @@ function script(steps: Step[]): Script {
 const leaf = (id: string): Step => ({ id, type: 'click', locator: { role: 'button', name: id }, source: 'manual' });
 
 describe('B2 ScriptEditor 组操作（§2.5）', () => {
-  it('A2 回归：包成 if → children[0] 是含两步的顺序组(True)，children[1] 是空顺序组(False)', () => {
+  it('A2 回归：包成 if → children[0] 是含两步的顺序组(True)，默认不造空 Else', () => {
     const s = script([leaf('a'), leaf('b')]);
     const out = ScriptEditor.wrap(s, ['a', 'b'], 'if');
     expect(out.steps).toHaveLength(1);
     const grp = out.steps[0];
     expect(grp.control?.kind).toBe('if');
-    expect(grp.children).toHaveLength(2);
-    // True 分支：顺序组，含 a、b
+    expect(grp.children).toHaveLength(1);
     const trueBranch = grp.children![0];
     expect(trueBranch.control?.kind).toBe('sequence');
     expect(trueBranch.children?.map((c) => c.id)).toEqual(['a', 'b']);
-    // False 分支：空顺序组
-    const falseBranch = grp.children![1];
-    expect(falseBranch.control?.kind).toBe('sequence');
-    expect(falseBranch.children).toEqual([]);
   });
 
   it('A2 执行语义：mock 执行器 passed=true 跑 True 体内两步、passed=false 跳过（不丢第 2 步）', () => {
@@ -110,16 +105,15 @@ describe('B2 ScriptEditor 组操作（§2.5）', () => {
     expect(out.steps[0].control?.name).toBe('登录流程');
   });
 
-  it('选中组改 kind：sequence → if（当前 children 进 True，False 空）', () => {
+  it('选中组改 kind：sequence → if（当前 children 进 True，默认无 Else）', () => {
     const s = ScriptEditor.wrap(script([leaf('a'), leaf('b')]), ['a', 'b'], 'sequence');
     const grpId = s.steps[0].id;
     const out = ScriptEditor.setGroupKind(s, grpId, 'if');
     const grp = out.steps[0];
     expect(grp.control?.kind).toBe('if');
-    expect(grp.children).toHaveLength(2);
+    expect(grp.children).toHaveLength(1);
     expect(grp.children![0].control?.kind).toBe('sequence');
     expect(grp.children![0].children?.map((c) => c.id)).toEqual(['a', 'b']);
-    expect(grp.children![1].children).toEqual([]);
   });
 
   it('选中组改 kind：sequence → while（保留 children 为循环体，loopCount 默认 1）', () => {
@@ -191,9 +185,10 @@ describe('B2 组操作 UI 主链路（§2.5）', () => {
       steps: [leaf('a'), leaf('b')],
     };
     const { shell, mount } = bootUI(s);
-    clickEl(mount.querySelector('[data-step-item][data-step-id="a"]'));
-    clickEl(mount.querySelector('[data-step-item][data-step-id="b"]'));
+    clickEl(mount.querySelector('[data-cfg-node="a"]'));
+    mount.querySelector('[data-cfg-node="b"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
     clickEl(mount.querySelector('[data-action="wrap-sequence"]'));
+    expect(mount.querySelector('[data-pack-name]')).toBeNull();
     expect(shell.getScript().steps).toHaveLength(1);
     expect(shell.getScript().steps[0].control?.kind).toBe('sequence');
     expect(shell.getScript().steps[0].children?.map((c) => c.id)).toEqual(['a', 'b']);
@@ -207,24 +202,24 @@ describe('B2 组操作 UI 主链路（§2.5）', () => {
     const grpId = packed.steps[0].id;
     const { shell, mount } = bootUI(packed);
     // 选中组打开详情区
-    clickEl(mount.querySelector(`[data-step-item][data-step-id="${grpId}"]`));
+    clickEl(mount.querySelector(`[data-cfg-node="${grpId}"]`));
     clickEl(mount.querySelector('[data-action="unpack"]'));
     expect(shell.getScript().steps.map((s) => s.id)).toEqual(['a', 'b']);
   });
 
-  it('设为选择组：选中顺序组 → 点「设为选择组」→ children[0]=True(含体)，children[1]=False(空)', () => {
+  it('设为选择组：选中顺序组 → 点「设为选择组」→ True 含体，默认无 Else', () => {
     const packed = ScriptEditor.wrap(
       { schema: 'electron-auto-test/step/v2', app: { name: 'T' }, steps: [leaf('a'), leaf('b')] },
       ['a', 'b'], 'sequence',
     );
     const grpId = packed.steps[0].id;
     const { shell, mount } = bootUI(packed);
-    clickEl(mount.querySelector(`[data-step-item][data-step-id="${grpId}"]`));
-    clickEl(mount.querySelector('[data-group-kind="if"]'));
+    clickEl(mount.querySelector(`[data-cfg-node="${grpId}"]`));
+    clickEl(mount.querySelector('[data-action="wrap-if"]'));
     const grp = shell.getScript().steps[0];
     expect(grp.control?.kind).toBe('if');
+    expect(grp.children).toHaveLength(1);
     expect(grp.children?.[0].children?.map((c) => c.id)).toEqual(['a', 'b']);
-    expect(grp.children?.[1].children).toEqual([]);
   });
 
   it('组命名 + 循环次数：详情区改名与次数 → 保存 → control.name / loopCount 更新', () => {
@@ -234,7 +229,8 @@ describe('B2 组操作 UI 主链路（§2.5）', () => {
     );
     const grpId = packed.steps[0].id;
     const { shell, mount } = bootUI(packed);
-    clickEl(mount.querySelector(`[data-step-item][data-step-id="${grpId}"]`));
+    clickEl(mount.querySelector(`[data-cfg-node="${grpId}"]`));
+    clickEl(mount.querySelector('[data-action="edit"]'));
     const nameInput = mount.querySelector('[data-edit-field="control.name"]') as HTMLInputElement;
     const loopInput = mount.querySelector('[data-edit-field="control.loopCount"]') as HTMLInputElement;
     nameInput.value = '重试';

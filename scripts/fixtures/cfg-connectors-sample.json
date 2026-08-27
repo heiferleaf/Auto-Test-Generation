@@ -1,0 +1,84 @@
+{
+  "schema": "electron-auto-test/step/v1",
+  "app": {
+    "name": "CFG connectors sample",
+    "version": "0.0.0"
+  },
+  "note": "CFG edge review (if True/False + while loop). First wait should pass when connected; click 发送 may fail visibly.",
+  "steps": [
+    {
+      "id": "wait-start",
+      "type": "wait",
+      "source": "manual",
+      "params": { "durationMs": 100 },
+      "control": { "kind": "sequence", "name": "等待 100ms" }
+    },
+    {
+      "id": "if-send",
+      "type": "assert",
+      "source": "manual",
+      "control": {
+        "kind": "if",
+        "name": "是否出现发送",
+        "condition": {
+          "kind": "visible",
+          "locator": { "role": "button", "name": "发送" }
+        }
+      },
+      "children": [
+        {
+          "id": "if-send-true",
+          "type": "wait",
+          "source": "manual",
+          "control": { "kind": "sequence", "name": "True" },
+          "children": [
+            {
+              "id": "click-send",
+              "type": "click",
+              "source": "recorded",
+              "locator": { "role": "button", "name": "发送" },
+              "control": { "kind": "sequence", "name": "点击「发送」" }
+            }
+          ]
+        },
+        {
+          "id": "if-send-false",
+          "type": "wait",
+          "source": "manual",
+          "control": { "kind": "sequence", "name": "False" },
+          "children": [
+            {
+              "id": "wait-else",
+              "type": "wait",
+              "source": "manual",
+              "params": { "durationMs": 100 },
+              "control": { "kind": "sequence", "name": "等待 100ms" }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "while-retry",
+      "type": "wait",
+      "source": "manual",
+      "control": { "kind": "while", "name": "重试直到出现", "loopCount": 2 },
+      "children": [
+        {
+          "id": "while-wait",
+          "type": "wait",
+          "source": "manual",
+          "params": { "durationMs": 100 },
+          "control": { "kind": "sequence", "name": "等待 100ms" }
+        },
+        {
+          "id": "while-click",
+          "type": "click",
+          "source": "recorded",
+          "locator": { "role": "button", "name": "发送" },
+          "control": { "kind": "sequence", "name": "点击「发送」" }
+        }
+      ]
+    }
+  ]
+}

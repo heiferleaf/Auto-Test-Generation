@@ -55,7 +55,8 @@ describe('B6 详情区字段补全 + 失败高亮（§2.3/§2.7）', () => {
       steps: [{ id: 'w', type: 'waitUntil', source: 'manual', params: { assertion: { kind: 'visible', locator: { role: 'button' } }, timeoutMs: 5000 } }],
     };
     const { mount } = boot(makeMockKernel(), s);
-    click(mount.querySelector('[data-step-item][data-step-id="w"]'));
+    click(mount.querySelector('[data-cfg-node="w"]'));
+    click(mount.querySelector('[data-action="edit"]'));
     expect(mount.querySelector('[data-edit-field="params.timeoutMs"]')).toBeTruthy();
     expect(mount.querySelector('[data-edit-field="assertion.kind"]')).toBeTruthy();
   });
@@ -66,7 +67,8 @@ describe('B6 详情区字段补全 + 失败高亮（§2.3/§2.7）', () => {
       steps: [{ id: 'w', type: 'waitUntil', source: 'manual', params: { assertion: { kind: 'visible', locator: { role: 'button' } }, timeoutMs: 5000 } }],
     };
     const { shell, mount } = boot(makeMockKernel(), s);
-    click(mount.querySelector('[data-step-item][data-step-id="w"]'));
+    click(mount.querySelector('[data-cfg-node="w"]'));
+    click(mount.querySelector('[data-action="edit"]'));
     setSelect(mount.querySelector('[data-edit-field="assertion.kind"]') as HTMLSelectElement, 'textContains');
     // textContains 需要期望值字段
     const valInput = mount.querySelector('[data-edit-field="assertion.value"]') as HTMLInputElement;
@@ -86,7 +88,8 @@ describe('B6 详情区字段补全 + 失败高亮（§2.3/§2.7）', () => {
       steps: [{ id: 'a', type: 'assert', source: 'manual', params: { assertion: { kind: 'visible', locator: { role: 'status' } } } }],
     };
     const { mount } = boot(makeMockKernel(), s);
-    click(mount.querySelector('[data-step-item][data-step-id="a"]'));
+    click(mount.querySelector('[data-cfg-node="a"]'));
+    click(mount.querySelector('[data-action="edit"]'));
     expect(mount.querySelector('[data-edit-field="assertion.kind"]')).toBeTruthy();
   });
 
@@ -94,7 +97,8 @@ describe('B6 详情区字段补全 + 失败高亮（§2.3/§2.7）', () => {
     const grp: Step = { id: 'g', type: 'assert', source: 'manual', control: { kind: 'if', condition: { kind: 'visible', locator: { role: 'button' } } }, children: [] };
     const s: Script = { schema: 'electron-auto-test/step/v2', app: { name: 'T' }, steps: [grp] };
     const { mount } = boot(makeMockKernel(), s);
-    click(mount.querySelector('[data-step-item][data-step-id="g"]'));
+    click(mount.querySelector('[data-cfg-node="g"]'));
+    click(mount.querySelector('[data-action="edit"]'));
     expect(mount.querySelector('[data-edit-field="condition.kind"]')).toBeTruthy();
   });
 

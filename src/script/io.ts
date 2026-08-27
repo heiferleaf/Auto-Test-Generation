@@ -62,9 +62,40 @@ export function importScript(json: string): Script {
     throw new ScriptError('缺少 steps 数组');
   }
   validateSteps(obj.steps, 'steps');
+  if (obj.shots !== undefined && (typeof obj.shots !== 'object' || obj.shots === null || Array.isArray(obj.shots))) {
+    throw new ScriptError('shots 必须是对象（stepId → png data URL）');
+  }
   return data as Script;
 }
 
 export function exportScript(script: Script): string {
   return JSON.stringify(script, null, 2);
+}
+
+/** 从脚本 JSON 或侧车 `{ shots }` / 扁平 map 取出 stepId→png。跨 JSON 边界用 ?? {}。 */
+export function parseShotsMap(raw: unknown): Record<string, string> {
+  const obj = (raw ?? {}) as Record<string, unknown>;
+  const src = (obj.shots !== undefined && obj.shots !== null && typeof obj.shots === 'object' && !Array.isArray(obj.shots))
+    ? (obj.shots as Record<string, unknown>)
+    : obj;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(src ?? {})) {
+    if (k === 'schema' || k === 'app' || k === 'steps' || k === 'note' || k === 'createdAt') continue;
+    if (typeof v === 'string' && v.trim().length > 0) out[k] = v.trim();
+  }
+  return out;
+}
+
+/** 导入用：data URL 或裸 base64 都收成舞台可用的裸 base64。 */
+export function shotToBase64(value: string): string {
+  const s = (value ?? '').trim();
+  const m = s.match(/^data:image\/[a-zA-Z0-9.+-]+;base64,(.+)$/i);
+  return (m ? m[1] : s).replace(/\s+/g, '');
+}
+
+export function shotToDataUrl(value: string): string {
+  const b64 = shotToBase64(value);
+  if (!b64) return '';
+  if (/^data:image\//i.test((value ?? '').trim())) return (value ?? '').trim();
+  return `data:image/png;base64,${b64}`;
 }

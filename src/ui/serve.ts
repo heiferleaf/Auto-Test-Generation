@@ -42,8 +42,13 @@ const server = createServer(async (req, res) => {
     const noCache = { 'Cache-Control': 'no-cache, no-store, must-revalidate' };
     if (url === '/' || url === '/index.html') {
       const html = await readFile(join(UI_DIR, 'index.html'), 'utf-8');
+      // 把宿主 CDP_PORT 注入页面：无 ?cdp= 时工作台仍连 VS Code 的 9244，而不是写死 9222。
+      const injected = html.replace(
+        '</head>',
+        `<script>window.__ATG_CDP_PORT=${JSON.stringify(CDP_PORT)};</script></head>`,
+      );
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...noCache });
-      res.end(html);
+      res.end(injected);
       return;
     }
     if (url === '/app.js') {
@@ -61,6 +66,7 @@ const server = createServer(async (req, res) => {
 });
 
 // 挂载真机桥：在 /kernel-ws 上升级 WebSocket，由 Node 侧持有 PlaywrightCdpAdapter 驱动真机。
+// bridge.loadScript(script) 是将来 MCP script.open 的进程内入口（不在这里启 MCP 进程）。
 const bridge = attachKernelBridge(server, CDP_PORT);
 
 // listen 失败（端口被占用、权限不足等）会以 error 事件抛出而非走回调；

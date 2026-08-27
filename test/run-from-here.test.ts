@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // B6 「从此处运行」(fromStepId) 验收（spec §2.7）。
-// 执行器层：前序跳过 fromStepId 之前的步骤；UI 层：点「从此处运行」→ kernel.playback(script, id)。
+// 执行器仍保留 fromStepId（内核能力），UI 已按 spec D13 去掉「从此处运行」。
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { CdpAdapter } from '../src/cdp/adapter';
@@ -104,17 +104,13 @@ function click(el: Element | null) {
   el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
-describe('UI「从此处运行」主链路（§2.7）', () => {
+describe('UI 不再提供「从此处运行」', () => {
   beforeEach(() => { document.body.innerHTML = ''; });
 
-  it('详情区显示「从此处运行」按钮，点击后 kernel.playback 收到 fromStepId', async () => {
+  it('详情区没有从此处运行按钮', () => {
     const s: Script = { schema: 'electron-auto-test/step/v2', app: { name: 'T' }, steps: [leaf('a', '1'), leaf('b', '2')] };
-    const { shell, mount, kernel } = bootUI(s);
-    // 选中 b 打开详情区
-    click(mount.querySelector('[data-step-item][data-step-id="b"]'));
-    click(mount.querySelector('[data-action="run-from"][data-step-id="b"]'));
-    await shell.runAll; // 让微任务跑完（playback 是 async）
-    await Promise.resolve();
-    expect(kernel.playback).toHaveBeenCalledWith(expect.anything(), 'b');
+    const { mount } = bootUI(s);
+    click(mount.querySelector('[data-cfg-node="b"]'));
+    expect(mount.querySelector('[data-action="run-from"]')).toBeNull();
   });
 });

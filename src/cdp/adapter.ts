@@ -10,16 +10,21 @@ import type { Locator, Script } from '../types/step';
 import { runCli } from '../cli';
 export type { Locator } from '../types/step';
 import type { InteractionEvent } from '../recorder/recorder';
-import { RECORD_INJECT, RECORD_DRAIN, PICK_INJECT, PICK_DRAIN, PICK_STOP } from '../recorder/inject';
+import { mergeRecordingEvent, emitRecordingEvent } from '../recorder/recorder';
+import { RECORD_INJECT, RECORD_DRAIN, PICK_INJECT, PICK_DRAIN, PICK_STOP, REC_ACTIVE_ON, REC_ACTIVE_OFF, highlightPaintSource, HIGHLIGHT_CLEAR, sanitizeLocator } from '../recorder/inject';
 import {
   enumerateTargets,
   findTarget,
   mainTarget,
   resolveLocator,
   locatorToSelector,
+  clickOnPage,
+  fillOnPage,
   type TargetEntry,
   type TargetInfo,
 } from './targets.js';
+import { WebviewCdpTarget } from './webview-session';
+import { probeLiveCdpPort, parseCdpProbeList } from '../ui/cdp-port';
 
 export type { TargetInfo, TargetType } from './targets.js';
 
@@ -47,6 +52,11 @@ export type VisualRect = {
   visible: boolean;
   /** 元素整体是否落在视口内（M2 视觉断言用）。 */
   inViewport: boolean;
+  /** CSS 视口宽（给预览 overlay 做 object-fit 映射）。 */
+  viewportWidth?: number;
+  /** CSS 视口高。 */
+  viewportHeight?: number;
+  devicePixelRatio?: number;
 };
 
 export type ScreenshotOptions = {
@@ -58,6 +68,8 @@ export type ScreenshotOptions = {
    * 不提供则仅返回 Buffer。用于人工验证（见 test/reports/ 或自定义目录）。
    */
   savePath?: string;
+  /** 拍摄前在靶机上画出定位框，高亮成为 PNG 像素（舞台缩放不再映射坐标）。 */
+  highlight?: Locator;
 };
 
 /**
@@ -132,6 +144,7 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   private targets: TargetEntry[] = [];
   private current?: TargetEntry;
   private port = DEFAULT_CDP_PORT;
+  private lastSuccessfulPort?: number;
 
   // M3 录制：累积当前 target 捕获的交互事件（仅在 startRecording 后生效）。
   private recording = false;
@@ -145,12 +158,24 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   /** 本轮录制已注入监听器的 target id 集合，避免重复注入。 */
   private injectedTargets = new Set<string>();
 
-  async connect(opts: ConnectOptions = {}): Promise<void> {
-    const port = opts.port ?? DEFAULT_CDP_PORT;
+  async connect(opts?: ConnectOptions): Promise<void> {
+    // WS 边界：opts 可能是 null；已连接时 playback/runCli 会再调 connect() 且不带 port，
+    // 不得回落到默认 9222 把用户刚连上的活口冲掉。
+    const o = opts ?? {};
+    const port = o.port ?? (this.browser ? this.port : DEFAULT_CDP_PORT);
+    if (this.browser && !o.appPath && port === this.port) {
+      // 已连同一端口：runCli/playback 会再调 connect() 且不带 port。
+      // 录制过程中 refreshTargets 可能把 current 冲掉，这里补回主目标，避免回放 CDP_NO_TARGET。
+      if (!this.current) {
+        await this.refreshTargets();
+        this.current = mainTarget(this.targets);
+      }
+      return;
+    }
     this.port = port;
 
-    if (opts.appPath) {
-      this.child = this.launchApp(opts.appPath, port, opts.launchArgs);
+    if (o.appPath) {
+      this.child = this.launchApp(o.appPath, port, o.launchArgs);
       await this.waitForPort(port);
     }
 
@@ -158,12 +183,33 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     try {
       this.browser = await chromium.connectOverCDP(endpoint);
     } catch (err) {
-      await this.killChild();
-      throw new CdpError(
-        'CDP_CONNECT_FAILED',
-        `无法连接 ${endpoint}；请确认应用已开启 --remote-debugging-port=${port}（生产包可能禁用调试）`,
-        err,
-      );
+      const extra = parseCdpProbeList(process.env.CDP_PROBE_PORTS);
+      const live = await probeLiveCdpPort({
+        skip: port,
+        preferred: port,
+        lastSuccessful: this.lastSuccessfulPort,
+        extra,
+      });
+      if (live !== undefined) {
+        this.port = live;
+        try {
+          this.browser = await chromium.connectOverCDP(`http://127.0.0.1:${live}`);
+        } catch (err2) {
+          await this.killChild();
+          throw new CdpError(
+            'CDP_CONNECT_FAILED',
+            `无法连接 ${endpoint}，自动探测到 ${live} 也无法 connectOverCDP`,
+            err2,
+          );
+        }
+      } else {
+        await this.killChild();
+        throw new CdpError(
+          'CDP_CONNECT_FAILED',
+          `无法连接 ${endpoint}；已探测本机调试端口号段与 CDP_PROBE_PORTS 的 /json，均无 DevTools`,
+          err,
+        );
+      }
     }
 
     await this.refreshTargets();
@@ -171,6 +217,7 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     if (!this.current) {
       throw new CdpError('CDP_NO_TARGET', `连接成功但未发现任何 page/webview 目标（${endpoint}）`);
     }
+    this.lastSuccessfulPort = this.port;
   }
 
   async disconnect(): Promise<void> {
@@ -179,15 +226,14 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     } catch {
       // 关闭失败不应掩盖主流程结果。
     }
-    // 释放 webview 的独立 CDP 会话（native WebSocket）。
-    for (const t of this.targets) t.target.dispose?.();
-    this.browser = undefined;
-    this.targets = [];
-    this.current = undefined;
     this.recording = false;
     this.recorded = [];
     this.stopTargetWatch();
     this.cancelPick();
+    for (const t of this.targets) t.target.dispose?.();
+    this.browser = undefined;
+    this.targets = [];
+    this.current = undefined;
     await this.killChild();
   }
 
@@ -248,13 +294,34 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   }
 
   async click(loc: Locator): Promise<void> {
+    const entry = this.current ?? mainTarget(this.targets);
+    if (!entry) {
+      throw new CdpError('CDP_NO_TARGET', '无当前目标，请先 connect()/selectTarget()');
+    }
+    // 主窗口：Playwright 真实指针。许多 Electron 壳只认鼠标，DOM e.click() 会「调用成功、界面不动」。
+    if (entry.page) {
+      await clickOnPage(entry.page, loc);
+      return;
+    }
     const sel = locatorToSelector(loc);
+    const box = await this.currentTarget().evaluate<{ x: number; y: number } | null>(
+      `(() => { const e = ${this.queryExpr(sel)}; if(!e) return null; const r = e.getBoundingClientRect(); return { x: r.left + r.width/2, y: r.top + r.height/2 }; })()`,
+    ).catch(() => null);
+    if (box && entry.target instanceof WebviewCdpTarget) {
+      await entry.target.mouseClick(box.x, box.y);
+      return;
+    }
     await this.currentTarget().evaluate(
       `(() => { const e = ${this.queryExpr(sel)}; if(!e) throw new Error('CLICK: 未找到元素'); e.click(); })()`,
     );
   }
 
   async fill(loc: Locator, value: string): Promise<void> {
+    const entry = this.current ?? mainTarget(this.targets);
+    if (entry?.page) {
+      await fillOnPage(entry.page, loc, value);
+      return;
+    }
     const sel = locatorToSelector(loc);
     await this.currentTarget().fill(this.selectorString(sel), value);
   }
@@ -310,6 +377,18 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
 
   /** 返回首个匹配的 ElementHandle，未命中返回 null。 */
   async query(loc: Locator): Promise<unknown> {
+    const entry = this.current ?? mainTarget(this.targets);
+    if (entry?.page) {
+      try {
+        if (await resolveLocator(entry.page, loc).count() > 0) return { hit: true };
+      } catch { /* 字段不全时 resolveLocator 会抛，改走文本 */ }
+      const text = loc.text ?? loc.name;
+      if (text) {
+        try {
+          if (await entry.page.getByText(text, { exact: false }).count() > 0) return { hit: true };
+        } catch { /* ignore */ }
+      }
+    }
     const sel = locatorToSelector(loc);
     const found = await this.currentTarget().evaluate<boolean>(
       `(() => !!${this.queryExpr(sel)})()`,
@@ -319,7 +398,8 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
 
   /**
    * M3 录制：对所有已枚举 target（主 page + 每个 webview）注入交互监听器。
-   * 事件累积在各自的 window.__recBuf；webview 内层通过 CdpTarget.evaluate 的 ctxId 注入。
+   * 与顶栏「当前窗口」下拉无关：用户不必先切下拉再去软件里点。
+   * 事件累积在各自的 window.__recBuf，drain 时带上该 target id 写入步骤。
    * 同时开启浏览器级 Target 监听，录制中途动态新增的 webview 也会被自动注入。
    * @param onEvent 可选实时回调：录制中每捕获一个增量事件即调用（支撑"边操作边长步骤"）。
    */
@@ -337,11 +417,18 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
       void t.target.evaluate(RECORD_DRAIN).catch(() => undefined);
     }
     this.injectRecorderIntoTargets();
+    for (const t of this.targets) {
+      void t.target.evaluate(REC_ACTIVE_ON).catch(() => undefined);
+    }
     // 再开启动态监听：中途新开的 webview 也能被录到。
     this.startTargetWatch();
     // 实时增量轮询：周期性 drain 各 target 缓冲，把新增事件通过 onEvent 推给订阅者。
+    // 同时重试尚未注入成功的 webview（聊天面板 iframe 常比 startRecording 更晚才有 UI context）。
     if (this.recordingListener) {
-      this.recordingTimer = setInterval(() => this.drainIncremental(), 250) as unknown as number;
+      this.recordingTimer = setInterval(() => {
+        this.injectRecorderIntoTargets();
+        void this.drainIncremental();
+      }, 250) as unknown as number;
     }
   }
 
@@ -353,8 +440,15 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
       if (!Array.isArray(buf)) continue;
       for (const e of buf) {
         const ev: InteractionEvent = { ...(e as InteractionEvent), target: t.info.id };
-        this.recorded.push(ev);
-        this.recordingListener(ev);
+        // 跨 250ms drain 窗口合并同一输入框的 fill（spec §2.2.2）。
+        const prevLast = this.recorded[this.recorded.length - 1];
+        const prevLen = this.recorded.length;
+        this.recorded = mergeRecordingEvent(this.recorded, ev);
+        if (this.recorded.length === prevLen && this.recorded[this.recorded.length - 1] === prevLast) {
+          continue;
+        }
+        const last = this.recorded[this.recorded.length - 1];
+        emitRecordingEvent(this.recordingListener, last);
       }
     }
   }
@@ -368,11 +462,18 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
       this.recordingTimer = null;
     }
     this.recordingListener = null;
+    for (const t of this.targets) {
+      void t.target.evaluate(REC_ACTIVE_OFF).catch(() => undefined);
+    }
     const out: InteractionEvent[] = [];
     for (const t of this.targets) {
       const buf = await t.target.evaluate<any[]>(RECORD_DRAIN).catch(() => []);
       if (Array.isArray(buf)) {
-        for (const e of buf) out.push({ ...(e as InteractionEvent), target: t.info.id });
+        for (const e of buf) out.push({
+          ...(e as InteractionEvent),
+          target: t.info.id,
+          locator: sanitizeLocator((e as InteractionEvent).locator) ?? (e as InteractionEvent).locator,
+        });
       }
     }
     this.recorded = out;
@@ -384,31 +485,44 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   private picking = false;
   private pickListener: ((locator: Locator) => void) | null = null;
   private pickTimer: number | null = null;
+  /** 本轮点选已注入的 target id，失败不写入，轮询里重试（WEBVIEW_NO_CONTEXT）。 */
+  private pickInjected = new Set<string>();
 
   /**
-   * 进入点选态：向当前 target 注入一次性 click 监听，命中后构造完整 locator
-   * （含祖先链 css，与 §2.2.1 同源）回调 onPick。轮询 window.__pickResult 取回结果，
-   * 与录制 drain 同构，跨 webview 上下文一致。
+   * 进入点选态：向**全部**已枚举 target 注入一次性 click 监听，命中后构造完整 locator。
+   * 不必先在工作台切「当前窗口」再去软件里点；哪个窗口收到点击就用哪个。
+   * 手动 snapshot() 仍看当前下拉（多 webview 点选快照才需要切窗口）。
    */
   startPick(onPick: (locator: Locator) => void): void {
     this.cancelPick();
     this.picking = true;
     this.pickListener = onPick;
-    const target = this.currentTarget();
-    void target.evaluate(PICK_INJECT).catch(() => undefined);
+    this.pickInjected.clear();
+    for (const t of this.targets) {
+      void t.target.evaluate(PICK_INJECT)
+        .then(() => { this.pickInjected.add(t.info.id); })
+        .catch(() => undefined);
+    }
     this.pickTimer = setInterval(() => {
       if (!this.picking) return;
-      void target
-        .evaluate<any>(PICK_DRAIN)
-        .catch(() => null)
-        .then((r) => {
-          if (!this.picking || !r) return;
-          this.picking = false;
-          this.stopPickTimer();
-          const loc = sanitizePickLocator(r);
-          this.pickListener?.(loc);
-          this.pickListener = null;
-        });
+      for (const t of this.targets) {
+        if (!this.pickInjected.has(t.info.id)) {
+          void t.target.evaluate(PICK_INJECT)
+            .then(() => { this.pickInjected.add(t.info.id); })
+            .catch(() => undefined);
+        }
+        void t.target
+          .evaluate<any>(PICK_DRAIN)
+          .catch(() => null)
+          .then((r) => {
+            if (!this.picking || !r) return;
+            this.picking = false;
+            this.stopPickTimer();
+            const loc = sanitizePickLocator(r);
+            this.pickListener?.(loc);
+            this.pickListener = null;
+          });
+      }
     }, 200) as unknown as number;
   }
 
@@ -417,7 +531,10 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     this.picking = false;
     this.stopPickTimer();
     this.pickListener = null;
-    void this.currentTarget().evaluate(PICK_STOP).catch(() => undefined);
+    this.pickInjected.clear();
+    for (const t of this.targets) {
+      void t.target.evaluate(PICK_STOP).catch(() => undefined);
+    }
   }
 
   private stopPickTimer(): void {
@@ -436,8 +553,15 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   private injectRecorderIntoTargets(): void {
     for (const t of this.targets) {
       if (this.injectedTargets.has(t.info.id)) continue;
-      void t.target.evaluate(RECORD_INJECT).catch(() => undefined);
-      this.injectedTargets.add(t.info.id);
+      void t.target.evaluate(RECORD_INJECT)
+        .then(() => {
+          this.injectedTargets.add(t.info.id);
+        })
+        .catch((err) => {
+          // 失败不得写入 injectedTargets：VS Code 右侧聊天常是 iframe webview，
+          // 第一次 evaluate 会 WEBVIEW_NO_CONTEXT，250ms 后再试才能装上监听。
+          console.warn('[adapter] 录制注入失败', t.info.id, err instanceof Error ? err.message : err);
+        });
     }
   }
 
@@ -545,7 +669,19 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     // 故不能用默认参数，而要在函数体内兜底（opts 可能为 null/undefined）。
     const o = opts ?? {};
     let buf: Buffer;
-    const scope = this.scopeFor(o.target) as Page;
+    const paintTarget = o.target
+      ? (findTarget(this.targets, o.target)?.target ?? this.currentTarget())
+      : this.currentTarget();
+    if (o.highlight) {
+      await paintTarget.evaluate(highlightPaintSource(o.highlight)).catch(() => false);
+    }
+    try {
+    let scope: Page;
+    try {
+      scope = this.scopeFor(o.target) as Page;
+    } catch {
+      scope = this.page();
+    }
     if (o.element) {
       const handle = resolveLocator(scope, o.element).first();
       try {
@@ -568,6 +704,11 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
       writeFileSync(o.savePath, buf);
     }
     return buf;
+    } finally {
+      if (o.highlight) {
+        await paintTarget.evaluate(HIGHLIGHT_CLEAR).catch(() => undefined);
+      }
+    }
   }
 
   /** 视觉定位：取元素 bounding box + 视口内判定（M2 §3.2，作用于 Playwright Page）。 */
@@ -582,15 +723,23 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     }
     // 视口判定：元素四角均落在 window 视口范围内。
     const vp = await scope
-      .evaluate(() => ({ w: window.innerWidth, h: window.innerHeight }))
-      .catch(() => ({ w: 0, h: 0 }));
+      .evaluate(() => ({
+        w: window.innerWidth,
+        h: window.innerHeight,
+        dpr: window.devicePixelRatio || 1,
+      }))
+      .catch(() => ({ w: 0, h: 0, dpr: 1 }));
     const inViewport =
       box.x >= 0 &&
       box.y >= 0 &&
       box.x + box.width <= vp.w &&
       box.y + box.height <= vp.h;
     const visible = box.width > 0 && box.height > 0;
-    return { x: box.x, y: box.y, width: box.width, height: box.height, visible, inViewport };
+    return {
+      x: box.x, y: box.y, width: box.width, height: box.height,
+      visible, inViewport,
+      viewportWidth: vp.w, viewportHeight: vp.h, devicePixelRatio: vp.dpr,
+    };
   }
 
   /** 按 target 选作用域：截图/locateVisual 作用于 Playwright Page（主窗口路径）。 */
@@ -696,7 +845,7 @@ function sanitizePickLocator(loc: unknown): Locator {
   if (l.testId) out.testId = String(l.testId);
   if (l.css) out.css = String(l.css);
   if (l.xpath) out.xpath = String(l.xpath);
-  return out;
+  return sanitizeLocator(out) ?? out;
 }
 
 /** 便捷入口：创建并连接一个适配器。 */

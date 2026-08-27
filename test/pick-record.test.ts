@@ -101,7 +101,8 @@ describe('B1 嵌入式点选录制（§2.3）', () => {
     const { mount } = bootShell(kernel, {
       schema: 'electron-auto-test/step/v1', app: { name: 'T' }, steps: [waitUntilStep],
     });
-    click(mount.querySelector('[data-step-item][data-step-id="wu"]'));
+    click(mount.querySelector('[data-cfg-node="wu"]'));
+    click(mount.querySelector('[data-action="edit"]'));
     const pickBtn = mount.querySelector('[data-action="pick"]') as HTMLButtonElement | null;
     expect(pickBtn).toBeTruthy();
     expect(pickBtn!.disabled).toBe(true);
@@ -112,7 +113,8 @@ describe('B1 嵌入式点选录制（§2.3）', () => {
       schema: 'electron-auto-test/step/v1', app: { name: 'T' }, steps: [waitUntilStep],
     });
     await shell.connect();
-    click(mount.querySelector('[data-step-item][data-step-id="wu"]'));
+    click(mount.querySelector('[data-cfg-node="wu"]'));
+    click(mount.querySelector('[data-action="edit"]'));
     const pickBtn = mount.querySelector('[data-action="pick"]') as HTMLButtonElement;
     expect(pickBtn.disabled).toBe(false);
     click(pickBtn);
@@ -126,7 +128,8 @@ describe('B1 嵌入式点选录制（§2.3）', () => {
       schema: 'electron-auto-test/step/v1', app: { name: 'T' }, steps: [waitUntilStep],
     });
     await shell.connect();
-    click(mount.querySelector('[data-step-item][data-step-id="wu"]'));
+    click(mount.querySelector('[data-cfg-node="wu"]'));
+    click(mount.querySelector('[data-action="edit"]'));
     click(mount.querySelector('[data-action="pick"]'));
     const picked: Locator = { role: 'button', name: '确定', testId: 'ok-btn', css: 'div.x > button' };
     kernel.__emitPick(picked);
@@ -143,7 +146,8 @@ describe('B1 嵌入式点选录制（§2.3）', () => {
     });
     await shell.connect();
     const before = shell.getScript().steps.length;
-    click(mount.querySelector('[data-step-item][data-step-id="wu"]'));
+    click(mount.querySelector('[data-cfg-node="wu"]'));
+    click(mount.querySelector('[data-action="edit"]'));
     click(mount.querySelector('[data-action="pick"]'));
     kernel.__emitPick({ role: 'button', name: 'X' });
     expect(shell.getScript().steps.length).toBe(before);
@@ -154,7 +158,8 @@ describe('B1 嵌入式点选录制（§2.3）', () => {
       schema: 'electron-auto-test/step/v1', app: { name: 'T' }, steps: [assertStep],
     });
     await shell.connect();
-    click(mount.querySelector('[data-step-item][data-step-id="as"]'));
+    click(mount.querySelector('[data-cfg-node="as"]'));
+    click(mount.querySelector('[data-action="edit"]'));
     click(mount.querySelector('[data-action="pick"]'));
     const picked: Locator = { role: 'textbox', name: '搜索框', testId: 'q' };
     kernel.__emitPick(picked);
@@ -165,7 +170,8 @@ describe('B1 嵌入式点选录制（§2.3）', () => {
   it('选择组条件走同一套点选：回写到 control.condition.locator', async () => {
     const { shell, mount } = bootShell(kernel, ifGroupScript);
     await shell.connect();
-    click(mount.querySelector('[data-step-item][data-step-id="grp-if-1"]'));
+    click(mount.querySelector('[data-cfg-node="grp-if-1"]'));
+    click(mount.querySelector('[data-action="edit"]'));
     click(mount.querySelector('[data-action="pick"]'));
     const picked: Locator = { role: 'checkbox', name: '同意', testId: 'agree' };
     kernel.__emitPick(picked);
@@ -178,7 +184,8 @@ describe('B1 嵌入式点选录制（§2.3）', () => {
       schema: 'electron-auto-test/step/v1', app: { name: 'T' }, steps: [waitUntilStep],
     });
     await shell.connect();
-    click(mount.querySelector('[data-step-item][data-step-id="wu"]'));
+    click(mount.querySelector('[data-cfg-node="wu"]'));
+    click(mount.querySelector('[data-action="edit"]'));
     click(mount.querySelector('[data-action="pick"]'));
     const before = (shell.getScript().steps[0] as Step).params?.assertion?.locator;
     click(mount.querySelector('[data-action="cancel-pick"]'));

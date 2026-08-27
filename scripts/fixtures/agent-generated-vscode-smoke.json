@@ -1,0 +1,61 @@
+{
+  "schema": "electron-auto-test/step/v1",
+  "app": {
+    "name": "VS Code (Electron sample)",
+    "version": "agent-smoke"
+  },
+  "note": "Agent smoke：展开 ASCII 目录后点击其中的文件 treeitem，期望窗口标题变化。",
+  "createdAt": "2026-08-27T06:35:44.235Z",
+  "steps": [
+    {
+      "id": "smoke-wait",
+      "type": "wait",
+      "source": "agent",
+      "params": {
+        "durationMs": 400
+      },
+      "control": {
+        "kind": "sequence",
+        "name": "等待界面稳定"
+      }
+    },
+    {
+      "id": "smoke-expand",
+      "type": "click",
+      "source": "agent",
+      "locator": {
+        "role": "treeitem",
+        "name": ".cursor"
+      },
+      "control": {
+        "kind": "sequence",
+        "name": "点击「.cursor」"
+      }
+    },
+    {
+      "id": "smoke-wait-expand",
+      "type": "wait",
+      "source": "agent",
+      "params": {
+        "durationMs": 500
+      },
+      "control": {
+        "kind": "sequence",
+        "name": "等待目录展开"
+      }
+    },
+    {
+      "id": "smoke-click-file",
+      "type": "click",
+      "source": "agent",
+      "locator": {
+        "role": "treeitem",
+        "name": "settings.json"
+      },
+      "control": {
+        "kind": "sequence",
+        "name": "点击「settings.json」"
+      }
+    }
+  ]
+}

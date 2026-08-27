@@ -10,7 +10,7 @@ import type { Locator, Step, StepType } from '../types/step';
 /** step.type → 用户友好动词。键类型绑定 StepType，新增步骤类型时编译期提醒补文案。 */
 export const TYPE_LABEL: Record<StepType, string> = {
   click: '点击',
-  fill: '填写',
+  fill: '填充',
   select: '选择',
   wait: '等待',
   assert: '断言',
@@ -21,16 +21,26 @@ export const TYPE_LABEL: Record<StepType, string> = {
   repeat: '循环',
 };
 
-/** 把 locator 转成人类可读的简短描述。 */
+/** 把 locator 转成人类可读的简短描述：role + [name] + 截断 css。
+ * 空 name 时不要只留下 `<textbox>`——那看起来像整段定位就是一个标签。
+ */
+export function truncateCss(css: string, max = 40): string {
+  if (css.length <= max) return css;
+  const keep = Math.max(8, Math.floor((max - 1) / 2));
+  return `${css.slice(0, keep)}…${css.slice(-keep)}`;
+}
+
 export function describeLocator(loc?: Locator): string {
   if (!loc) return '';
-  if (loc.name) return `"${loc.name}"`;
-  if (loc.text) return `文本"${loc.text}"`;
-  if (loc.testId) return `[data-testid=${loc.testId}]`;
-  if (loc.role) return `<${loc.role}>`;
-  if (loc.css) return loc.css;
-  if (loc.xpath) return loc.xpath;
-  return '';
+  const parts: string[] = [];
+  const name = loc.name?.trim();
+  if (loc.role) parts.push(loc.role);
+  if (name) parts.push(`[${name}]`);
+  else if (loc.text?.trim()) parts.push(`文本"${loc.text.trim()}"`);
+  else if (loc.testId) parts.push(`[data-testid=${loc.testId}]`);
+  if (loc.css) parts.push(truncateCss(loc.css));
+  else if (!parts.length && loc.xpath) parts.push(loc.xpath);
+  return parts.join(' ');
 }
 
 /**
@@ -39,5 +49,12 @@ export function describeLocator(loc?: Locator): string {
  */
 export function describeStepBrief(step: Step): string {
   const verb = TYPE_LABEL[step.type] ?? step.type;
-  return `${verb} ${describeLocator(step.locator)}`.trim() || step.id;
+  const loc = describeLocator(step.locator);
+  if (step.type === 'fill' && step.params?.value !== undefined) {
+    return `${verb} ${loc} = ${step.params.value}`.trim();
+  }
+  if (step.type === 'wait' && step.params?.durationMs !== undefined) {
+    return `${verb} ${step.params.durationMs}ms`;
+  }
+  return `${verb} ${loc}`.trim() || step.id;
 }
