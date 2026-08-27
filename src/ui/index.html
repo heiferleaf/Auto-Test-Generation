@@ -3,149 +3,401 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>可视化蒙版 · 自动化测试控制台</title>
+  <title>测试步骤中台</title>
   <style>
-    /* 控制台样式骨架：供 UI 设计师在此外观基础上重构，不绑定业务逻辑。 */
     :root {
-      --bg: #1e1e2e; --panel: #27293d; --line: #3a3d57;
-      --text: #e6e6f0; --muted: #9a9cb8; --accent: #6c8cff; --ok: #4ec9a8; --warn: #e5c07b;
+      /* 安静深色工程工具：近黑表面 + 一条软天蓝。状态只走细轨/小点，不用整卡红绿灯。 */
+      --font-ui: system-ui, "Segoe UI", "PingFang SC", sans-serif;
+      --bg-app: #0d0d0f; --bg: #121214; --panel: #151517; --node: #19191c;
+      --chip: #1e1e22; --stage: #0a0a0c; --input: #111113; --btn: #1e1e22;
+      --ghost: #252529; --line: #2a2a30;
+      --text: #d4d4d8; --muted: #8a8a92; --text-on-accent: #f4f8fc;
+      --text-accent: #9eb4c4; --text-danger: #c9a4a6;
+      --accent: #5a8fad; --accent-ring: rgba(90,143,173,.18);
+      --accent-fill: rgba(90,143,173,.10); --accent-drop: rgba(90,143,173,.22);
+      --ok: #6a9a8e; --true: #6a9a8e; --false: #b8898c; --danger: #b07a7e;
+      --warn: #a89b72; --unknown: #9a8b6a; --recording: #c45c5c;
+      --rec-idle: #3f3f46; --lock-border: #a08082;
+      --bg-true: #141817; --bg-false: #181516; --bg-fail: #171314;
+      --bg-recording: #171314; --bg-banner: #15161a; --bg-demo: #171612;
+      --bg-pack: #15161a; --bg-encap: #15181c; --bg-lock: rgba(10,10,12,.92);
     }
     * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); }
-    #app { display: flex; flex-direction: column; height: 100vh; }
+    /* 工作台锁死视口：CFG 再高也只在栏内平移，不要整页滚动条。 */
+    html, body, #app, .ui-shell-app {
+      height: 100%; height: 100vh; height: 100dvh;
+      width: 100%; max-width: 100%;
+      overflow: hidden;
+    }
+    html, body { margin: 0; font-family: var(--font-ui); background: #0a0c10; color: var(--text); font-size: 13px; }
+    #app, .ui-shell-app {
+      display: flex; flex-direction: column; min-height: 0; min-width: 0; position: relative;
+      --fluid-x: 46%; --fluid-y: 38%;
+      padding: 12px 14px 14px; gap: 10px; box-sizing: border-box;
+      overflow: hidden;
+    }
+    .ui-shell-app[data-layout="flow"],
+    .ui-shell-app[data-layout="shot"] {
+      padding: 12px 14px 14px;
+      gap: 10px;
+    }
 
     .ui-shell-header {
-      display: flex; align-items: center; gap: 12px; padding: 10px 16px;
-      background: var(--panel); border-bottom: 1px solid var(--line); font-size: 14px;
+      display: flex; flex-direction: column; align-items: stretch; gap: 10px;
+      padding: 14px 16px 12px; min-height: 88px; box-sizing: border-box;
+      position: relative; z-index: 20; overflow: visible;
+      background: rgba(22, 24, 28, 0.55); border: 1px solid rgba(255,255,255,.08);
+      border-radius: 12px; font-size: 13px; flex-shrink: 0;
+      backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+      box-shadow: 0 8px 28px rgba(0,0,0,.40), 0 1px 0 rgba(255,255,255,.04);
     }
+    .ui-shell-header-brand {
+      display: flex; align-items: center; gap: 12px; min-height: 36px;
+    }
+    .ui-shell-wordmark {
+      position: relative; height: 36px; min-width: 248px; display: flex; align-items: center;
+    }
+    .ui-shell-wordmark canvas { position: absolute; left: 0; top: 0; display: block; pointer-events: none; }
+    .ui-shell-wordmark-label {
+      font-size: 22px; font-weight: 650; letter-spacing: .04em; line-height: 36px; color: var(--text);
+    }
+    .ui-shell-wordmark[data-wordmark-live="true"] .ui-shell-wordmark-label { color: transparent; }
+    .ui-shell-conn { color: var(--muted); font-size: 13px; }
     .ui-shell-header .badge { color: var(--muted); font-size: 12px; }
-    .ui-shell-header .rec-dot { width: 9px; height: 9px; border-radius: 50%; background: #555; }
-    .ui-shell-header .rec-dot.on { background: #ff5f56; animation: pulse 1s infinite; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+    .ui-shell-header .rec-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--rec-idle); }
+    .ui-shell-header .rec-dot.on { background: var(--recording); animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
 
-    .ui-shell-body { flex: 1; display: flex; min-height: 0; }
-
-    /* 中间：被测软件视图（截图流 + 高亮层叠加） */
-    .ui-shell-stage {
-      position: relative; flex: 1; margin: 12px; border: 1px solid var(--line);
-      border-radius: 8px; overflow: hidden; background: #11111b;
-      display: flex; align-items: center; justify-content: center;
+    .ui-shell-body {
+      flex: 1; display: grid; min-height: 0; min-width: 0; gap: 12px;
+      grid-template-columns: minmax(280px, 1.35fr) minmax(0, 0.65fr);
+      transition: grid-template-columns 180ms ease;
+      overflow: hidden;
     }
+    .ui-shell-app[data-layout="shot"] .ui-shell-body {
+      grid-template-columns: minmax(240px, 0.55fr) minmax(0, 1.6fr);
+    }
+    .ui-shell-app[data-layout="flow"] .ui-shell-body {
+      grid-template-columns: minmax(280px, 1.35fr) minmax(0, 0.65fr);
+    }
+
+    .ui-shell-stage-wrap { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    .ui-shell-stage {
+      position: relative; flex: 1; margin: 0; border: 1px solid rgba(255,255,255,.08);
+      border-radius: 12px; overflow: hidden; min-height: 0;
+      background: rgba(18, 20, 26, 0.42);
+      backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+      box-shadow: 0 10px 32px rgba(0,0,0,.44), 0 1px 0 rgba(255,255,255,.04);
+    }
+    .ui-shell-frame-img { display: block; width: 100%; height: 100%; object-fit: contain; }
     .ui-shell-frame {
       width: 100%; height: 100%; color: var(--muted); font-size: 13px;
       display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px;
     }
     .ui-shell-highlight {
-      position: absolute; border: 2px solid var(--accent); background: rgba(108,140,255,.15);
+      position: absolute; border: 1px solid var(--accent); background: var(--accent-fill);
       pointer-events: none; transition: all .15s ease; border-radius: 3px;
     }
-
-    /* 侧边：步骤列表（用户友好形式） */
-    .ui-shell-steps {
-      width: 340px; border-left: 1px solid var(--line); background: var(--panel);
-      display: flex; flex-direction: column; min-height: 0;
-    }
-    .ui-shell-steps-title { padding: 10px 14px; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--line); }
-    .ui-shell-steps-list { flex: 1; overflow-y: auto; padding: 8px; }
-    .ui-shell-step-item {
-      display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin-bottom: 6px;
-      background: #2f3147; border: 1px solid transparent; border-radius: 6px; font-size: 13px; cursor: pointer;
-    }
-    .ui-shell-step-item:hover { border-color: var(--accent); }
-    .ui-shell-step-idx { color: var(--muted); width: 20px; text-align: right; flex: none; }
-    .ui-shell-step-desc { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-    /* 步骤运行态（R3 运行全部）：左侧色条 + 底色区分 pending/running/pass/fail */
-    .ui-shell-step-item.is-running { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
-    .ui-shell-step-item.is-pass { box-shadow: inset 3px 0 0 #3fb950; }
-    .ui-shell-step-item.is-fail { border-color: #f85149; background: #43303a; box-shadow: inset 3px 0 0 #f85149; }
-
-    /* 列表项选中态（R4 双向联动）：与 CFG 节点选中样式呼应，
-       点击图节点时列表侧必须有可见反馈（此前缺此规则，属性设了但用户看不见）。 */
-    .ui-shell-step-item.is-selected { border-color: var(--accent); background: #1f2b3a; }
-
-    /* 运行中断提醒条 */
-    .ui-shell-run-notice {
-      margin: 0 16px 10px; padding: 9px 12px; border-radius: 6px; font-size: 13px;
-      background: #43303a; border: 1px solid #f85149; color: #ffb4ae;
-    }
-
-    /* 顶部提示横幅：默认红色系（降级/错误，如「未连接靶机」「录制失败」），
-       与运行失败提醒条同语（用户要求「红条提示」）。 */
-    .ui-shell-banner {
-      margin: 8px 16px; padding: 9px 12px; border-radius: 6px; font-size: 13px; line-height: 1.5;
-      background: #43303a; border: 1px solid #f85149; color: #ffb4ae;
-    }
-    /* 显式演示模式（?demo=1）用琥珀色区分，避免与错误红条混淆。 */
-    .ui-shell-banner.banner--demo {
-      background: #2d2b1a; border: 1px solid var(--warn); color: var(--warn);
-    }
-
-    /* 高亮占位框（坐标未到位时的即时反馈，虚线区分） */
     .ui-shell-highlight.is-pending { border-style: dashed; opacity: .6; }
-
-    /* 底部：操作栏 */
-    .ui-shell-actions { display: flex; gap: 8px; padding: 10px 16px; background: var(--panel); border-top: 1px solid var(--line); flex-wrap: wrap; }
-    .ui-shell-actions button {
-      background: #34374f; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
-      padding: 7px 14px; font-size: 13px; cursor: pointer;
+    .ui-shell-highlight-tag {
+      font-size: 11px; background: var(--accent); color: var(--text-on-accent);
+      border-radius: 4px; padding: 2px 6px; pointer-events: none;
     }
-    .ui-shell-actions button:hover { border-color: var(--accent); }
-    .ui-shell-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-    .ui-shell-actions button.danger { color: #ff8b82; }
 
-    /* CFG 图形化视图（M3-R4）：控制流图 */
+    .ui-shell-run-notice {
+      margin: 0 16px 10px; padding: 8px 12px; border-radius: 4px; font-size: 13px; font-weight: 400;
+      background: var(--bg-fail); border: 1px solid var(--line); border-left: 3px solid var(--danger);
+      color: var(--text-danger);
+    }
+    .ui-shell-banner {
+      margin: 8px 16px 0; padding: 8px 12px; border-radius: 4px; font-size: 13px; line-height: 1.5; font-weight: 400;
+      background: var(--bg-banner); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+      color: var(--text);
+    }
+    .ui-shell-banner.banner--demo { background: var(--bg-demo); border-left-color: var(--warn); color: var(--warn); }
+    .ui-shell-banner.banner--recording {
+      background: var(--bg-recording); border-left-color: var(--recording); color: var(--text);
+    }
+    .ui-shell-banner.banner--pick {
+      background: var(--bg-banner); border-left-color: var(--accent); color: var(--text);
+    }
+
+    .ui-shell-actions {
+      display: flex; gap: 8px; padding: 0; flex-wrap: wrap; position: relative;
+      background: transparent; border: none; border-radius: 0;
+      backdrop-filter: none; -webkit-backdrop-filter: none;
+    }
+    .ui-shell-actions button, .ui-shell-edit-area button {
+      background: var(--btn); color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+      padding: 7px 12px; font-size: 13px; cursor: pointer;
+    }
+    .ui-shell-actions button:hover, .ui-shell-edit-area button:hover { border-color: var(--accent); }
+    .ui-shell-actions button.primary, .ui-shell-edit-area button.primary, .ui-shell-edit-area button.ui-shell-pick-btn { background: var(--accent); color: var(--text-on-accent); border-color: var(--accent); }
+    .ui-shell-actions button.danger, .ui-shell-edit-area button.danger { color: var(--text-danger); }
+    .ui-shell-actions button:disabled { opacity: .45; cursor: not-allowed; }
+    .ui-shell-insert-wrap { position: relative; display: inline-flex; }
+
+    .ui-shell-insert-menu {
+      position: absolute; top: calc(100% + 6px); left: 0; bottom: auto; width: 200px; background: var(--btn);
+      border: 1px solid var(--line); border-radius: 8px; padding: 6px; z-index: 8;
+    }
+    .ui-shell-insert-item { display: block; width: 100%; text-align: left; margin: 2px 0; }
+    .ui-shell-insert-off { color: var(--muted); font-size: 11px; padding: 7px 10px; }
+
     .ui-shell-cfg {
-      width: 300px; border-left: 1px solid var(--line); background: var(--panel);
-      display: flex; flex-direction: column; min-height: 0; overflow-y: auto; padding: 10px;
+      min-width: 0; background: rgba(22, 24, 28, 0.55);
+      border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
+      display: flex; flex-direction: column; min-height: 0; position: relative;
+      overflow: hidden;
+      backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+      box-shadow: 0 10px 32px rgba(0,0,0,.44), 0 1px 0 rgba(255,255,255,.04);
+    }
+    .ui-shell-cfg, .ui-shell-stage-wrap {
+      transition: none;
+    }
+    .ui-shell-cfg-canvas {
+      flex: 1; overflow: hidden; padding: 10px; position: relative;
+      display: flex; justify-content: center; align-items: flex-start;
+      background: transparent; min-height: 0; min-width: 0;
+      scrollbar-width: none; -ms-overflow-style: none;
+    }
+    .ui-shell-cfg-canvas::-webkit-scrollbar,
+    .ui-shell-cfg::-webkit-scrollbar { display: none; width: 0; height: 0; }
+    /* 点阵只在步骤流图画布：inset 铺满可见面，随 pan 走；不要铺到顶栏。 */
+    .ui-shell-cfg-dots {
+      position: absolute; inset: 0; z-index: 0; pointer-events: none; overflow: hidden;
+      background-image: radial-gradient(circle, rgba(212,212,216,.12) 1px, transparent 1.4px);
+      background-size: 20px 20px;
+    }
+    .ui-shell-cfg-dots.is-live { background-image: none; }
+    .ui-shell-cfg-dots canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    .ui-shell-app-field {
+      position: absolute; inset: 0; pointer-events: none; z-index: 0; overflow: hidden;
+    }
+    .ui-shell-fluid {
+      position: absolute; inset: 0; pointer-events: none; overflow: hidden;
+    }
+    .ui-shell-fluid-follow {
+      position: absolute; inset: -18%;
+      pointer-events: none;
+      transition: transform 640ms ease-out;
+      transform: translate3d(
+        calc((var(--fluid-x) - 50%) * 0.2),
+        calc((var(--fluid-y) - 50%) * 0.2),
+        0
+      );
+    }
+    .ui-shell-fluid-blob {
+      position: absolute; border-radius: 50%; pointer-events: none;
+      filter: blur(72px);
+    }
+    .ui-shell-fluid-blob--1 {
+      width: 52%; height: 58%; left: 2%; top: 4%;
+      background: radial-gradient(circle, rgba(90,143,173,.28) 0%, rgba(90,143,173,0) 72%);
+      animation: ui-fluid-a 26s ease-in-out infinite;
+    }
+    .ui-shell-fluid-blob--2 {
+      width: 44%; height: 48%; right: 0; top: 26%;
+      background: radial-gradient(circle, rgba(168,176,184,.20) 0%, rgba(168,176,184,0) 74%);
+      animation: ui-fluid-b 32s ease-in-out infinite;
+    }
+    .ui-shell-fluid-blob--3 {
+      width: 40%; height: 44%; left: 18%; bottom: 0;
+      background: radial-gradient(circle, rgba(110,160,176,.22) 0%, rgba(110,160,176,0) 70%);
+      animation: ui-fluid-c 29s ease-in-out infinite;
+    }
+    .ui-shell-fluid-spot {
+      position: absolute; pointer-events: none; border-radius: 50%;
+      width: min(46vmin, 380px); height: min(46vmin, 380px);
+      left: var(--fluid-x); top: var(--fluid-y);
+      transform: translate(-50%, -50%);
+      background: radial-gradient(circle, rgba(150,184,198,.13) 0%, rgba(150,184,198,0) 68%);
+      filter: blur(36px);
+      transition: left 480ms ease-out, top 480ms ease-out;
+    }
+    @keyframes ui-fluid-a {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      50% { transform: translate(7%, 9%) scale(1.07); }
+    }
+    @keyframes ui-fluid-b {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      50% { transform: translate(-8%, 6%) scale(1.05); }
+    }
+    @keyframes ui-fluid-c {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      50% { transform: translate(5%, -8%) scale(0.94); }
+    }
+    @keyframes ui-pop-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    @keyframes ui-pop-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px); } }
+    .ui-shell-cfg-tree { z-index: 1; }
+    .ui-shell-cfg-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; color: var(--muted); z-index: 0; }
+    .ui-shell-cfg-edges path { fill: none; }
+    .ui-shell-pack-menu {
+      display: flex; gap: 4px; flex-wrap: nowrap; padding: 3px; border: 1px solid var(--line);
+      background: var(--panel); border-radius: 8px;
+    }
+    .ui-shell-pack-menu[data-pack-float] {
+      position: absolute; z-index: 16; left: 0; top: 0;
+      box-shadow: 0 6px 18px rgba(0,0,0,.4);
+    }
+    .ui-shell-pack-menu button {
+      background: var(--chip); color: var(--text); border: 1px solid var(--line);
+      border-radius: 6px; padding: 3px 8px; font-size: 11px; line-height: 1.2; cursor: pointer;
+    }
+    .ui-shell-pack-menu button:hover { border-color: var(--accent); }
+    .ui-shell-pack-menu, .ui-shell-detail.is-open {
+      animation: ui-pop-in 180ms ease;
+    }
+    .ui-shell-pack-menu.is-leaving, .ui-shell-detail.is-leaving {
+      animation: ui-pop-out 180ms ease forwards;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ui-shell-pack-menu, .ui-shell-detail.is-open, .ui-shell-pack-menu.is-leaving, .ui-shell-detail.is-leaving,
+      .ui-shell-fluid-blob {
+        animation: none;
+      }
+      .ui-shell-fluid-follow, .ui-shell-fluid-spot { transition: none; }
+    }
+    .ui-shell-marquee { pointer-events: none; border: 1px dashed var(--accent); background: var(--accent-fill); }
+    .ui-shell-cfg-node.is-drag { opacity: .4; outline: 1px dashed var(--accent); cursor: grabbing; }
+    .ui-shell-cfg-node.is-drop-target {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px var(--accent-drop);
+    }
+    .ui-shell-drag-ghost {
+      position: fixed; z-index: 50; pointer-events: none;
+      background: var(--ghost); color: var(--text); border: 1px solid var(--accent);
+      border-radius: 6px; padding: 6px 10px; font-size: 12px;
+      max-width: 220px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .ui-shell-drop-line {
+      position: fixed; z-index: 49; pointer-events: none; height: 3px;
+      background: var(--accent); border-radius: 2px;
+    }
+    .ui-shell-pane-title {
+      padding: 10px 14px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line);
+      display: flex; justify-content: space-between;
     }
     .ui-shell-cfg-empty { color: var(--muted); font-size: 13px; padding: 12px; text-align: center; }
-    .ui-shell-cfg-tree { display: flex; flex-direction: column; gap: 8px; }
+    .ui-shell-cfg-tree { display: flex; flex-direction: column; gap: 4px; transform-origin: 0 0; position: relative; overflow: visible; padding-right: 22px; z-index: 1; }
+    .ui-shell-cfg-flow { text-align: center; color: var(--muted); font-size: 16px; line-height: 1; padding: 2px 0; }
 
-    /* 竖向顺序排列（顺序组/顶层） */
-    .ui-shell-cfg-node {
-      display: flex; flex-direction: column; gap: 4px; padding: 7px 10px;
-      background: #2f3147; border: 1px solid transparent; border-radius: 6px; font-size: 13px; cursor: pointer;
+    .ui-shell-cfg-group, .ui-shell-cfg-node {
+      border: 1px dashed var(--line); border-radius: 8px; padding: 6px; background: var(--node);
+      display: flex; flex-direction: column; gap: 4px; font-size: 13px; cursor: pointer;
+      box-shadow: 0 4px 14px rgba(0,0,0,.30);
     }
-    .ui-shell-cfg-node:hover { border-color: var(--accent); }
-    .ui-shell-cfg-label { flex: 1; }
+    .ui-shell-cfg-group-head { font-size: 11px; color: var(--muted); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .ui-shell-cfg-collapse { flex: 0 0 auto; color: var(--muted); cursor: pointer; padding: 0 4px; line-height: 1; }
+    .ui-shell-cfg-leaf {
+      padding: 8px 10px; background: var(--chip); border: 1px solid transparent; border-radius: 6px;
+    }
+    .ui-shell-cfg-kind { color: var(--text); font-weight: 500; }
+    .ui-shell-cfg-label { color: var(--text); }
+    .ui-shell-cfg-leaf ~ .ui-shell-cfg-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+    .ui-shell-cfg-node:hover { border-color: var(--muted); transform: translateY(-1px); }
+    .ui-shell-cfg-node.is-selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring), 0 6px 16px rgba(0,0,0,.34); }
+    .ui-shell-cfg-node.is-unknown { border-style: dashed; border-color: var(--unknown); }
+    .ui-shell-cfg-node.is-running { box-shadow: inset 4px 0 0 var(--accent), 0 4px 14px rgba(0,0,0,.30); }
+    .ui-shell-cfg-node.is-pass { box-shadow: inset 4px 0 0 var(--true), 0 4px 14px rgba(0,0,0,.30); }
+    .ui-shell-cfg-node.is-fail { box-shadow: inset 4px 0 0 var(--danger), 0 4px 14px rgba(0,0,0,.30); }
+    .ui-shell-cfg-node.is-selected.is-running { box-shadow: inset 4px 0 0 var(--accent), 0 0 0 2px var(--accent-ring), 0 4px 14px rgba(0,0,0,.30); }
+    .ui-shell-cfg-node.is-selected.is-pass { box-shadow: inset 4px 0 0 var(--true), 0 0 0 2px var(--accent-ring), 0 4px 14px rgba(0,0,0,.30); }
+    .ui-shell-cfg-node.is-selected.is-fail { box-shadow: inset 4px 0 0 var(--danger), 0 0 0 2px var(--accent-ring), 0 4px 14px rgba(0,0,0,.30); }
 
-    /* 选中态描边（同时只一个） */
-    .ui-shell-cfg-node.is-selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
-    /* 未知控制结构（运行时脏数据的降级显示）：醒目虚线边，提示数据非法但不白屏 */
-    .ui-shell-cfg-node.is-unknown { border-style: dashed; border-color: #d29922; }
-
-    /* 节点运行态色（与列表同语：running 蓝 / pass 绿 / fail 红） */
-    .ui-shell-cfg-node.is-running { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
-    .ui-shell-cfg-node.is-pass { box-shadow: inset 3px 0 0 #3fb950; }
-    .ui-shell-cfg-node.is-fail { border-color: #f85149; background: #43303a; box-shadow: inset 3px 0 0 #f85149; }
-
-    /* if 两枝并排分叉 */
-    .ui-shell-cfg-branch { margin: 4px 0 4px 14px; padding: 4px; border-radius: 5px; display: flex; flex-direction: column; gap: 4px; }
-    .ui-shell-cfg-branch-true { border-left: 2px solid #3fb950; }
-    .ui-shell-cfg-branch-false { border-left: 2px solid #f85149; }
-
-    /* while 回环：循环体缩进 + 回环标记 */
+    .ui-shell-cfg-if-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
+    .ui-shell-cfg-if-grid.is-single { grid-template-columns: 1fr; }
+    .ui-shell-cfg-branch { padding: 6px; border-radius: 6px; min-height: 54px; }
+    .ui-shell-cfg-branch h4 { margin: 0 0 6px; font-size: 11px; color: var(--muted); font-weight: 600; }
+    .ui-shell-cfg-branch-true { border-left: 4px solid var(--true); background: var(--bg-true); }
+    .ui-shell-cfg-branch-false { border-left: 4px solid var(--false); background: var(--bg-false); }
     .ui-shell-cfg-loop-mark { color: var(--accent); font-weight: bold; }
-    .ui-shell-cfg-while-body { margin: 4px 0 4px 14px; padding-left: 8px; border-left: 2px dashed var(--accent); display: flex; flex-direction: column; gap: 4px; }
-    .ui-shell-cfg-seq-body { margin: 4px 0 4px 14px; padding-left: 8px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+    .ui-shell-cfg-while-body { margin-top: 6px; padding-left: 8px; border-left: 2px dashed var(--accent); display: flex; flex-direction: column; gap: 6px; }
+    .ui-shell-cfg-seq-body { margin-top: 4px; padding-left: 8px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+    .ui-shell-cfg-node[data-cfg-seq-in-branch="true"] {
+      border-color: transparent; background: transparent; padding: 0; box-shadow: none;
+    }
+    .ui-shell-pack-name {
+      display: flex; gap: 4px; align-items: center; padding: 2px 2px 0;
+    }
+    .ui-shell-pack-name input {
+      width: 108px; background: var(--input); border: 1px solid var(--line); color: var(--text);
+      border-radius: 6px; padding: 3px 6px; font-size: 11px;
+    }
 
-    /* ── M3-R5 Git 式版本面板 ── */
+    .ui-shell-detail {
+      position: absolute; width: min(280px, 88%); max-height: min(72vh, 520px);
+      opacity: 0; transform: translateY(8px); overflow: hidden; pointer-events: none; z-index: 18;
+      display: flex; flex-direction: column; min-height: 0;
+      background: rgba(22, 24, 28, 0.72); border: 1px solid rgba(255,255,255,.1); border-radius: 8px;
+      box-shadow: 0 10px 28px rgba(0,0,0,.45);
+      backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+      transition: opacity 180ms ease, transform 180ms ease;
+    }
+    .ui-shell-detail.is-open, .ui-shell-detail[data-detail-open="true"] {
+      opacity: 1; transform: none; pointer-events: auto; overflow: hidden;
+    }
+    .ui-shell-detail-scroll {
+      overflow: auto; flex: 1; min-height: 0; max-height: min(64vh, 460px);
+    }
+    .ui-shell-inspector-close {
+      position: absolute; top: 0; right: 0; width: 34px; height: 34px;
+      border: none; cursor: pointer; z-index: 3; color: var(--text);
+      background: rgba(90,143,173,.32);
+      border-radius: 0 8px 0 100%;
+      font-size: 15px; line-height: 26px; padding: 0 4px 8px 10px;
+    }
+    .ui-shell-inspector-close:hover { background: rgba(90,143,173,.48); }
+    .ui-shell-stage-wrap { position: relative; }
+    .ui-shell-step-chip button {
+      background: var(--btn); color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+      padding: 5px 10px; font-size: 12px; cursor: pointer;
+    }
+    .ui-shell-step-chip { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+    .ui-shell-save-notice { color: var(--ok); font-size: 12px; }
+    .ui-shell-target-label { display: flex; align-items: center; gap: 8px; margin-left: auto; color: var(--muted); font-size: 12px; }
+    .ui-shell-edit-area { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+    .ui-shell-edit-actions { display: flex; gap: 8px; width: 100%; align-items: stretch; }
+    .ui-shell-edit-actions [data-action="save-edit"],
+    .ui-shell-edit-actions [data-action="remove"] {
+      flex: 1; min-width: 0; height: 36px; padding: 8px 12px; font-size: 13px; box-sizing: border-box;
+    }
+    .ui-shell-edit-actions [data-action="save-edit"] {
+      background: var(--accent); color: var(--text-on-accent); border-color: var(--accent);
+    }
+    .ui-shell-edit-actions [data-action="remove"] {
+      color: var(--text-danger); border-color: var(--danger);
+    }
+    .ui-shell-assert-hint { color: var(--muted); font-size: 11px; line-height: 1.4; }
+    .ui-shell-edit-title { font-size: 13px; font-weight: 500; color: var(--text); }
+    .ui-shell-edit-field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+    .ui-shell-edit-field input, .ui-shell-edit-field select {
+      background: var(--input); border: 1px solid var(--line); color: var(--text);
+      border-radius: 6px; padding: 7px 9px; font-size: 13px;
+    }
+    .ui-shell-encap { background: var(--bg-encap); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; color: var(--text-accent); font-size: 13px; }
+    .ui-shell-locator-path { color: var(--muted); font-size: 12px; }
+    .ui-shell-locator-path summary { cursor: pointer; margin-bottom: 6px; }
+    .ui-shell-target-select {
+      background: var(--input); border: 1px solid var(--line); color: var(--text);
+      border-radius: 6px; padding: 4px 8px; font-size: 12px;
+    }
+
     .ui-shell-version { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel); display: flex; flex-direction: column; gap: 8px; }
     .ui-shell-ver-title { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
     .ui-shell-ver-branches, .ui-shell-ver-tags, .ui-shell-ver-history { display: flex; flex-direction: column; gap: 4px; }
-    .ui-shell-ver-branch { display: inline-block; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--fg); cursor: pointer; font-size: 13px; }
+    .ui-shell-ver-branch { display: inline-block; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--text); cursor: pointer; font-size: 13px; }
     .ui-shell-ver-branch.is-current { border-color: var(--accent); color: var(--accent); font-weight: 600; }
-    .ui-shell-ver-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; background: #2d333b; color: var(--fg); font-size: 12px; }
-    .ui-shell-ver-commit { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 6px; border-radius: 5px; background: #21262d; font-size: 13px; }
+    .ui-shell-ver-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; background: var(--chip); color: var(--text); font-size: 12px; }
+    .ui-shell-ver-commit { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 6px; border-radius: 5px; background: var(--node); font-size: 13px; }
     .ui-shell-ver-commit-msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .ui-shell-ver-cp { padding: 2px 8px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--fg); cursor: pointer; font-size: 12px; }
+    .ui-shell-ver-cp { padding: 2px 8px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--text); cursor: pointer; font-size: 12px; }
     .ui-shell-ver-cp:hover { border-color: var(--accent); color: var(--accent); }
   </style>
 </head>
 <body>
   <div id="app"></div>
-  <!-- 浏览器入口：实例化 UiShell 并绑定交互（演示模式下用 mock 内核） -->
   <script type="module" src="./app.js"></script>
 </body>
 </html>

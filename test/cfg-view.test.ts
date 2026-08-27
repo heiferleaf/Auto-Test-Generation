@@ -16,12 +16,18 @@
 //   依据 src/executor/executor.ts 的 runNode：`const chosen = result.passed ? branches[0] : branches[1]`。
 //   若图把两枝画反，用户看到的流向就与真实执行相反 —— 属最危险的 UI 谬误，故必须测。
 
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, vi } from 'vitest';
 import type { Locator, Script, Step } from '../src/types/step';
 import { SCRIPT_SCHEMA } from '../src/types/step';
 import { UiShell } from '../src/ui/shell';
-import { buildCfgGraph, CfgView } from '../src/ui/cfg-view';
+import { buildCfgGraph, CfgView, branchEdgeLine, loopEdgePath, isInwardVIntoGroup } from '../src/ui/cfg-view';
 import { importScript } from '../src/script/io';
+
+const FIXTURE_DIR = join(dirname(fileURLToPath(import.meta.url)), '../scripts/fixtures');
+const CFG_CONNECTORS_JSON = readFileSync(join(FIXTURE_DIR, 'cfg-connectors-sample.json'), 'utf8');
 
 // ───────────────────────── 测试夹具 ─────────────────────────
 
@@ -127,6 +133,7 @@ describe('buildCfgGraph：从 Script 构建控制流图模型', () => {
     // 两条从判断节点出发的分支边，分别标注 true / false
     expect(g.edges).toContainEqual({ from: 'i', to: 't', kind: 'true' });
     expect(g.edges).toContainEqual({ from: 'i', to: 'f', kind: 'false' });
+    expect(g.edges).not.toContainEqual({ from: 't', to: 'f', kind: 'flow' });
   });
 
   it('选择组只有 then 分支时，不臆造 else 边', () => {
@@ -139,8 +146,9 @@ describe('buildCfgGraph：从 Script 构建控制流图模型', () => {
     const g = buildCfgGraph(scriptOf([
       group('w', 'while', [leaf('p'), leaf('q')], { loopCount: 3 }),
     ]));
-    expect(g.edges).toContainEqual({ from: 'w', to: 'p', kind: 'flow' });
-    // 回环：循环体最后一步回到循环头
+    expect(g.edges).toContainEqual({ from: 'p', to: 'q', kind: 'flow' });
+    // 回环：循环体最后一步回到循环头。不从组头再拉 flow 进第一个子节点。
+    expect(g.edges).not.toContainEqual({ from: 'w', to: 'p', kind: 'flow' });
     expect(g.edges).toContainEqual({ from: 'q', to: 'w', kind: 'loop' });
   });
 
@@ -275,21 +283,7 @@ describe('CfgView 渲染：节点与边', () => {
 
 // ───────────────── 3. 双向联动（§2.7「点击图节点↔点击列表项」）─────────────────
 
-describe('双向联动：图节点 ↔ 步骤列表项', () => {
-  it('点击图节点 → 该步被选中（图节点与列表项同时出现选中态）', () => {
-    const { mount } = mountShell(scriptOf([leaf('a'), leaf('b')]));
-    (mount.querySelector('[data-cfg-node="b"]') as HTMLElement).click();
-
-    expect(mount.querySelector('[data-cfg-node="b"]')!.getAttribute('data-cfg-selected')).toBe('true');
-    expect(mount.querySelector('[data-step-id="b"]')!.getAttribute('data-step-selected')).toBe('true');
-  });
-
-  it('点击列表项 → 图中对应节点同步选中（反向联动）', () => {
-    const { mount } = mountShell(scriptOf([leaf('a'), leaf('b')]));
-    (mount.querySelector('[data-step-id="a"]') as HTMLElement).click();
-
-    expect(mount.querySelector('[data-cfg-node="a"]')!.getAttribute('data-cfg-selected')).toBe('true');
-  });
+describe('双向联动：图节点选中', () => {
 
   it('选中切换时，旧选中态被清除（同时只有一个选中）', () => {
     const { mount } = mountShell(scriptOf([leaf('a'), leaf('b')]));
@@ -329,35 +323,28 @@ describe('双向联动：图节点 ↔ 步骤列表项', () => {
   // code-review 复核轮打回：`resetRunStatus` 会调 `cfgView.update()`，
   // 而 update 内部把自己的 selectedId 清空 —— 但 UiShell.selectedStepId 没变，
   // 结果整个运行期间"列表显示选中、图上丢失"，两个兄弟视图状态分叉。
-  it('运行全部之后选中态在图与列表上都保留（重建图不得丢选中）', async () => {
+  it('运行全部之后选中态在 CFG 上保留（重建图不得丢选中）', async () => {
     const { mount, shell } = mountShell(scriptOf([leaf('a'), leaf('b')]));
     shell.selectStep('b');
     await shell.runAll();
 
     expect(shell.getSelectedStepId()).toBe('b');
     expect(mount.querySelector('[data-cfg-node="b"]')!.getAttribute('data-cfg-selected')).toBe('true');
-    expect(mount.querySelector('[data-step-id="b"]')!.getAttribute('data-step-selected')).toBe('true');
   });
 
-  it('选中态在图与列表之间始终一致（不出现一边有一边无）', () => {
+  it('选中态在 CFG 上可见（不再并排维护步骤列表）', () => {
     const { mount, shell } = mountShell(scriptOf([leaf('a'), leaf('b')]));
     shell.selectStep('a');
     const cfgSel = [...mount.querySelectorAll('[data-cfg-selected="true"]')]
       .map((el) => el.getAttribute('data-cfg-node'));
-    const listSel = [...mount.querySelectorAll('[data-step-selected="true"]')]
-      .map((el) => el.getAttribute('data-step-id'));
     expect(cfgSel).toEqual(['a']);
-    expect(listSel).toEqual(['a']);
   });
 
-  it('选中的列表项带 is-selected class（属性之外还要有可见样式挂点）', () => {
-    // 教训：只断言 data-* 属性，无法发现"状态传到了但用户看不见"——
-    // 曾出现列表项只打 data-step-selected 而 index.html 没有对应 CSS 规则，
-    // 真机上点 CFG 节点，列表侧零视觉反馈。故同时要求 class 挂点。
+  it('选中的 CFG 节点带 is-selected class（属性之外还要有可见样式挂点）', () => {
     const { mount, shell } = mountShell(scriptOf([leaf('a'), leaf('b')]));
     shell.selectStep('a');
-    expect(mount.querySelector('[data-step-id="a"]')!.className).toContain('is-selected');
-    expect(mount.querySelector('[data-step-id="b"]')!.className).not.toContain('is-selected');
+    expect(mount.querySelector('[data-cfg-node="a"]')!.className).toContain('is-selected');
+    expect(mount.querySelector('[data-cfg-node="b"]')!.className).not.toContain('is-selected');
   });
 
   it('UiShell 暴露 selectStep / getSelectedStepId 作为唯一选中态真相源', () => {
@@ -431,11 +418,10 @@ describe('运行态高亮：CFG 节点随执行进度联动', () => {
     expect(el.className).toContain('is-fail');
   });
 
-  it('CFG 节点状态与列表项状态始终一致（同一真相源，不各算一套）', async () => {
+  it('CFG 节点运行态写在图上（不再对照已删除的步骤列表）', async () => {
     const { mount, shell } = mountShell(scriptOf([leaf('a')]));
     await shell.runAll();
-    expect(mount.querySelector('[data-cfg-node="a"]')!.getAttribute('data-cfg-status'))
-      .toBe(mount.querySelector('[data-step-id="a"]')!.getAttribute('data-step-status'));
+    expect(mount.querySelector('[data-cfg-node="a"]')!.getAttribute('data-cfg-status')).toBe('pass');
   });
 
   it('循环体内子步骤的运行态也反映到图上（嵌套节点不遗漏）', async () => {
@@ -590,5 +576,238 @@ describe('CfgView 组件边界（SRP / DIP）', () => {
     // 同一 DOM 节点被原地更新（引用不变），而非被重建替换
     expect(after).toBe(before);
     expect(after!.getAttribute('data-cfg-status')).toBe('running');
+  });
+});
+
+// ───────────────── 6. 边几何：同层分支头 / 回环绕组框 / 不倒插入组 ─────────────────
+
+function asBox(left: number, top: number, width: number, height: number) {
+  return { left, top, width, height };
+}
+
+describe('CFG 边几何（与执行同层，不倒插入组框）', () => {
+  const origin = asBox(0, 0, 400, 400);
+  const ifGroup = asBox(10, 10, 300, 280);
+  const ifHead = asBox(10, 10, 300, 24);
+  const trueHead = asBox(10, 40, 140, 16);
+  const falseHead = asBox(160, 40, 140, 16);
+
+  it('选择组：True/False 边从条件头底边到同层分支头，不从组外框底边出发', () => {
+    const t = branchEdgeLine(ifHead, trueHead, origin);
+    const f = branchEdgeLine(ifHead, falseHead, origin);
+    expect(t.y1).toBe(ifHead.top + ifHead.height);
+    expect(t.y1).toBeLessThan(trueHead.top);
+    expect(t.y2).toBe(trueHead.top);
+    expect(f.x2).not.toBe(t.x2);
+    expect(isInwardVIntoGroup(ifGroup, t, origin)).toBe(false);
+    expect(isInwardVIntoGroup(ifGroup, f, origin)).toBe(false);
+  });
+
+  it('旧几何（组底→组内子节点）被识别为倒插入盒的 V', () => {
+    const oldV = {
+      x1: ifGroup.left + ifGroup.width / 2,
+      y1: ifGroup.top + ifGroup.height,
+      x2: trueHead.left + trueHead.width / 2,
+      y2: trueHead.top,
+    };
+    expect(isInwardVIntoGroup(ifGroup, oldV, origin)).toBe(true);
+  });
+
+  it('True 与 False 之间没有顺序边（并列分支，不是先后）', () => {
+    const g = buildCfgGraph(scriptOf([group('i', 'if', [leaf('t'), leaf('f')])]));
+    expect(g.edges.filter((e) => e.kind === 'flow')).toEqual([]);
+    expect(g.edges).not.toContainEqual({ from: 't', to: 'f', kind: 'flow' });
+    expect(g.edges).toContainEqual({ from: 'i', to: 't', kind: 'true' });
+    expect(g.edges).toContainEqual({ from: 'i', to: 'f', kind: 'false' });
+  });
+
+  it('True 分支是顺序组时，true 边连到该组（同层分支头），不连到组内叶子', () => {
+    const g = buildCfgGraph(scriptOf([
+      group('i', 'if', [group('tg', 'sequence', [leaf('x'), leaf('y')]), leaf('f')]),
+    ]));
+    expect(g.edges).toContainEqual({ from: 'i', to: 'tg', kind: 'true' });
+    expect(g.edges).not.toContainEqual({ from: 'i', to: 'x', kind: 'true' });
+    expect(g.edges).not.toContainEqual({ from: 'tg', to: 'f', kind: 'flow' });
+  });
+
+  it('回环路径从末步右侧绕出组框再回到循环头，不穿过组内', () => {
+    const groupBox = asBox(10, 10, 200, 220);
+    const head = asBox(10, 10, 200, 24);
+    const last = asBox(20, 180, 160, 40);
+    const d = loopEdgePath(last, head, groupBox, origin);
+    const xOut = groupBox.left + groupBox.width + 14;
+    expect(d).toContain(`L ${xOut} `);
+    expect(xOut).toBeGreaterThan(groupBox.left + groupBox.width);
+    // 路径含循环头高度，而不是组底
+    expect(d).toContain(` ${head.top + head.height / 2}`);
+    expect(d).not.toMatch(new RegExp(`L \\d+ ${groupBox.top + groupBox.height}($| )`));
+  });
+
+  it('DOM：if 的 SVG 边 data-from/to 是同层节点；没有 minimap；没有 flow SVG', () => {
+    const host = document.createElement('div');
+    const view = new CfgView({ mount: host });
+    view.update(scriptOf([group('i', 'if', [leaf('t'), leaf('f')])]));
+    const trueE = host.querySelector('[data-cfg-edge="true"]');
+    const falseE = host.querySelector('[data-cfg-edge="false"]');
+    expect(trueE?.getAttribute('data-from')).toBe('i');
+    expect(trueE?.getAttribute('data-to')).toBe('t');
+    expect(falseE?.getAttribute('data-from')).toBe('i');
+    expect(falseE?.getAttribute('data-to')).toBe('f');
+    expect(host.querySelector('[data-cfg-edge="flow"]')).toBeNull();
+    expect(host.querySelector('[data-cfg-minimap]')).toBeNull();
+  });
+
+  it('DOM：循环 SVG 是绕行 path，data-to 是循环头', () => {
+    const host = document.createElement('div');
+    const view = new CfgView({ mount: host });
+    view.update(scriptOf([group('w', 'while', [leaf('p'), leaf('q')], { loopCount: 2 })]));
+    const loop = host.querySelector('[data-cfg-edge="loop"]');
+    expect(loop?.tagName.toLowerCase()).toBe('path');
+    expect(loop?.getAttribute('data-from')).toBe('q');
+    expect(loop?.getAttribute('data-to')).toBe('w');
+    expect(host.querySelector('[data-cfg-minimap]')).toBeNull();
+  });
+
+  it('mock 布局下：分支线从条件头出发，y1 远小于组外框底边（不是倒插 V）', () => {
+    const orig = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      if (this.classList.contains('ui-shell-cfg-tree')) {
+        return { x: 0, y: 0, left: 0, top: 0, width: 400, height: 400, right: 400, bottom: 400, toJSON() {} } as DOMRect;
+      }
+      const nodeId = this.getAttribute('data-cfg-node')
+        ?? this.closest('[data-cfg-node]')?.getAttribute('data-cfg-node');
+      if (this.getAttribute('data-cfg-anchor') === 'head' && nodeId === 'i') {
+        return { x: 10, y: 10, left: 10, top: 10, width: 300, height: 24, right: 310, bottom: 34, toJSON() {} } as DOMRect;
+      }
+      if (this.getAttribute('data-cfg-anchor') === 'branch-head') {
+        const br = this.closest('[data-cfg-branch]')?.getAttribute('data-cfg-branch');
+        if (br === 'true') {
+          return { x: 10, y: 40, left: 10, top: 40, width: 140, height: 16, right: 150, bottom: 56, toJSON() {} } as DOMRect;
+        }
+        if (br === 'false') {
+          return { x: 160, y: 40, left: 160, top: 40, width: 140, height: 16, right: 300, bottom: 56, toJSON() {} } as DOMRect;
+        }
+      }
+      if (this.getAttribute('data-cfg-node') === 'i') {
+        return { x: 10, y: 10, left: 10, top: 10, width: 300, height: 280, right: 310, bottom: 290, toJSON() {} } as DOMRect;
+      }
+      return { x: 0, y: 0, left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0, toJSON() {} } as DOMRect;
+    };
+    try {
+      const host = document.createElement('div');
+      document.body.appendChild(host);
+      const view = new CfgView({ mount: host });
+      view.update(scriptOf([group('i', 'if', [leaf('t'), leaf('f')])]));
+      const t = host.querySelector('[data-cfg-edge="true"]')!;
+      const y1 = Number(t.getAttribute('y1'));
+      expect(y1).toBe(34);
+      expect(y1).toBeLessThan(100);
+      expect(isInwardVIntoGroup(
+        ifGroup,
+        {
+          x1: Number(t.getAttribute('x1')),
+          y1,
+          x2: Number(t.getAttribute('x2')),
+          y2: Number(t.getAttribute('y2')),
+        },
+        origin,
+      )).toBe(false);
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = orig;
+    }
+  });
+});
+
+// 截图打回：Import cfg-connectors-sample 后，True/False 是 sequence 包装。
+// 旧 paintEdges 从 if 组外框底边拉线，箭头从组下方朝上插进两枝，呈 V。
+// 既有用例只 mock 了叶子 then/else，测不到这条真实 fixture 路径。
+describe('截图回归：cfg-connectors-sample 的 if 不得从组底倒插 V', () => {
+  const origin = asBox(0, 0, 400, 520);
+  const ifGroup = asBox(20, 80, 360, 280); // 底边 y=360，包住 True/False
+  const ifHead = asBox(20, 80, 360, 24);   // 底边 y=104，条件头
+  const trueColHead = asBox(20, 120, 170, 16);
+  const falseColHead = asBox(200, 120, 170, 16);
+
+  function lineOf(el: Element) {
+    return {
+      x1: Number(el.getAttribute('x1')),
+      y1: Number(el.getAttribute('y1')),
+      x2: Number(el.getAttribute('x2')),
+      y2: Number(el.getAttribute('y2')),
+    };
+  }
+
+  it('jsdom boot UiShell 导入 fixture 后：没有从 if 组下方指向 True/False 头的向上边', () => {
+    const orig = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      if (this.classList.contains('ui-shell-cfg-tree')) {
+        return { x: 0, y: 0, left: 0, top: 0, width: 400, height: 520, right: 400, bottom: 520, toJSON() {} } as DOMRect;
+      }
+      const nodeId = this.getAttribute('data-cfg-node')
+        ?? this.closest('[data-cfg-node]')?.getAttribute('data-cfg-node');
+      if (this.getAttribute('data-cfg-anchor') === 'head' && nodeId === 'if-send') {
+        return { x: 20, y: 80, left: 20, top: 80, width: 360, height: 24, right: 380, bottom: 104, toJSON() {} } as DOMRect;
+      }
+      if (this.getAttribute('data-cfg-anchor') === 'branch-head') {
+        const br = this.closest('[data-cfg-branch]')?.getAttribute('data-cfg-branch');
+        if (br === 'true') {
+          return { x: 20, y: 120, left: 20, top: 120, width: 170, height: 16, right: 190, bottom: 136, toJSON() {} } as DOMRect;
+        }
+        if (br === 'false') {
+          return { x: 200, y: 120, left: 200, top: 120, width: 170, height: 16, right: 370, bottom: 136, toJSON() {} } as DOMRect;
+        }
+      }
+      // sequence 包装整盒：在条件头下方、组底上方。若误用它当 from，也会倒插。
+      if (this.getAttribute('data-cfg-node') === 'if-send-true') {
+        return { x: 24, y: 140, left: 24, top: 140, width: 162, height: 80, right: 186, bottom: 220, toJSON() {} } as DOMRect;
+      }
+      if (this.getAttribute('data-cfg-node') === 'if-send-false') {
+        return { x: 204, y: 140, left: 204, top: 140, width: 162, height: 80, right: 366, bottom: 220, toJSON() {} } as DOMRect;
+      }
+      if (this.getAttribute('data-cfg-node') === 'if-send') {
+        return { x: 20, y: 80, left: 20, top: 80, width: 360, height: 280, right: 380, bottom: 360, toJSON() {} } as DOMRect;
+      }
+      if (this.getAttribute('data-cfg-node') === 'while-retry') {
+        return { x: 20, y: 380, left: 20, top: 380, width: 360, height: 120, right: 380, bottom: 500, toJSON() {} } as DOMRect;
+      }
+      return { x: 0, y: 0, left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0, toJSON() {} } as DOMRect;
+    };
+    try {
+      const script = importScript(CFG_CONNECTORS_JSON);
+      const { mount } = mountShell(script);
+
+      const trueE = mount.querySelector('[data-cfg-edge="true"]')!;
+      const falseE = mount.querySelector('[data-cfg-edge="false"]')!;
+      expect(trueE).toBeTruthy();
+      expect(falseE).toBeTruthy();
+      expect(trueE.getAttribute('data-from')).toBe('if-send');
+      expect(trueE.getAttribute('data-to')).toBe('if-send-true');
+      expect(falseE.getAttribute('data-to')).toBe('if-send-false');
+
+      const t = lineOf(trueE);
+      const f = lineOf(falseE);
+      // 从条件头底边向下进列头，而不是从组外框底边朝上插。
+      expect(t.y1).toBe(ifHead.top + ifHead.height);
+      expect(f.y1).toBe(ifHead.top + ifHead.height);
+      expect(t.y2).toBe(trueColHead.top);
+      expect(f.y2).toBe(falseColHead.top);
+      expect(t.y1).toBeLessThan(t.y2);
+      expect(f.y1).toBeLessThan(f.y2);
+      expect(t.y1).toBeLessThan(ifGroup.top + ifGroup.height - 50);
+      expect(isInwardVIntoGroup(ifGroup, t, origin)).toBe(false);
+      expect(isInwardVIntoGroup(ifGroup, f, origin)).toBe(false);
+      // True/False 并列，不得有顺序 SVG。
+      expect(mount.querySelector('[data-cfg-edge="flow"]')).toBeNull();
+
+      const svg = mount.querySelector('[data-cfg-edges]') as SVGElement;
+      // 边画布必须用像素钉在树原点：CSS inset/100% 会把 viewBox 压扁，箭头看起来像从组底朝上插。
+      expect(svg.style.position).toBe('absolute');
+      expect(svg.style.left).toBe('0px');
+      expect(svg.style.top).toBe('0px');
+      expect(svg.style.width).toMatch(/px$/);
+      expect(svg.style.height).toMatch(/px$/);
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = orig;
+    }
   });
 });

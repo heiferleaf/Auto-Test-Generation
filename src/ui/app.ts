@@ -13,6 +13,7 @@
 import { UiShell, type UiKernel } from './shell';
 import type { Locator } from '../cdp/adapter';
 import { WsKernel } from './ws-kernel';
+import { resolveCdpPort } from './cdp-port';
 
 /** 浏览器内演示内核：行为与单测 MockKernel 同构，但独立存在（测试文件不进浏览器）。 */
 class DemoKernel implements UiKernel {
@@ -57,10 +58,16 @@ class DemoKernel implements UiKernel {
     this.listeners.get(event)?.forEach((cb) => cb(data));
   }
 
-  async playback(script: import('../types/step').Script) {
+  async playback(script: import('../types/step').Script, fromStepId?: string) {
     log('playback', script.steps.length, 'steps');
     // 演示逐步进度：与真机桥经 'step-progress' 推送的形态一致（UiShell 不感知差异）。
+    // 支持「从此处运行」：前序跳过 fromStepId 之前的顶层步骤（演示与真机语义一致）。
+    let started = fromStepId === undefined;
     for (const s of script.steps) {
+      if (!started) {
+        if (s.id === fromStepId) started = true;
+        else continue;
+      }
       this.emit('step-progress', { stepId: s.id, status: 'running' });
       await new Promise((r) => setTimeout(r, 300));
       this.emit('step-progress', { stepId: s.id, status: 'pass' });
@@ -81,8 +88,10 @@ function boot() {
   // ?demo=1 为显式逃生通道（无靶机时纯演示），但默认不再是 demo。
   const demo = new URLSearchParams(location.search).get('demo') === '1';
   // 端口来源：URL 参数 ?cdp=9233 优先，回退默认 9222。浏览器环境无 process，不能直接读 env。
-  const cdpParam = new URLSearchParams(location.search).get('cdp');
-  const cdpPort = cdpParam ? Number(cdpParam) : 9222;
+  const cdpPort = resolveCdpPort(
+    location.search,
+    (window as unknown as { __ATG_CDP_PORT?: number }).__ATG_CDP_PORT,
+  );
 
   // 真机内核：WsKernel 经 WebSocket 桥接 Node 侧 PlaywrightCdpAdapter；
   // 显式 demo 模式：DemoKernel（浏览器可运行，无需真机，操作为模拟）。
@@ -92,6 +101,7 @@ function boot() {
     : new WsKernel(`ws://${location.host}/kernel-ws`);
 
   const shell = new UiShell({ kernel, mount });
+  document.title = '测试步骤中台';
 
   // 刷新顶部录制指示灯（录制态变化后）。
   const refreshHeader = () => {
@@ -107,23 +117,26 @@ function boot() {
   if (demo) {
     shell.setBanner('演示模式（显式 ?demo=1）：内置示例内核，操作为模拟，不驱动真实软件。', true);
   } else {
-    // 默认连真机：连接成功 → 开截图流（中间区看到软件画面）；
+    // 默认连真机：连接成功后不刷实时画面；截图跟步骤走。
     // 失败 → 降级：顶部红条提示，但面板仍可手动插入/编辑步骤（操作不下发）。
     shell.connect({ port: cdpPort })
-      .then(() => { shell.startFrameStream(1000); refreshHeader(); })
+      .then(() => { refreshHeader(); })
       .catch((e) => {
         // 不用 alert（jsdom/无头环境无实现，且不符合 spec 交互）；以横幅提示替代。
         console.error('[UiShell] 连接靶机失败:', e instanceof Error ? e.message : e);
-        shell.setBanner(`未连接靶机：请先启动软件调试端口 ${cdpPort}（如 scripts/launch-codebuddy.cmd）。当前面板仅可手动插入/编辑步骤，操作不会下发到真实软件。`);
+        shell.setBanner(`未连接靶机：调试端口 ${cdpPort} 及自动探测的本机 /json 均无 DevTools。请先用启动脚本打开靶机。当前面板仅可手动插入/编辑步骤。`);
       });
   }
 
   // 先渲染骨架（含可能的降级横幅）
   shell.render();
 
-  // 初始示例脚本（演示「录制产出的步骤形态」：click/fill 仅由录制产生，此处用种子数据替代真实录制回放）。
-  shell.insertStep({ id: 'seed-1', type: 'click', source: 'recorded', locator: { role: 'button', name: '打开设置' } });
-  shell.insertStep({ id: 'seed-2', type: 'fill', source: 'recorded', locator: { testId: 'search' }, params: { value: '关键词' } });
+  // 演示模式才放两条种子步，让无靶机时也能看见 CFG 形态。
+  // 真机工作台必须空脚本起步：click/fill 只能来自靶机录制（spec §2.2）。
+  if (demo) {
+    shell.insertStep({ id: 'seed-1', type: 'click', source: 'recorded', locator: { role: 'button', name: '打开设置' } });
+    shell.insertStep({ id: 'seed-2', type: 'fill', source: 'recorded', locator: { testId: 'search' }, params: { value: '关键词' } });
+  }
 
   // 用户交互（插入 4 类、编辑区、建组、运行、导出、录制……）全部由 UiShell 内部事件委托处理，
   // app.ts 不再用 prompt/alert 实现交互（避免 jsdom 不可测、且不符合 spec §2.6 真实编辑区）。

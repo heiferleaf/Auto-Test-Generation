@@ -175,8 +175,8 @@ describe('录制流程', () => {
   });
 });
 
-describe('步骤列表渲染', () => {
-  it('渲染时侧边列表包含每条 step 的友好描述', () => {
+describe('CFG 步骤渲染', () => {
+  it('渲染时 CFG 包含每条 step 的友好描述', () => {
     const k = makeMockKernel();
     const s = emptyScript();
     s.steps = [
@@ -186,10 +186,10 @@ describe('步骤列表渲染', () => {
     const mount = document.createElement('div');
     const shell = new UiShell({ kernel: k as any, mount, script: s });
     shell.render();
-    const items = mount.querySelectorAll('[data-step-item]');
+    const items = mount.querySelectorAll('[data-cfg-node]');
     expect(items.length).toBe(2);
     expect(items[0].textContent).toContain('点击');
-    expect(items[1].textContent).toContain('填写');
+    expect(items[1].textContent).toContain('填充');
     expect(items[1].textContent).toContain('张三');
   });
 });
@@ -256,8 +256,9 @@ describe('回放流程', () => {
     const shell = new UiShell({ kernel: k as any, mount: document.createElement('div'), script: s });
     const res = await shell.playback();
     // UI 壳不依赖执行器细节，只把脚本交给内核 playback 编排
+    // runAll 现以 (script, fromStepId?) 调用（§2.7）；从头跑时 fromStepId 为 undefined。
     expect(k.playback).toHaveBeenCalledTimes(1);
-    expect(k.playback).toHaveBeenCalledWith(s);
+    expect(k.playback).toHaveBeenCalledWith(s, undefined);
     expect(res.ok).toBe(true);
   });
 
@@ -346,21 +347,17 @@ describe('目标选择', () => {
 });
 
 describe('步骤编辑组件（UI 渲染）', () => {
-  it('render 时每条步骤含 删除/上移/下移 按钮', () => {
+  it('CFG 顶层节点可拖拽调序，不再渲染上下箭头', () => {
     const k = makeMockKernel();
     const s = emptyScript();
     s.steps = [makeStep('click'), makeStep('fill')];
     const mount = document.createElement('div');
     const shell = new UiShell({ kernel: k as any, mount, script: s });
     shell.render();
-    const items = mount.querySelectorAll('[data-step-item]');
-    expect(items.length).toBe(2);
-    // 每条至少 3 个操作按钮
-    const btns = items[0].querySelectorAll('button[data-action]');
-    const acts = Array.from(btns).map((b) => b.getAttribute('data-action'));
-    expect(acts).toContain('remove');
-    expect(acts).toContain('up');
-    expect(acts).toContain('down');
+    const node = mount.querySelector('[data-cfg-node]') as HTMLElement;
+    expect(node.getAttribute('data-cfg-draggable')).toBe('true');
+    expect(mount.querySelector('[data-action="up"]')).toBeNull();
+    expect(mount.querySelector('[data-action="down"]')).toBeNull();
   });
 
   it('顶部含 插入步骤 / 包成选择组 / 包成循环组 / 运行全部 入口（spec §2.3.0/§2.3.1）', () => {
@@ -370,14 +367,13 @@ describe('步骤编辑组件（UI 渲染）', () => {
     shell.render();
     const actions = Array.from(mount.querySelectorAll('[data-action]')).map((b) => b.getAttribute('data-action'));
     expect(actions).toContain('insert');
-    expect(actions).toContain('wrap-if');
-    expect(actions).toContain('wrap-while');
     expect(actions).toContain('run-all');
-    // 独立「加断言」入口已移除：断言是 4 类手动插入之一（点「插入步骤」→ assert）。
+    expect(mount.querySelector('[data-actions] [data-action="wrap-if"]')).toBeNull();
+    expect(mount.querySelector('[data-actions] [data-action="wrap-while"]')).toBeNull();
     expect(actions).not.toContain('add-assert');
   });
 
-  it('点击删除按钮移除对应步骤（委托 removeStep）', () => {
+  it('选中步骤后详情删除可移除该步；确定和删除同一行', () => {
     const k = makeMockKernel();
     const s = emptyScript();
     const st = makeStep('click');
@@ -385,8 +381,18 @@ describe('步骤编辑组件（UI 渲染）', () => {
     const mount = document.createElement('div');
     const shell = new UiShell({ kernel: k as any, mount, script: s });
     shell.render();
-    // 模拟点击第一条的删除
-    const del = mount.querySelector('[data-step-item] button[data-action="remove"]') as HTMLButtonElement;
+    (mount.querySelector(`[data-cfg-node="${st.id}"]`) as HTMLElement).click();
+    (mount.querySelector('[data-action="edit"]') as HTMLElement).click();
+    const row = mount.querySelector('[data-edit-area] .ui-shell-edit-actions') as HTMLElement;
+    const save = row.querySelector('[data-action="save-edit"]') as HTMLButtonElement;
+    const del = row.querySelector('[data-action="remove"]') as HTMLButtonElement;
+    expect(save).toBeTruthy();
+    expect(save.classList.contains('primary')).toBe(true);
+    expect(del).toBeTruthy();
+    expect(del.textContent).toBe('删除');
+    expect(save.parentElement).toBe(row);
+    expect(del.parentElement).toBe(row);
+    expect(mount.querySelector('[data-inspector-close]')?.getAttribute('data-action')).toBe('close-inspector');
     del.click();
     expect(shell.getScript().steps.find((x) => x.id === st.id)).toBeUndefined();
     expect(shell.getScript().steps.length).toBe(1);

@@ -4,6 +4,7 @@
 
 import type { CdpAdapter } from '../cdp/adapter';
 import type { Step, Locator, StepType } from '../types/step';
+import { runAssertion } from './assert';
 
 export type ActionHandler = (
   adapter: CdpAdapter,
@@ -41,7 +42,21 @@ export const actionHandlers: Record<Exclude<StepType, 'assert'>, ActionHandler> 
   // waitUntil：等待某断言条件成立（轮询至 timeoutMs）。本期以 wait 语义兜底，
   // 真实"轮询断言"由后续断言引擎接入（避免 actions 反向依赖 executor）。
   waitUntil: async (adapter, step) => {
-    await adapter.wait({ durationMs: step.params?.timeoutMs });
+    const assertion = step.params?.assertion;
+    const timeout = step.params?.timeoutMs ?? 10_000;
+    if (!assertion) {
+      await adapter.wait({ durationMs: timeout });
+      return;
+    }
+    const deadline = Date.now() + timeout;
+    for (;;) {
+      const result = await runAssertion(adapter, assertion);
+      if (result.passed) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`waitUntil 超时（${timeout}ms）: ${assertion.kind}`);
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
   },
   // repeat 是 while 循环组的表达（带 children），不应作为叶子执行；
   // 若作为叶子到达此处，说明脚本结构非法（缺 children）。

@@ -188,11 +188,12 @@ M1 执行器内部循环即后续 MCP Tool 的语义来源（architecture/archit
 | `executor.run(script)` | `actions.execute_steps` |
 | `cdp.snapshot()` | `page.snapshot` |
 | `script.io.import/export` | `script.import` / `script.export` |
+| `UiShell.loadScript` / 桥 RPC `loadScript` | **`script.open`**（把 Script JSON 推进**当前工作台会话**；工作台「导入」按钮仍保留） |
 | `script.edit.*` | `script.update_step` |
 | `cdp.connect/listTargets` | `app.connect` / `app.list_targets` |
 | `assert.run` | `assert.run` |
 
-> M1 不实现 MCP Server 进程，但将上述方法在 `index.ts` 导出为库函数，M3 直接封装为 Tool，避免重写。
+> M1 不实现 MCP Server 进程，但将上述方法在库函数中对齐语义，M4 封装为 Tool，避免重写。第一期 MCP 必须含 **`script.open`**：Agent 在对话里生成脚本后，把同一份 JSON 推进当前 UI 会话（内核已有 `loadScript` + 桥 RPC）。这**不是**替代 `script.import`（文件解析）也不是替代工作台「导入」按钮——三条路径并存。不要把可视化理解成「只能 Import」。
 
 ---
 

@@ -14,11 +14,13 @@ import type {
   Script, Step, StepType, Assertion, AssertionKind,
   StepRunStatus, StepProgressEvent,
 } from '../types/step';
-import { Recorder, type InteractionEvent } from '../recorder/recorder';
-import { ScriptEditor } from '../editor/editor';
+import { Recorder, type InteractionEvent, sameFillLocator, shouldKeepRecordingEvent } from '../recorder/recorder';
+import { ScriptEditor, isAtomicGroup } from '../editor/editor';
+import { parseShotsMap, shotToBase64, shotToDataUrl } from '../script/io';
 import { SCRIPT_SCHEMA } from '../types/step';
 import { CfgView } from './cfg-view';
-import { TYPE_LABEL, describeLocator } from './step-label';
+import { TYPE_LABEL, describeLocator, describeStepBrief } from './step-label';
+import { mapHighlightRect, viewportFromRect } from './highlight-map';
 import {
   createStore,
   commit as vCommit,
@@ -31,12 +33,16 @@ import {
   type VersionStore,
 } from '../script/version-store';
 import { VersionPanel } from './version-panel';
+import { WORDMARK_TEXT, mountWordmark } from './wordmark';
 
 /** 回放结果（与 cli.CliResult 同构，但由内核产生，UI 壳不依赖 cli 模块）。 */
 export type PlaybackResult = { ok: boolean; failedStepId?: string };
 
-/** 手动可插入的步骤类型（spec §2.3.1 仅 4 类；click/fill 等仅由录制产生）。 */
-type ManualStepType = 'wait' | 'waitUntil' | 'assert' | 'repeat';
+/** 手动可插入的步骤类型（spec §2.4 仅 3 类；click/fill 等仅由录制产生，循环走组操作）。 */
+type ManualStepType = 'wait' | 'waitUntil' | 'assert';
+
+/** 详情/打包簇出现与消失的时长，与 index.html 的 180ms 动画对齐。 */
+const UI_MOTION_MS = 180;
 
 // 运行态类型定义已迁至 `src/types/step.ts`（与 StepType/ControlKind 同处真相源），
 // 因同级视图组件 cfg-view 也需要它，从 shell 引入会形成"子组件反向依赖编排者"。
@@ -51,12 +57,17 @@ export type { StepRunStatus, StepProgressEvent } from '../types/step';
  * （`JSON.stringify(fn)` → undefined，真机上必然丢失），只能走 `on/off` 推送通道。
  */
 export type UiKernel = CdpAdapter & VisualCapable & Recordable & {
-  /** 按脚本回放（内核职责：真机驱动 adapter / 演示返回假结果）。签名保持单参。 */
-  playback(script: Script): Promise<PlaybackResult>;
-  /** 订阅服务端主动推送事件（'recording' 录制增量 / 'step-progress' 运行进度）；可选。 */
+  /** 按脚本回放（内核职责：真机驱动 adapter / 演示返回假结果）。签名保持单参。
+   *  fromStepId 可选「从此处运行」起点（spec §2.7），不传为从头跑（向后兼容）。 */
+  playback(script: Script, fromStepId?: string): Promise<PlaybackResult>;
+  /** 订阅服务端主动推送事件（'recording' / 'step-progress' / 'pick' / 'load-script'）；可选。 */
   on?(event: string, cb: (data: unknown) => void): void;
   /** 退订；与 on 配对，供单次运行结束后清理。可选（旧内核可不实现）。 */
   off?(event: string, cb: (data: unknown) => void): void;
+  /** 进入点选态（spec §2.3）。可选：旧内核不实现时 UI 侧「在软件中点选」按钮禁用。 */
+  startPick?(): Promise<void>;
+  /** 取消点选态。可选，与 startPick 配对。 */
+  cancelPick?(): Promise<void>;
 };
 
 export type UiShellOptions = {
@@ -113,6 +124,172 @@ export function assertionKindLabel(kind: AssertionKind): string {
   return ASSERTION_KINDS.find((k) => k.kind === kind)?.label ?? kind;
 }
 
+/**
+ * 判断某步是否需要「在软件中点选」按钮，并返回点选回写的目标字段（spec §2.3）。
+ * - waitUntil / assert（带 params.assertion）→ 写回 assertion.locator
+ * - 选择组（control.kind==='if'）→ 写回 control.condition.locator
+ * 其余类型返回 undefined（不显示按钮）。
+ */
+function pickFieldFor(step: Step): 'assertion-locator' | 'condition-locator' | undefined {
+  if (step.control?.kind === 'if') return 'condition-locator';
+  if (step.type === 'waitUntil' || step.type === 'assert') return 'assertion-locator';
+  return undefined;
+}
+
+/** spec §2.5：每条新步骤自身即一个顺序组，组名默认为封装文案。 */
+function asAtomicGroup(step: Step): Step {
+  if (step.control) return step;
+  return {
+    ...step,
+    control: { kind: 'sequence', name: describeStepBrief(step) },
+  };
+}
+
+/** 跨 WS 的截图可能是 Node Buffer，也可能是 { __base64 }。 */
+function pngBase64(buf: unknown): string {
+  if (buf == null) return '';
+  if (typeof buf === 'string') return buf;
+  if (typeof buf === 'object' && buf !== null && '__base64' in buf) {
+    const b64 = (buf as { __base64?: unknown }).__base64;
+    return typeof b64 === 'string' ? b64 : '';
+  }
+  if (typeof Buffer !== 'undefined' && typeof (Buffer as { isBuffer?: (x: unknown) => boolean }).isBuffer === 'function' && Buffer.isBuffer(buf)) {
+    return buf.toString('base64');
+  }
+  return '';
+}
+
+/**
+ * 详情区暴露给用户的断言类型子集（spec §2.3：断言元素可见/存在文本）。
+ * 完整 AssertionKind 含 titleIs/urlMatches/expr/screenshotMatches 等，留给 Agent/MCP 用；
+ * UI 只给最常用人可编辑的三类，避免把不适用的人工选项塞给用户。
+ */
+const ASSERTION_UI_KINDS: { value: AssertionKind; label: string }[] = [
+  { value: 'visible', label: '元素可见(visible)' },
+  { value: 'exists', label: '元素存在(exists)' },
+  { value: 'textContains', label: '包含文本(textContains)' },
+];
+
+/** 该断言类型需要用户填写期望值（textContains 的文本）；visible/exists 只需 locator。 */
+function assertionNeedsValue(kind: AssertionKind): boolean {
+  return kind === 'textContains' || kind === 'titleIs' || kind === 'urlMatches' || kind === 'expr';
+}
+
+/** exists/visible 必须点选；textContains 可选（有 locator 只搜该节点）。 */
+function assertionShowsPick(kind: AssertionKind): boolean {
+  return kind === 'exists' || kind === 'visible' || kind === 'elementVisibleInViewport' || kind === 'textContains';
+}
+
+function assertionKindHelp(kind: AssertionKind): string {
+  if (kind === 'exists') return 'exists：在 DOM 里即可，被隐藏也算存在';
+  if (kind === 'visible') return 'visible：在屏幕上可见、未被隐藏';
+  if (kind === 'textContains') return '有点选则只搜该节点文本；无点选则搜整页（如点击后弹出）';
+  return '';
+}
+
+/** locator 是否带了任一可查询字段（空对象 `{}` 经 JSON 往返后仍算「未选取」）。 */
+function locatorIsPresent(loc?: Locator): loc is Locator {
+  if (!loc) return false;
+  return !!(loc.role || loc.name || loc.text || loc.testId || loc.css || loc.xpath);
+}
+
+/**
+ * 点选状态给人看的文案。
+ * textContains/expr 等无 locator 时执行器搜整页文本，不是漏了必填点选；
+ * 「尚未选取」只留给 exists/visible 这类必须有目标节点的断言。
+ */
+function assertionPickHint(assertion?: Assertion): string {
+  if (locatorIsPresent(assertion?.locator)) return describeLocator(assertion!.locator) || '尚未选取';
+  if (assertion?.kind === 'textContains') return '整页文本，无需点选';
+  if (assertion && assertionNeedsValue(assertion.kind) && !assertionShowsPick(assertion.kind)) {
+    return '整页文本，无需点选';
+  }
+  return '尚未选取';
+}
+
+function defaultGroupName(kind: 'sequence' | 'if' | 'while'): string {
+  if (kind === 'if') return '选择组';
+  if (kind === 'while') return '循环组';
+  return '顺序组';
+}
+
+/** 补拍/录制高亮用的 locator：步骤自身 → 断言 → 选择组条件。 */
+function shotLocatorOf(step: Step): Locator | undefined {
+  const loc = step.locator ?? step.params?.assertion?.locator ?? step.control?.condition?.locator;
+  return locatorIsPresent(loc) ? loc : undefined;
+}
+
+export type FloatBox = { left: number; top: number; right: number; bottom: number };
+
+/** 轴对齐盒是否相交（含边重叠）。用来保证详情/浮动钮不盖住步骤节点。 */
+export function boxesIntersect(a: FloatBox, b: FloatBox): boolean {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+/**
+ * 把浮动钮/详情锚在选区包围盒外侧。
+ * 为什么不钉画布 (12,12)：那是 CFG 原点，选中节点在别处时按钮会看起来「停在栏左上」。
+ * 详情优先右侧，不够则左侧，再不行上下外侧，避免盖住节点本身。
+ */
+export function floatingChromePosition(
+  node: FloatBox,
+  canvas: { width: number; height: number },
+  overlay: { width: number; height: number },
+  kind: 'toolbar' | 'detail',
+  pad = 8,
+): { left: number; top: number } {
+  const nw = Math.max(1, overlay.width);
+  const nh = Math.max(1, overlay.height);
+  const maxL = Math.max(pad, canvas.width - nw - pad);
+  const maxT = Math.max(pad, canvas.height - nh - pad);
+  const rightX = node.right + pad;
+  const leftX = node.left - nw - pad;
+  const fitsRight = rightX + nw <= canvas.width - pad + 0.5;
+  const fitsLeft = leftX >= pad - 0.5;
+
+  let x: number;
+  let y: number;
+  if (kind === 'toolbar') {
+    if (fitsRight) {
+      x = rightX;
+      y = node.top;
+    } else {
+      // 顶右：贴在包围盒上方、右对齐，仍算「步骤旁边」。
+      x = Math.min(maxL, Math.max(pad, node.right - nw));
+      y = node.top - nh - pad;
+      if (y < pad) y = node.bottom + pad;
+    }
+  } else if (fitsRight) {
+    x = rightX;
+    y = node.top;
+  } else if (fitsLeft) {
+    x = leftX;
+    y = node.top;
+  } else {
+    const roomR = canvas.width - node.right;
+    const roomL = node.left;
+    x = roomR >= roomL ? Math.min(rightX, maxL) : Math.max(pad, leftX);
+    y = node.top;
+  }
+
+  x = Math.min(maxL, Math.max(pad, x));
+  y = Math.min(maxT, Math.max(pad, y));
+
+  const placed = { left: x, top: y, right: x + nw, bottom: y + nh };
+  if (boxesIntersect(placed, node)) {
+    y = node.top - nh - pad;
+    if (y < pad) y = node.bottom + pad;
+    y = Math.min(maxT, Math.max(pad, y));
+    const retry = { left: x, top: y, right: x + nw, bottom: y + nh };
+    if (boxesIntersect(retry, node)) {
+      x = Math.min(maxL, Math.max(pad, node.right + pad));
+      y = Math.min(maxT, Math.max(pad, node.top));
+    }
+  }
+
+  return { left: Math.min(maxL, Math.max(pad, x)), top: Math.min(maxT, Math.max(pad, y)) };
+}
+
 export class UiShell {
   private kernel: UiKernel;
   private mount: HTMLElement;
@@ -124,12 +301,19 @@ export class UiShell {
   private currentTargetId?: string;
   /** 截图流定时器句柄（Node 用 Timeout，浏览器用 number；用 any 兼容二者）。 */
   private frameTimer: any = undefined;
+  /**
+   * 导入/连接补拍的代际：新一次 backfill 会 ++，旧循环看到代际变化就停。
+   * 避免连续导入时上一轮截图写进新脚本的 stepId Map。
+   */
+  private shotBackfillGen = 0;
   /** 步骤列表容器缓存（增量 append 用，避免录制高频全量重渲染）。 */
   private stepsEl?: HTMLElement;
   /** CFG 图形化视图（M3-R4）：SRP 独立组件，仅依赖 Script/Step 类型（DIP）。 */
   private cfgView?: CfgView;
   /** CFG 视图挂载区（render 时创建，update 复用）。 */
   private cfgMount?: HTMLElement;
+  /** 画布尺寸变化时重算浮动钮/详情位置（只在真实有宽高时启用，避免 jsdom 空盒冲掉测试坐标）。 */
+  private chromeObserver?: ResizeObserver;
   /**
    * Git 式版本库（M3-R5）：版本状态在 UI 侧/本地，UiKernel 不上提版本（DIP）。
    * UiShell 持有 store 并编排版本操作（调 version-store 纯函数），再把新 store
@@ -147,6 +331,20 @@ export class UiShell {
   private selectedStepId?: string;
   /** 多选态（建组用）：收集用户勾选/连选的步骤 id，调 wrap 时整体包成组。 */
   private selectedIds = new Set<string>();
+  /** 橡皮筋松手后待打包的 id；有值时渲染 [data-pack-menu]。 */
+  private packMenuIds?: string[];
+  /** 正在播放离开动画，到期后再全量 render，避免打包钮/详情瞬切。 */
+  private motionTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 详情叠加层是否打开。点节点默认只查看截图；点「编辑」才打开。 */
+  private detailOpen = false;
+  /** 点选/框选后流图主栏；点空白后截图主栏。录制中始终流图主栏。 */
+  private cfgPrimary = false;
+  /** 舞台当前预览的 stepId（悬停可切，离开不撤回）。 */
+  private previewStepId?: string;
+  /** 预览来自悬停：render 时不要用选中组把图清成空白。 */
+  private previewFromHover = false;
+  /** 刚保存成功：给详情一条可见确认，避免点了保存像没反应。 */
+  private saveNotice = false;
   /** 插入菜单展开态：点击「插入步骤」切换，决定是否渲染 4 类子菜单。 */
   private insertMenuOpen = false;
   /** Git 版本面板是否挂载（可选插件，默认隐藏）。 */
@@ -155,6 +353,34 @@ export class UiShell {
   private bannerText?: string;
   /** 横幅样式变体：true=琥珀色（显式演示），false=红色（降级/错误）。 */
   private bannerDemo = false;
+  /** 每步一张靶机截图（不进 Step JSON）。key = step.id。 */
+  private stepShots = new Map<string, { png: string; rect?: VisualRect }>();
+
+  // ---- 嵌入式点选录制（spec §2.3）----
+  /** 当前是否处于点选态（waitUntil/assert/选择组条件共用一套）。 */
+  private pickMode = false;
+  /** 点选回写目标：哪个步骤的哪个 locator 字段。 */
+  private pickTarget?: { stepId: string; field: 'assertion-locator' | 'condition-locator' };
+  /** 'pick' 事件回调：把靶机点到的完整 locator 写回当前编辑步骤。 */
+  private onPick = (data: unknown): void => {
+    // 跨 WS 边界兜底：不依赖解构默认值，显式 ?? {}（§4.1）。
+    const d = (data ?? {}) as { locator?: Locator };
+    const loc = d.locator;
+    if (!loc) return;
+    this.applyPick(loc);
+  };
+
+  /**
+   * 桥/MCP 把一份 Script JSON 推进当前工作台。坏数据只出横幅，不让 render 白屏。
+   * 入参经 JSON 可能是 null，不能依赖默认参数。
+   */
+  private onLoadScript = (data: unknown): void => {
+    try {
+      this.loadScript(data);
+    } catch (err) {
+      this.setBanner(`无法载入脚本：${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
 
   constructor(opts: UiShellOptions) {
     this.kernel = opts.kernel;
@@ -177,6 +403,13 @@ export class UiShell {
         this.handleAction(actionEl.getAttribute('data-action')!, actionEl);
         return;
       }
+      // 点叠加详情内部（输入框等）不要关层。
+      if (el.closest('[data-detail]')) return;
+      // 点舞台：关掉详情，保留当前步以便继续看截图。
+      if (el.closest('[data-stage]')) {
+        if (this.detailOpen) this.closeInspector();
+        return;
+      }
       // 否则按步骤项命中：多选累积 + 选中并打开编辑区（spec §2.6 选中即出详情）。
       const item = el.closest('[data-step-item]') as HTMLElement | null;
       if (!item) return;
@@ -188,6 +421,23 @@ export class UiShell {
       // 选中该步并渲染真实编辑区（替代旧版 alert 弹窗）。
       this.editStep(id);
     });
+    this.mount.setAttribute('tabindex', '-1');
+    this.mount.addEventListener('keydown', (e) => {
+      if ((e as KeyboardEvent).key === 'Escape') this.onEscape();
+    });
+    // 工作台指针只改 CSS 变量，雾块/光斑用 transition 缓过去；装饰层 pointer-events:none，点击仍打到 CFG。
+    this.mount.addEventListener('pointermove', (e: PointerEvent) => {
+      const rect = this.mount.getBoundingClientRect();
+      const w = rect.width;
+      const h = rect.height;
+      if (!w || !h) return;
+      const x = ((e.clientX - rect.left) / w) * 100;
+      const y = ((e.clientY - rect.top) / h) * 100;
+      this.mount.style.setProperty('--fluid-x', `${x.toFixed(2)}%`);
+      this.mount.style.setProperty('--fluid-y', `${y.toFixed(2)}%`);
+    });
+    // 常驻：对话/MCP 经桥推入脚本时立刻画 CFG。导入按钮仍是另一条用户路径。
+    this.kernel.on?.('load-script', this.onLoadScript);
   }
 
   /** 统一动作分发（操作栏 / 插入菜单 / 建组按钮的 data-action 均走此）。 */
@@ -205,26 +455,110 @@ export class UiShell {
         break;
       }
       case 'wrap-if':
-        this.wrapSelection('if');
+        this.applyGroupKind('if');
         break;
       case 'wrap-while':
-        this.wrapSelection('while');
+        this.applyGroupKind('while');
+        break;
+      case 'wrap-sequence': {
+        const ids = this.packOverlayIds();
+        if (ids.length >= 2) {
+          this.selectedIds = new Set(ids);
+          this.packMenuIds = undefined;
+          this.wrapSelection('sequence');
+        }
+        break;
+      }
+      case 'edit': {
+        const id = el.getAttribute('data-step-id') ?? this.selectedStepId ?? '';
+        if (id) this.openInspector(id);
+        break;
+      }
+      case 'select-target': {
+        const sel = el as HTMLSelectElement;
+        if (sel.value) this.selectTarget(sel.value);
+        break;
+      }
+      case 'unpack': {
+        const id = el.getAttribute('data-step-id') ?? this.selectedStepId ?? [...this.selectedIds][0] ?? '';
+        const step = id ? this.findStep(id) : undefined;
+        if (id && step && !isAtomicGroup(step)) {
+          this.script = ScriptEditor.unpack(this.script, id);
+          this.render();
+        }
+        break;
+      }
+      case 'add-else': {
+        const id = el.getAttribute('data-step-id') ?? this.selectedStepId ?? '';
+        if (id) { this.script = ScriptEditor.addElseBranch(this.script, id); this.render(); }
+        break;
+      }
+      case 'remove-else': {
+        const id = el.getAttribute('data-step-id') ?? this.selectedStepId ?? '';
+        if (id) { this.script = ScriptEditor.removeElseBranch(this.script, id); this.render(); }
+        break;
+      }
+      case 'pack-choice': {
+        const kind = (el.getAttribute('data-pack-choice') ?? el.getAttribute('data-pack-kind')) as 'sequence' | 'if' | 'while' | null;
+        if (kind && this.packMenuIds?.length) {
+          this.selectedIds = new Set(this.packMenuIds);
+          this.packMenuIds = undefined;
+          this.wrapSelection(kind);
+        }
+        break;
+      }
+      case 'import': {
+        const input = this.mount.querySelector('[data-import-file]') as HTMLInputElement | null;
+        input?.click();
+        break;
+      }
+      case 'pick': {
+        const stepId = el.getAttribute('data-pick-step-id') ?? '';
+        const field = el.getAttribute('data-pick-field') as 'assertion-locator' | 'condition-locator';
+        if (stepId && field) void this.startPickFor(stepId, field);
+        break;
+      }
+      case 'cancel-pick':
+        this.exitPickMode();
         break;
       case 'save-edit':
         this.saveEdit(el.getAttribute('data-step-id') ?? '');
         break;
+      case 'remove': {
+        const id = el.getAttribute('data-step-id') ?? this.selectedStepId ?? '';
+        if (id) this.removeStep(id);
+        break;
+      }
+      case 'cancel-edit':
+      case 'close-inspector':
+        this.closeInspector();
+        break;
       case 'toggle-record':
+        // 不在此处同步 render：startRecording 先置 recording=true 再 await，
+        // 否则按钮仍写「开始录制」，用户会以为没点上（甚至再点一次变成停止）。
         if (this.isRecording()) void this.stopRecording();
         else void this.startRecording();
-        this.render();
         break;
       case 'run-all':
-        void this.runAll();
+        if (!this.connected) {
+          this.runNoticeText = '未连接靶机，无法运行';
+          this.lastFailedStepId = undefined;
+          this.render();
+          break;
+        }
+        void this.runAll().catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.runNoticeText = `运行失败：${msg}`;
+          this.lastFailedStepId = undefined;
+          this.render();
+        });
         break;
       case 'export':
         this.downloadScript();
         break;
       case 'clear':
+        if (this.script.steps.length === 0) break;
+        if (typeof window !== 'undefined' && !window.confirm('确定清空全部步骤？此操作不能撤销。')) break;
         [...this.getScript().steps].forEach((st) => this.removeStep(st.id));
         break;
       default:
@@ -242,14 +576,9 @@ export class UiShell {
     if (!stepId || !status) return;
     this.sawProgress = true;
     if (status === 'running') {
-      // 顺序要求：先画占位框、再广播状态钩子，否则观察者在钩子里看到的高亮会滞后一步。
-      this.renderHighlight(stepId, this.lastRect, this.highlightGen);
+      this.showStoredShot(stepId);
     }
     this.setStepStatus(stepId, status);
-    if (status === 'running') {
-      // 精修不 await（推送回调为同步契约），失败静默不打断运行。
-      void this.followHighlight(stepId, this.highlightGen);
-    }
   };
 
   // 注：CFG 节点状态**不另开** WS 订阅。状态经 `setStepStatus` 单点分发
@@ -268,7 +597,10 @@ export class UiShell {
   async connect(opts?: ConnectOptions): Promise<void> {
     await this.kernel.connect(opts);
     this.connected = true;
+    this.runNoticeText = undefined;
     this.render();
+    // 已载入的脚本（含先导入后连接）按叶子补拍，已有录制图的 stepId 不覆盖。
+    void this.backfillStepShots();
   }
 
   async disconnect(): Promise<void> {
@@ -283,26 +615,34 @@ export class UiShell {
    * 用事件内容指纹而非 step.id：实时 emit 与 stop 拉回的同源事件 id 不同但内容一致。 */
   private recordedKeys = new Set<string>();
   private eventKey(ev: InteractionEvent): string {
+    // fill 指纹不含 value：同一框连续输入要就地更新，不能因 n→nihao 被当成新步。
+    if (ev.type === 'fill') return JSON.stringify({ t: ev.type, l: ev.locator, tg: ev.target });
     return JSON.stringify({ t: ev.type, l: ev.locator, p: ev.params, tg: ev.target });
   }
 
+  /** 录制增量回调：稳定引用，便于 start/stop 配对 on/off，避免多次开始叠加监听。 */
+  private onRecordingPush = (data: unknown): void => {
+    this.onRecordingEvent(data as InteractionEvent);
+  };
+
   async startRecording(): Promise<void> {
-    // 录制依赖真机内核实时回传交互事件（click/fill 等仅由录制产生，见 spec §2.3.1）。
-    // kernel.startRecording 可能 reject（如 WsKernel 尚未连接靶机），必须捕获：
-    // 否则未捕获异常会中断 UI 交互、且用户看不到任何失败原因。
+    // 先进入录制态并立刻渲染（spec §2.2：顶部 ● 录制中、按钮改「停止录制」），
+    // 再 await 内核。否则 WS 往返期间界面毫无变化，用户不知道有没有开始。
+    this.recorder.reset();
+    this.recordedKeys.clear();
+    this.kernel.off?.('recording', this.onRecordingPush);
+    this.kernel.on?.('recording', this.onRecordingPush);
+    this.recording = true;
+    this.bannerText = '';
+    this.render();
     try {
       await this.kernel.startRecording();
     } catch (e) {
-      // 降级：连接失败时不进入录制态，给出明确红条提示（而非静默失效）。
+      this.recording = false;
+      this.kernel.off?.('recording', this.onRecordingPush);
       const msg = e instanceof Error ? e.message : String(e);
       this.setBanner(`录制失败：尚未连接靶机（${msg}）。请先启动软件调试端口，刷新页面后再试。`);
-      return;
     }
-    this.recorder.reset();
-    this.recordedKeys.clear();
-    this.kernel.on?.('recording', (ev) => this.onRecordingEvent(ev as InteractionEvent));
-    this.recording = true;
-    this.render();
   }
 
   /** 设置顶部提示横幅（持久于实例，render 会据此重建，故不被后续 render 冲掉）。
@@ -315,15 +655,50 @@ export class UiShell {
 
   /** 实时事件回调：转 Step 并增量插入脚本与 DOM（不重渲染全列表）。 */
   private onRecordingEvent(ev: InteractionEvent): void {
+    // 点选子模式优先：这次点击是给表单填 locator，不得写成普通录制步（spec §2.3）。
+    if (this.pickMode) return;
+    if (!shouldKeepRecordingEvent(ev.locator ? { ...ev, locator: ev.locator } : ev)) return;
+    if (ev.type === 'fill') {
+      const last = this.lastRecordedLeaf();
+      if (last?.type === 'fill' && sameFillLocator(last.locator, ev.locator)) {
+        this.script = ScriptEditor.updateNested(this.script, last.id, {
+          params: { ...last.params, value: ev.params?.value },
+          control: { kind: 'sequence', name: describeStepBrief({ ...last, params: { ...last.params, value: ev.params?.value } }) },
+        });
+        this.cfgView?.update(this.script);
+        void this.captureStepShot(last.id, shotLocatorOf(last), ev.target);
+        this.selectStep(last.id);
+        return;
+      }
+      const step = asAtomicGroup(this.recorder.toSingleStep(ev));
+      this.script = ScriptEditor.insert(this.script, step);
+      this.appendStepEl(step);
+      void this.captureStepShot(step.id, shotLocatorOf(step), ev.target);
+      this.selectStep(step.id);
+      return;
+    }
     const key = this.eventKey(ev);
-    if (this.recordedKeys.has(key)) return; // 去重
+    if (this.recordedKeys.has(key)) return;
     this.recordedKeys.add(key);
-    const step = this.recorder.toSingleStep(ev);
+    const step = asAtomicGroup(this.recorder.toSingleStep(ev));
     this.script = ScriptEditor.insert(this.script, step);
     this.appendStepEl(step);
+    void this.captureStepShot(step.id, shotLocatorOf(step), ev.target);
+    this.selectStep(step.id);
+  }
+
+  /** 脚本末条可合并的叶子（原子组就是它自己）。 */
+  private lastRecordedLeaf(): Step | undefined {
+    const last = this.script.steps[this.script.steps.length - 1];
+    if (!last) return undefined;
+    if (last.control?.kind === 'sequence' && last.children?.length) {
+      return last.children[last.children.length - 1];
+    }
+    return last;
   }
 
   async stopRecording(): Promise<void> {
+    this.kernel.off?.('recording', this.onRecordingPush);
     const events = await this.kernel.stopRecording();
     const wasRecording = this.recording;
     this.recording = false;
@@ -331,11 +706,16 @@ export class UiShell {
     // 或误调用 stop 而内核恰好返回缓存事件）被误插入脚本。
     if (wasRecording && events.length > 0) {
       for (const ev of events) {
+        if (ev.type === 'fill') {
+          this.onRecordingEvent(ev);
+          continue;
+        }
         const key = this.eventKey(ev);
-        if (this.recordedKeys.has(key)) continue; // 实时已插入的跳过
+        if (this.recordedKeys.has(key)) continue;
         this.recordedKeys.add(key);
-        const step = this.recorder.toSingleStep(ev);
+        const step = asAtomicGroup(this.recorder.toSingleStep(ev));
         this.script = ScriptEditor.insert(this.script, step);
+        void this.captureStepShot(step.id, shotLocatorOf(step), ev.target);
       }
     }
     this.render(); // 停止后全量刷新，保证一致
@@ -344,8 +724,13 @@ export class UiShell {
   // ---- 编辑（不可变，委托 ScriptEditor）----
 
   insertStep(step: Step, index?: number): void {
-    this.script = ScriptEditor.insert(this.script, step, index);
+    const wrapped = asAtomicGroup(step);
+    this.script = ScriptEditor.insert(this.script, wrapped, index);
+    this.detailOpen = true;
+    this.cfgPrimary = true;
     this.render();
+    void this.captureStepShot(wrapped.id, shotLocatorOf(wrapped), wrapped.target);
+    this.selectStep(wrapped.id);
   }
 
   // ---- 目标（窗口 / webview）选择 ----
@@ -381,12 +766,9 @@ export class UiShell {
     this.render();
   }
 
-  /** 编辑某步：渲染 §2.6 真实编辑区（表单），替代旧版 alert 弹窗。 */
+  /** 编辑某步：打开叠加详情（点节点默认只查看截图，要改字段才走这里）。 */
   editStep(stepId: string): void {
-    const step = this.findStep(stepId);
-    if (!step) return;
-    this.selectStep(stepId); // 同步选中态（列表项 + CFG 节点高亮）
-    this.renderEditArea(step);
+    this.openInspector(stepId);
   }
 
   /**
@@ -394,8 +776,28 @@ export class UiShell {
    * 挂在 mount 内的独立片段 [data-edit-area]，不占用步骤列表 DOM。
    */
   private renderEditArea(step: Step): void {
-    // 每次重建编辑区（简单优先，步骤规模小）。
-    this.mount.querySelector('[data-edit-area]')?.remove();
+    const pane = this.mount.querySelector('[data-detail]') as HTMLElement | null;
+    if (!pane) return;
+    pane.innerHTML = '';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'ui-shell-inspector-close';
+    close.setAttribute('data-inspector-close', 'true');
+    close.setAttribute('data-action', 'close-inspector');
+    close.setAttribute('aria-label', '关闭');
+    close.textContent = '×';
+    pane.appendChild(close);
+    const paneTitle = document.createElement('div');
+    paneTitle.className = 'ui-shell-pane-title';
+    paneTitle.textContent = '详情 / 编辑';
+    pane.appendChild(paneTitle);
+
+    const scroll = document.createElement('div');
+    scroll.className = 'ui-shell-detail-scroll';
+    scroll.setAttribute('data-inspector-scroll', 'true');
+    scroll.style.overflow = 'auto';
+    scroll.style.maxHeight = 'min(64vh, 460px)';
+
     const area = document.createElement('div');
     area.className = 'ui-shell-edit-area';
     area.setAttribute('data-edit-area', 'true');
@@ -405,12 +807,46 @@ export class UiShell {
     title.textContent = `编辑步骤：${describeStep(step)}`;
     area.appendChild(title);
 
-    // 定位 name 字段（最常见的可编辑项，点击/填充/断言都带 locator.name）。
+    const pickField = pickFieldFor(step);
+
+    // 组节点详情：组名、循环次数、Else。拆包只在选区浮动钮上，不进详情。
+    if (step.control) {
+      area.appendChild(this.editField(step, 'control.name', '组名', step.control.name ?? ''));
+      if (step.control.kind === 'while') {
+        area.appendChild(this.editField(step, 'control.loopCount', '循环次数', String(step.control.loopCount ?? 1)));
+      }
+      if (step.control.kind === 'if') {
+        const hasElse = !!(step.children && step.children[1]);
+        const eb = document.createElement('button');
+        eb.textContent = hasElse ? '移除 Else 分支' : '增加 Else 分支';
+        eb.setAttribute('data-action', hasElse ? 'remove-else' : 'add-else');
+        eb.setAttribute('data-step-id', step.id);
+        area.appendChild(eb);
+      }
+    }
+
+    // 定位：先给人看封装（role + [name] + 截断 css），完整 css 放可展开字段里改。
     if (step.locator) {
+      if (!pickField) {
+        const encap = document.createElement('div');
+        encap.className = 'ui-shell-encap';
+        encap.setAttribute('data-encap', 'true');
+        encap.setAttribute('data-locator-human', 'true');
+        encap.textContent = describeLocator(step.locator) || '（无定位）';
+        area.appendChild(encap);
+      }
       area.appendChild(this.editField(step, 'locator.name', '定位名称(name)', step.locator.name ?? ''));
       if (step.locator.role) {
         area.appendChild(this.editField(step, 'locator.role', '定位角色(role)', step.locator.role));
       }
+      const path = document.createElement('details');
+      path.className = 'ui-shell-locator-path';
+      path.setAttribute('data-locator-path', 'true');
+      const sum = document.createElement('summary');
+      sum.textContent = '完整 css 路径';
+      path.appendChild(sum);
+      path.appendChild(this.editField(step, 'locator.css', 'css', step.locator.css ?? ''));
+      area.appendChild(path);
     }
     // 参数：fill/select 的 value、wait 的 durationMs、waitUntil/assert 的 timeoutMs。
     const val = step.params?.value ?? step.params?.optionText;
@@ -420,22 +856,86 @@ export class UiShell {
     if (step.params?.durationMs !== undefined) {
       area.appendChild(this.editField(step, 'params.durationMs', '等待毫秒(durationMs)', String(step.params.durationMs)));
     }
+    // 断言表单顺序：类型 → 点选（若需要）→ 期望值（若需要）→ 最长等待 → 确定；关闭用右上角 X。
+    const assertion = step.params?.assertion;
+    if (assertion) {
+      const kindRow = this.wrapAssertSlot('kind', this.editSelect(
+        step, 'assertion.kind', '类型', ASSERTION_UI_KINDS, assertion.kind,
+        (v) => this.onKindChange(step.id, 'assertion', v),
+      ));
+      const help = assertionKindHelp(assertion.kind);
+      if (help) {
+        const hint = document.createElement('div');
+        hint.className = 'ui-shell-assert-hint';
+        hint.setAttribute('data-assert-hint', 'true');
+        hint.textContent = help;
+        kindRow.appendChild(hint);
+      }
+      area.appendChild(kindRow);
+      if (pickField === 'assertion-locator' && assertionShowsPick(assertion.kind)) {
+        area.appendChild(this.wrapAssertSlot('pick', this.renderPickBlock(step, pickField, assertion, '在软件中点选')));
+      }
+      if (assertionNeedsValue(assertion.kind)) {
+        area.appendChild(this.wrapAssertSlot('value', this.editField(step, 'assertion.value', '期望值', assertion.value ?? '')));
+      }
+      if (step.type === 'waitUntil') {
+        area.appendChild(this.wrapAssertSlot(
+          'timeout',
+          this.editField(step, 'params.timeoutMs', '最长等待(ms)', String(step.params?.timeoutMs ?? 5000)),
+        ));
+      }
+    }
+    const condition = step.control?.condition;
+    if (step.control?.kind === 'if') {
+      const cond = condition ?? ({ kind: 'visible' } as Assertion);
+      const kindRow = this.wrapAssertSlot('kind', this.editSelect(
+        step, 'condition.kind', '类型', ASSERTION_UI_KINDS, cond.kind,
+        (v) => this.onKindChange(step.id, 'condition', v),
+      ));
+      const help = assertionKindHelp(cond.kind);
+      if (help) {
+        const hint = document.createElement('div');
+        hint.setAttribute('data-assert-hint', 'true');
+        hint.textContent = help;
+        kindRow.appendChild(hint);
+      }
+      area.appendChild(kindRow);
+      if (assertionShowsPick(cond.kind)) {
+        area.appendChild(this.wrapAssertSlot('pick', this.renderPickBlock(step, 'condition-locator', cond, '点选执行条件')));
+      }
+      if (assertionNeedsValue(cond.kind)) {
+        area.appendChild(this.wrapAssertSlot('value', this.editField(step, 'condition.value', '期望值', cond.value ?? '')));
+      }
+    }
 
-    // 保存 / 删除（保存走统一 data-action 委托，见 saveEdit；删除保留行内处理）
+    // 确定/删除放进同一行等宽：截图里确定是左对齐小条、删除独占整行，那才是要改的布局。
+    const actions = document.createElement('div');
+    actions.className = 'ui-shell-edit-actions';
+    actions.setAttribute('data-edit-actions', 'true');
     const save = document.createElement('button');
-    save.textContent = '保存';
+    save.textContent = this.saveNotice ? '已保存' : '确定';
+    save.className = 'primary';
     save.setAttribute('data-action', 'save-edit');
     save.setAttribute('data-step-id', step.id);
-    area.appendChild(save);
-
+    actions.appendChild(save);
     const del = document.createElement('button');
     del.textContent = '删除';
+    del.className = 'danger';
     del.setAttribute('data-action', 'remove');
     del.setAttribute('data-step-id', step.id);
-    del.addEventListener('click', () => { this.removeStep(step.id); area.remove(); });
-    area.appendChild(del);
+    actions.appendChild(del);
+    area.appendChild(this.wrapAssertSlot('actions', actions));
 
-    this.mount.appendChild(area);
+    if (this.saveNotice) {
+      const notice = document.createElement('div');
+      notice.className = 'ui-shell-save-notice';
+      notice.setAttribute('data-save-notice', 'true');
+      notice.textContent = '已保存';
+      area.appendChild(notice);
+    }
+
+    scroll.appendChild(area);
+    pane.appendChild(scroll);
   }
 
   /** 统一处理「保存编辑」：从编辑区表单读取并不可变更新对应步骤。 */
@@ -447,15 +947,92 @@ export class UiShell {
     area.querySelectorAll<HTMLInputElement>('[data-edit-field]').forEach((inp) => {
       const path = inp.getAttribute('data-edit-field')!;
       const v = inp.value;
-      // 多个 locator/params 字段须累加到同一 patch 对象，不能各自覆盖（否则后者丢失前者）。
+      // 多个 locator/params/control 字段须累加到同一 patch 对象，不能各自覆盖（否则后者丢失前者）。
       if (path === 'locator.name') patch.locator = { ...(patch.locator ?? step.locator), name: v };
       else if (path === 'locator.role') patch.locator = { ...(patch.locator ?? step.locator), role: v };
+      else if (path === 'locator.css') patch.locator = { ...(patch.locator ?? step.locator), css: v };
       else if (path === 'params.value') patch.params = { ...(patch.params ?? step.params), value: v };
       else if (path === 'params.durationMs') patch.params = { ...(patch.params ?? step.params), durationMs: Number(v) || 0 };
+      else if (path === 'params.timeoutMs') patch.params = { ...(patch.params ?? step.params), timeoutMs: Number(v) || 0 };
+      else if (path === 'assertion.kind') {
+        // 保留同次保存已写入的 params 字段与 assertion 子字段（value 等），不互相覆盖。
+        const baseParams = patch.params ?? step.params ?? {};
+        const baseAssert = (patch.params?.assertion ?? step.params?.assertion) ?? ({ kind: 'visible' } as Assertion);
+        patch.params = { ...baseParams, assertion: { ...baseAssert, kind: v as AssertionKind } };
+      } else if (path === 'assertion.value') {
+        const baseParams = patch.params ?? step.params ?? {};
+        const baseAssert = (patch.params?.assertion ?? step.params?.assertion) ?? ({ kind: 'visible' } as Assertion);
+        patch.params = { ...baseParams, assertion: { ...baseAssert, value: v } };
+      } else if (path === 'condition.kind') {
+        const baseCtrl = patch.control ?? step.control!;
+        const baseCond = (patch.control?.condition ?? step.control?.condition) ?? ({ kind: 'visible' } as Assertion);
+        patch.control = { ...baseCtrl, condition: { ...baseCond, kind: v as AssertionKind } };
+      } else if (path === 'condition.value') {
+        const baseCtrl = patch.control ?? step.control!;
+        const baseCond = (patch.control?.condition ?? step.control?.condition) ?? ({ kind: 'visible' } as Assertion);
+        patch.control = { ...baseCtrl, condition: { ...baseCond, value: v } };
+      } else if (path === 'control.name') patch.control = { ...(patch.control ?? step.control!), name: v };
+      else if (path === 'control.loopCount') patch.control = { ...(patch.control ?? step.control!), loopCount: Number(v) || 1 };
     });
     this.script = ScriptEditor.updateNested(this.script, stepId, patch);
-    area.remove();
+    this.saveNotice = true;
+    this.detailOpen = true;
     this.render();
+    if (typeof window !== 'undefined') {
+      window.setTimeout(() => {
+        this.saveNotice = false;
+        const btn = this.mount.querySelector('[data-action="save-edit"]');
+        if (btn) btn.textContent = '确定';
+      }, 1600);
+    }
+  }
+
+  private wrapAssertSlot(name: string, child: HTMLElement): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.setAttribute('data-assert-slot', name);
+    wrap.appendChild(child);
+    return wrap;
+  }
+
+  /** 点选块：exists/visible 必填；textContains 可选。命名组不显示「尚未选取」。 */
+  private renderPickBlock(
+    step: Step,
+    field: 'assertion-locator' | 'condition-locator',
+    assertion: Assertion | undefined,
+    label: string,
+  ): HTMLElement {
+    const box = document.createElement('div');
+    const pick = document.createElement('button');
+    pick.className = 'ui-shell-pick-btn';
+    pick.textContent = label;
+    pick.setAttribute('data-action', 'pick');
+    pick.setAttribute('data-pick-step-id', step.id);
+    pick.setAttribute('data-pick-field', field);
+    if (!this.connected || !this.kernel.startPick) {
+      pick.disabled = true;
+      pick.title = '请先连接靶机';
+    }
+    box.appendChild(pick);
+    const namedGroup = !!(step.control?.name);
+    if (locatorIsPresent(assertion?.locator)) {
+      const encap = document.createElement('div');
+      encap.className = 'ui-shell-encap';
+      encap.setAttribute('data-encap', 'true');
+      encap.setAttribute('data-locator-human', 'true');
+      encap.textContent = describeLocator(assertion!.locator) || '';
+      box.appendChild(encap);
+    } else {
+      const hint = assertionPickHint(assertion);
+      if (!(namedGroup && hint === '尚未选取')) {
+        const encap = document.createElement('div');
+        encap.className = 'ui-shell-encap';
+        encap.setAttribute('data-encap', 'true');
+        encap.setAttribute('data-locator-human', 'true');
+        encap.textContent = hint;
+        box.appendChild(encap);
+      }
+    }
+    return box;
   }
 
   /** 生成一个可编辑输入行（label + input），input 带 data-edit-field 供保存时读取。 */
@@ -473,8 +1050,49 @@ export class UiShell {
     return row;
   }
 
-  /** 手动步骤类型：spec §2.3.1 仅暴露 4 类（录制才产生 click/fill 等）。 */
-  private insertManualStep(type: 'wait' | 'waitUntil' | 'assert' | 'repeat'): void {
+  /** 生成一个下拉选择行（label + select），select 带 data-edit-field 供保存时读取。
+   * 选「断言/条件类型」时即时 onChange：把新 kind 写回步骤并重渲染编辑区，
+   * 让 textContains 的「期望值」输入框立刻出现（否则要保存后才出现，交互不直观）。 */
+  private editSelect(step: Step, path: string, label: string, options: { value: string; label: string }[], current: string, onChange?: (v: string) => void): HTMLElement {
+    const row = document.createElement('label');
+    row.className = 'ui-shell-edit-field';
+    const span = document.createElement('span');
+    span.textContent = label;
+    const sel = document.createElement('select');
+    sel.setAttribute('data-edit-field', path);
+    for (const o of options) {
+      const opt = document.createElement('option');
+      opt.value = o.value;
+      opt.textContent = o.label;
+      if (o.value === current) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    if (onChange) sel.addEventListener('change', () => onChange(sel.value));
+    row.appendChild(span);
+    row.appendChild(sel);
+    return row;
+  }
+
+  /** 断言/条件类型变更：即时写回步骤并重渲染编辑区（让期望值字段按需出现/隐藏）。 */
+  private onKindChange(stepId: string, which: 'assertion' | 'condition', kind: string): void {
+    const step = this.findStep(stepId);
+    if (!step) return;
+    let patch: Partial<Step>;
+    if (which === 'assertion') {
+      const assertion = step.params?.assertion ?? ({ kind: 'visible' } as Assertion);
+      patch = { params: { ...step.params, assertion: { ...assertion, kind: kind as AssertionKind } } };
+    } else {
+      const condition = step.control?.condition ?? ({ kind: 'visible' } as Assertion);
+      patch = { control: { ...step.control!, condition: { ...condition, kind: kind as AssertionKind } } };
+    }
+    this.script = ScriptEditor.updateNested(this.script, stepId, patch);
+    // 重渲染编辑区：用更新后的步骤，使期望值字段随 kind 显隐。
+    const updated = this.findStep(stepId);
+    if (updated) this.renderEditArea(updated);
+  }
+
+  /** 手动步骤类型：spec §2.4 仅暴露 3 类（wait/waitUntil/assert）；循环走组操作（§2.5）。 */
+  private insertManualStep(type: 'wait' | 'waitUntil' | 'assert'): void {
     const id = `manual-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     let step: Step;
     switch (type) {
@@ -493,10 +1111,6 @@ export class UiShell {
           params: { assertion: { kind: 'visible', locator: { role: 'status' } } },
         };
         break;
-      case 'repeat':
-        // repeat ≡ while 循环组：以 while 控制节点表达，循环体初为空，用户再往里加步或包组。
-        step = { id, type: 'wait', source: 'manual', control: { kind: 'while', loopCount: 1 }, children: [] };
-        break;
       default:
         // 受控联合外的值（如非法注入）直接拒绝，避免 insertStep(undefined) 崩溃。
         console.warn('[UiShell] 未知手动步骤类型，已忽略:', type);
@@ -505,23 +1119,128 @@ export class UiShell {
     this.insertStep(step);
   }
 
-  /** 把当前多选的步骤整体包成控制流组（spec §2.3.0）。空选集不操作（边界安全）。 */
-  private wrapSelection(kind: 'if' | 'while'): void {
-    const ids = [...this.selectedIds];
+  /** spec §2.5：对已有组设 kind；多选则先打包再设。 */
+  private applyGroupKind(kind: 'if' | 'while'): void {
+    const ids = this.selectedIdsForGroup();
     if (ids.length === 0) return;
-    this.script = ScriptEditor.wrap(this.script, ids, kind);
+    if (ids.length === 1) {
+      const s = this.findStep(ids[0]);
+      if (!s) return;
+      if (!s.control) {
+        this.script = ScriptEditor.updateNested(this.script, ids[0], {
+          control: { kind: 'sequence', name: describeStepBrief(s) },
+        });
+      }
+      this.script = ScriptEditor.setGroupKind(this.script, ids[0], kind);
+      this.selectedIds.clear();
+      this.packMenuIds = undefined;
+      this.detailOpen = true;
+      this.cfgPrimary = true;
+      this.render();
+      return;
+    }
+    this.wrapSelection(kind);
+  }
+
+  private selectedIdsForGroup(): string[] {
+    if (this.selectedIds.size > 0) return [...this.selectedIds];
+    if (this.selectedStepId) return [this.selectedStepId];
+    return [];
+  }
+
+  /** 把当前多选的步骤整体包成控制流组（spec §2.5）。空选集不操作（边界安全）。 */
+  private wrapSelection(kind: 'sequence' | 'if' | 'while', typedName?: string): void {
+    const ids = this.selectedIdsForGroup();
+    if (ids.length === 0) return;
+    const name = (typedName ?? defaultGroupName(kind)).trim() || defaultGroupName(kind);
+    const groupId = `grp-${kind}-${Date.now().toString(36)}-${ids.length}`;
+    this.script = ScriptEditor.wrap(this.script, ids, kind, groupId);
+    this.script = ScriptEditor.renameGroup(this.script, groupId, name);
+    this.selectedStepId = groupId;
     this.selectedIds.clear();
+    if (this.selectedStepId) this.selectedIds.add(this.selectedStepId);
+    this.packMenuIds = undefined;
+    this.detailOpen = kind !== 'sequence';
+    this.cfgPrimary = true;
     this.render();
   }
 
-  /** 导出脚本为 JSON 文件下载（替代旧 app.ts 的实现，UI 壳自包含）。 */
+  // ---- 嵌入式点选录制（spec §2.3）----
+  /** 进入点选态：未连接时禁用并提示；订阅 'pick' 事件，调内核 startPick。 */
+  private async startPickFor(
+    stepId: string,
+    field: 'assertion-locator' | 'condition-locator',
+  ): Promise<void> {
+    if (!this.connected) {
+      this.setBanner('请先连接靶机，再点选元素。');
+      return;
+    }
+    if (!this.kernel.startPick || !this.kernel.cancelPick) return; // 旧内核无点选能力：兜底静默
+    this.pickMode = true;
+    this.pickTarget = { stepId, field };
+    this.kernel.on?.('pick', this.onPick);
+    // 先渲染点选态提示（同步反馈：用户点击按钮后立刻看到「请在靶机中点击目标元素」），
+    // 再 await 内核 startPick；若 startPick 失败再 exitPickMode 清掉提示。
+    this.render();
+    try {
+      await this.kernel.startPick();
+    } catch (e) {
+      this.exitPickMode(false); // 失败：清理订阅但不再次调 cancelPick
+      const msg = e instanceof Error ? e.message : String(e);
+      this.setBanner(`点选启动失败：${msg}`);
+      return;
+    }
+  }
+
+  /** 点选命中：把完整 locator 不可变写回当前编辑步骤的目标字段，再退出点选态。 */
+  private applyPick(loc: Locator): void {
+    const t = this.pickTarget;
+    if (!t) return;
+    // 边界兜底：跨 WS 的 locator 可能带 null 字段，统一还原为 undefined（§4.1）。
+    const clean: Locator = {};
+    for (const [k, v] of Object.entries(loc)) {
+      if (v !== null && v !== undefined) (clean as Record<string, unknown>)[k] = v;
+    }
+    const step = this.findStep(t.stepId);
+    let patch: Partial<Step>;
+    if (t.field === 'assertion-locator') {
+      const assertion = step?.params?.assertion ?? { kind: 'visible' as const };
+      patch = { params: { ...step?.params, assertion: { ...assertion, locator: clean } } };
+    } else {
+      const ctrl = step?.control ?? { kind: 'if' as const };
+      const condition = ctrl.condition ?? { kind: 'visible' as const };
+      patch = { control: { ...ctrl, condition: { ...condition, locator: clean } } };
+    }
+    this.script = ScriptEditor.updateNested(this.script, t.stepId, patch);
+    this.exitPickMode();
+  }
+
+  /** 退出点选态：退订事件、调内核 cancelPick、清目标、重渲染。
+   * @param cancelKernel 为 false 时不调 kernel.cancelPick（用于 startPick 本身失败时清理）。 */
+  private exitPickMode(cancelKernel = true): void {
+    const was = this.pickMode;
+    this.pickMode = false;
+    this.pickTarget = undefined;
+    this.kernel.off?.('pick', this.onPick);
+    if (cancelKernel && was) void this.kernel.cancelPick?.();
+    this.render();
+  }
+
+  /** 导出脚本为 JSON 文件下载。配图写进同一份 JSON 的 shots。 */
   private downloadScript(): void {
-    const json = ScriptEditor.save(this.getScript());
+    const json = this.exportScript();
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = 'script.json'; a.click();
     URL.revokeObjectURL(url);
+  }
+
+  /** 测试/导出用：stepId → png base64。 */
+  getStepShots(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [id, s] of this.stepShots) out[id] = s.png;
+    return out;
   }
 
   /**
@@ -554,6 +1273,8 @@ export class UiShell {
   private stepStatus = new Map<string, StepRunStatus>();
   /** 上一次运行的失败步 id（用于失败提醒渲染）。 */
   private lastFailedStepId?: string;
+  /** 未连接点运行全部等：不依赖 failedStepId 的提醒文案。 */
+  private runNoticeText?: string;
 
   /** 运行态变化钩子：宿主/测试可观察逐步流转（含 running 中间态）。 */
   onStepStatusChange?: (stepId: string, status: StepRunStatus) => void;
@@ -580,6 +1301,7 @@ export class UiShell {
     }
     this.selectedStepId = stepId;
     this.syncSelectedDom(stepId);
+    this.showStoredShot(stepId);
   }
 
   /**
@@ -638,8 +1360,7 @@ export class UiShell {
       this.markStepItemSelected(el, false),
     );
     this.markStepItemSelected(this.findStepItemEl(stepId), true);
-    // CFG 节点：由 CfgView 自身管理唯一选中（setSelected 内部清旧置新）。
-    this.cfgView?.setSelected(stepId);
+    this.cfgView?.setSelected(stepId, this.selectedIds);
   }
 
   /** 扁平化脚本步骤（含 CFG children），供状态查找与汇总回填按序遍历。 */
@@ -669,21 +1390,28 @@ export class UiShell {
    * 运行当前所有步骤（原「回放」，spec §2.3.4 改名「运行全部」）。
    * 流式：每步 running/pass/fail 即时回显，并让高亮自动跟随当前步（P1）。
    * 兼容：内核若忽略 onStepResult（旧实现），据汇总结果回填状态。
+   * @param fromStepId 可选「从此处运行」起点（spec §2.7）：前序跳过该步之前的步骤。
    */
-  async runAll(): Promise<PlaybackResult> {
+  async runAll(fromStepId?: string): Promise<PlaybackResult> {
     this.resetRunStatus();
     // 本次运行的步骤索引快照：单次构建，后续每步 O(1) 命中（避免 O(n²) 重复扁平化）。
     this.runIndex = new Map(this.flattenSteps().map((s) => [s.id, s]));
-    const gen = ++this.highlightGen;
+    ++this.highlightGen;
     this.sawProgress = false;
 
     // 进度监听器：每次运行订阅一次、结束时退订一次，避免多次 runAll 回调叠加。
     // 只需这一处订阅 —— CFG 节点状态由 setStepStatus 单点分发，不另开订阅。
     this.kernel.on?.('step-progress', this.onProgress);
 
-    let res: PlaybackResult;
+    let res: PlaybackResult = { ok: false };
     try {
-      res = await this.kernel.playback(this.getScript());
+      res = (await this.kernel.playback(this.getScript(), fromStepId)) ?? { ok: false };
+    } catch (err) {
+      // playback 抛错（桥校验失败、WS 断开、if 条件崩）以前会让 res 未赋值，
+      // 后面读 res.ok 再抛一次，void runAll() 吞掉 → 用户点「运行全部」零反馈。
+      const msg = err instanceof Error ? err.message : String(err);
+      this.runNoticeText = `运行失败：${msg}`;
+      res = { ok: false };
     } finally {
       // 退订必须与订阅配对，否则多次 runAll 的回调会叠加。
       this.kernel.off?.('step-progress', this.onProgress);
@@ -695,9 +1423,31 @@ export class UiShell {
 
     // 内核不支持进度推送（DemoKernel / 纯批处理）时，据汇总结果回填。
     if (!this.sawProgress) this.backfillStatus(res);
-    this.lastFailedStepId = res.ok ? undefined : res.failedStepId;
+    if (res.ok) {
+      this.lastFailedStepId = undefined;
+      this.runNoticeText = undefined;
+    } else {
+      this.lastFailedStepId = res.failedStepId;
+      if (!this.runNoticeText && !res.failedStepId) {
+        this.runNoticeText = '运行失败，未定位到具体步骤。请查看 CFG 运行态。';
+      }
+    }
     this.render();
+    // 失败高亮（spec §2.7）：把失败步滚入视口，让用户一眼定位到崩点。
+    if (!res.ok && res.failedStepId) this.scrollStepIntoView(res.failedStepId);
     return res;
+  }
+
+  /** 把某步的 CFG 节点与列表项滚入视口（失败高亮用；运行跟随由 CFG setStatus 处理）。 */
+  private scrollStepIntoView(stepId: string): void {
+    const cfgNode = this.mount.querySelector(`[data-cfg-node="${stepId}"]`) as HTMLElement | null;
+    if (cfgNode && typeof cfgNode.scrollIntoView === 'function') {
+      cfgNode.scrollIntoView({ block: 'nearest' });
+    }
+    const listItem = this.mount.querySelector(`[data-step-item][data-step-id="${stepId}"]`) as HTMLElement | null;
+    if (listItem && typeof listItem.scrollIntoView === 'function') {
+      listItem.scrollIntoView({ block: 'nearest' });
+    }
   }
 
   /** 兼容旧「回放」入口（既有调用方零改动）。 */
@@ -729,6 +1479,8 @@ export class UiShell {
       for (const s of flat) this.stepStatus.set(s.id, 'pass');
       return;
     }
+    // 失败但没带 stepId：不能把所有步标成 pass（那会看起来像跑成功了）。
+    if (!res.failedStepId) return;
     for (const s of flat) {
       if (s.id === res.failedStepId) {
         this.stepStatus.set(s.id, 'fail');
@@ -750,7 +1502,7 @@ export class UiShell {
   }
 
   /** 定位当前步元素并精修高亮框坐标；无 locator 或定位失败则静默跳过。 */
-  private async followHighlight(stepId: string, gen: number): Promise<void> {
+  private async followHighlight(stepId: string, gen?: number): Promise<void> {
     const loc = this.findStep(stepId)?.locator;
     if (!loc) return;
     try {
@@ -774,19 +1526,42 @@ export class UiShell {
     const stage = this.mount.querySelector('[data-stage]') as HTMLElement | null;
     if (!stage) return;
     const r = rect ?? { x: 0, y: 0, width: 0, height: 0, visible: false, inViewport: false };
+    const img = stage.querySelector('img.ui-shell-frame-img') as HTMLImageElement | null;
+    let boxRect = { x: r.x, y: r.y, width: r.width, height: r.height };
+    if (img && img.naturalWidth && img.clientWidth) {
+      const layout = {
+        naturalWidth: img.naturalWidth,
+        naturalHeight: img.naturalHeight,
+        clientWidth: img.clientWidth,
+        clientHeight: img.clientHeight,
+      };
+      const vp = viewportFromRect(r, layout);
+      boxRect = mapHighlightRect(boxRect, vp, layout);
+    }
     const box = document.createElement('div');
     box.className = 'ui-shell-highlight' + (rect ? '' : ' is-pending');
     box.setAttribute('data-highlight', 'true');
     box.setAttribute('data-highlight-step', stepId);
+    const step = this.findStep(stepId);
     box.style.cssText =
-      `position:absolute;left:${r.x}px;top:${r.y}px;` +
-      `width:${r.width}px;height:${r.height}px;` +
-      'border:2px solid #ff5252;pointer-events:none;box-sizing:border-box;';
+      `position:absolute;left:${boxRect.x}px;top:${boxRect.y}px;` +
+      `width:${boxRect.width}px;height:${boxRect.height}px;` +
+      'pointer-events:none;box-sizing:border-box;z-index:3;';
     stage.appendChild(box);
+    if (step) {
+      const tag = document.createElement('div');
+      tag.className = 'ui-shell-highlight-tag';
+      tag.setAttribute('data-highlight-tag', 'true');
+      tag.textContent = describeStepBrief(step);
+      tag.style.cssText =
+        `position:absolute;left:${boxRect.x}px;top:${Math.max(0, boxRect.y - 22)}px;` +
+        'pointer-events:none;z-index:4;';
+      stage.appendChild(tag);
+    }
   }
 
   private clearHighlight(): void {
-    this.mount.querySelectorAll('[data-highlight]').forEach((el) => el.remove());
+    this.mount.querySelectorAll('[data-highlight],[data-highlight-tag]').forEach((el) => el.remove());
   }
 
   // ---- 可视化 ----
@@ -799,10 +1574,103 @@ export class UiShell {
     return this.kernel.screenshot();
   }
 
+  /** 抓当前靶机画面，绑到该 step.id。有 locator 时先在靶机上画框再拍；target 用步骤上的窗口，不看下拉。 */
+  private async captureStepShot(stepId: string, loc?: Locator, target?: string): Promise<void> {
+    if (!this.connected) return;
+    try {
+      const opts: { highlight?: Locator; target?: string } = {};
+      if (loc) opts.highlight = loc;
+      if (target) opts.target = target;
+      const buf = Object.keys(opts).length > 0
+        ? await this.kernel.screenshot(opts)
+        : await this.kernel.screenshot();
+      const png = pngBase64(buf);
+      if (!png || png.length < 8) return;
+      this.stepShots.set(stepId, { png });
+      if (this.selectedStepId === stepId) this.showStoredShot(stepId);
+    } catch (err) {
+      console.warn('[UiShell] 步骤截图失败:', err instanceof Error ? err.message : err);
+    }
+  }
+
   /**
-   * 启动截图流：定时拉取被测软件截图并渲染到舞台区（解决"看不到软件页面"）。
-   * 演示内核截图为空，仅真机（WsKernel/PlaywrightCdpAdapter）有实际画面。
-   * 渲染为 dataURL <img> 叠加在舞台区，高亮框叠加其上。
+   * 导入或连接后给叶子步补拍：有 locator 走录制同款 highlight 截图，
+   * 无 locator（wait / 整页 textContains）拍未高亮整页，舞台才有逐步流。
+   * 已有图的 id 不覆盖（录制当场拍的比事后整页更接近操作瞬间）。
+   */
+  private async backfillStepShots(): Promise<void> {
+    if (!this.connected) return;
+    const gen = ++this.shotBackfillGen;
+    for (const step of this.flattenSteps()) {
+      if (gen !== this.shotBackfillGen) return;
+      if (step.children?.length) continue;
+      if (this.stepShots.has(step.id)) continue;
+      await this.captureStepShot(step.id, shotLocatorOf(step), step.target);
+    }
+  }
+
+  /** 舞台只显示该步缓存图，不刷实时流。悬停也会走这里，离开不撤回。 */
+  private showStoredShot(stepId: string): void {
+    const stage = this.mount.querySelector('[data-stage]') as HTMLElement | null;
+    if (!stage) return;
+    stage.setAttribute('data-preview-step', stepId);
+    stage.removeAttribute('data-preview-empty');
+    const shot = this.stepShots.get(stepId);
+    const hint = stage.querySelector('[data-frame]') as HTMLElement | null;
+    let img = stage.querySelector('img.ui-shell-frame-img') as HTMLImageElement | null;
+    if (!shot) {
+      if (img) img.remove();
+      this.clearHighlight();
+      if (hint) hint.textContent = '该步尚无截图';
+      return;
+    }
+    if (!img) {
+      img = document.createElement('img');
+      img.className = 'ui-shell-frame-img';
+      img.style.cssText = 'width:100%;height:100%;object-fit:contain;';
+      stage.prepend(img);
+    }
+    img.src = `data:image/png;base64,${shot.png}`;
+    if (hint) hint.textContent = '';
+    this.clearHighlight();
+  }
+
+  private showBlankPreview(): void {
+    const stage = this.mount.querySelector('[data-stage]') as HTMLElement | null;
+    if (!stage) return;
+    stage.setAttribute('data-preview-empty', 'true');
+    stage.removeAttribute('data-preview-step');
+    stage.querySelector('img.ui-shell-frame-img')?.remove();
+    this.clearHighlight();
+    const hint = stage.querySelector('[data-frame]') as HTMLElement | null;
+    if (hint) hint.textContent = '';
+  }
+
+  private applyPreview(): void {
+    if (this.previewFromHover && this.previewStepId) {
+      this.showStoredShot(this.previewStepId);
+      return;
+    }
+    if ((this.packMenuIds?.length ?? 0) >= 2 || this.selectedIds.size >= 2) {
+      this.showBlankPreview();
+      return;
+    }
+    const id = this.previewStepId ?? this.selectedStepId;
+    if (!id) {
+      this.showBlankPreview();
+      return;
+    }
+    const step = this.findStep(id);
+    if (step && this.isNonAtomic(step)) {
+      this.showBlankPreview();
+      return;
+    }
+    this.showStoredShot(id);
+  }
+
+  /**
+   * 非产品路径：规格要求舞台只显示步骤截图。保留此方法仅供旧单测与显式调试调用。
+   * 连接 / boot 不得自动开流。
    */
   startFrameStream(intervalMs = 1000): void {
     this.stopFrameStream();
@@ -841,22 +1709,346 @@ export class UiShell {
   // ---- 导入 / 导出 ----
 
   exportScript(): string {
-    return ScriptEditor.save(this.script);
+    const shots = this.shotsPayload();
+    const { shots: _ignored, ...rest } = this.script;
+    const payload = Object.keys(shots).length > 0 ? { ...rest, shots } : rest;
+    return ScriptEditor.save(payload);
   }
 
-  importScript(json: string): void {
+  /**
+   * 导入同一份工作台 JSON。可选 sidecar 是 `*.shots.json`（{ shots } 或扁平 map）。
+   * 配图写入 getStepShots，未连接也能在舞台看到。
+   */
+  importScript(json: string, sidecarJson?: string): void {
     this.script = ScriptEditor.load(json);
+    this.stepShots.clear();
+    this.hydrateShots(parseShotsMap(this.script));
+    if (sidecarJson) {
+      try {
+        this.hydrateShots(parseShotsMap(JSON.parse(sidecarJson)));
+      } catch {
+        /* 侧车坏了不影响步骤导入 */
+      }
+    }
+    this.detailOpen = false;
+    this.packMenuIds = undefined;
     this.render();
+    void this.backfillStepShots();
+  }
+
+  /**
+   * 把一份 Script 推进当前 UI 会话（CFG + shots）。
+   * 工作台「导入」按钮仍走文件选择 → importScript；本方法是对话/桥/将来 MCP `script.open` 的入口。
+   * 跨 JSON 边界：null 当空对象，不靠函数默认参数。
+   */
+  loadScript(raw: unknown): void {
+    const v = raw ?? {};
+    const json = typeof v === 'string' ? v : JSON.stringify(v);
+    this.importScript(json);
+  }
+
+  private hydrateShots(map: Record<string, string>): void {
+    for (const [id, v] of Object.entries(map ?? {})) {
+      const png = shotToBase64(v);
+      if (png) this.stepShots.set(id, { png });
+    }
+  }
+
+  private shotsPayload(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [id, s] of this.stepShots) {
+      const url = shotToDataUrl(s.png);
+      if (url) out[id] = url;
+    }
+    return out;
+  }
+
+  /** 录制/点选/点步/框选 → 流图主栏；闲置与悬停 → 截图主栏。 */
+  private layoutMode(): 'flow' | 'shot' {
+    if (this.recording || this.pickMode) return 'flow';
+    if (this.cfgPrimary) return 'flow';
+    return 'shot';
+  }
+
+  /** 顶栏旁注已连接靶机的窗口名，不是产品名。未连接则省略。 */
+  private connectedTargetTitle(): string | undefined {
+    if (!this.connected) return undefined;
+    let targets: { id?: string; title?: string }[] = [];
+    try { targets = (this.listTargets() ?? []) as { id?: string; title?: string }[]; } catch { targets = []; }
+    const cur = targets.find((t) => t.id === this.currentTargetId) ?? targets[0];
+    const title = cur?.title?.trim();
+    return title || undefined;
+  }
+
+  private openInspector(stepId: string): void {
+    if (!this.findStep(stepId)) return;
+    this.selectedStepId = stepId;
+    if (this.selectedIds.size <= 1) this.selectedIds = new Set([stepId]);
+    this.detailOpen = true;
+    this.cfgPrimary = true;
+    this.saveNotice = false;
+    this.render();
+  }
+
+  private closeInspector(): void {
+    if (!this.detailOpen && !this.saveNotice) return;
+    this.detailOpen = false;
+    this.saveNotice = false;
+    const pane = this.mount.querySelector('[data-detail]') as HTMLElement | null;
+    this.mount.setAttribute('data-layout', this.layoutMode());
+    if (pane && pane.getAttribute('data-detail-open') === 'true') {
+      pane.classList.remove('is-open');
+      pane.classList.add('is-leaving');
+      pane.setAttribute('data-detail-open', 'false');
+      this.afterMotion(() => this.render());
+      return;
+    }
+    this.render();
+  }
+
+  /** 点 CFG 空白：回到截图主栏，关浮动钮和详情，保留最后点中步的高亮。 */
+  private clearCfgBlank(): void {
+    const menu = this.mount.querySelector('[data-pack-menu]') as HTMLElement | null;
+    const pane = this.mount.querySelector('[data-detail]') as HTMLElement | null;
+    this.packMenuIds = undefined;
+    this.cfgPrimary = false;
+    this.detailOpen = false;
+    this.saveNotice = false;
+    if (this.selectedStepId) this.selectedIds = new Set([this.selectedStepId]);
+    else this.selectedIds.clear();
+    this.mount.setAttribute('data-layout', this.layoutMode());
+    let waiting = false;
+    if (menu && !menu.hasAttribute('data-leaving')) {
+      menu.classList.add('is-leaving');
+      menu.setAttribute('data-leaving', 'true');
+      waiting = true;
+    }
+    if (pane && pane.getAttribute('data-detail-open') === 'true') {
+      pane.classList.remove('is-open');
+      pane.classList.add('is-leaving');
+      pane.setAttribute('data-detail-open', 'false');
+      waiting = true;
+    }
+    if (waiting) {
+      this.afterMotion(() => this.render());
+      return;
+    }
+    this.render();
+  }
+
+  private afterMotion(fn: () => void): void {
+    if (this.motionTimer !== undefined) {
+      clearTimeout(this.motionTimer);
+      this.motionTimer = undefined;
+    }
+    this.motionTimer = setTimeout(() => {
+      this.motionTimer = undefined;
+      fn();
+    }, UI_MOTION_MS);
+  }
+
+  private onEscape(): void {
+    if (this.pickMode) { this.exitPickMode(); return; }
+    if (this.packMenuIds || this.selectedIds.size > 1) {
+      this.clearCfgBlank();
+      return;
+    }
+    if (this.detailOpen) this.closeInspector();
+  }
+
+  private selectForView(stepId: string): void {
+    if (!this.findStep(stepId)) return;
+    this.selectedStepId = stepId;
+    this.selectedIds = new Set([stepId]);
+    this.detailOpen = false;
+    this.saveNotice = false;
+    this.packMenuIds = undefined;
+    this.cfgPrimary = true;
+    this.previewFromHover = false;
+    this.previewStepId = this.previewTargetOf(stepId);
+    this.render();
+  }
+
+  /** 非原子组/框选没有逐步截图，舞台留空，避免残留上一步的图。 */
+  private previewTargetOf(stepId: string): string | undefined {
+    const step = this.findStep(stepId);
+    if (!step) return undefined;
+    if (this.isNonAtomic(step)) return undefined;
+    return stepId;
+  }
+
+  private isNonAtomic(step: Step): boolean {
+    if (step.children?.length) return true;
+    return !!step.control && !isAtomicGroup(step);
+  }
+
+  private packActionIds(): string[] {
+    if (this.packMenuIds && this.packMenuIds.length >= 2) return this.packMenuIds;
+    if (this.selectedIds.size >= 2) return [...this.selectedIds];
+    return [];
+  }
+
+  /** 框选（≥2）或 shot 布局下点单步：都要在包围盒旁出打包簇。 */
+  private packOverlayIds(): string[] {
+    const multi = this.packActionIds();
+    if (multi.length > 0) return multi;
+    if (this.selectedStepId) return [this.selectedStepId];
+    return [];
+  }
+
+  /** 点选/框选后在选区边缘出浮动钮；闲置截图主栏时不出。 */
+  private shouldShowPackOverlay(): boolean {
+    if (!this.cfgPrimary) return false;
+    return this.packOverlayIds().length > 0;
+  }
+
+  private packButtonSet(): 'atomic' | 'marquee' | 'group' {
+    if ((this.packMenuIds?.length ?? 0) >= 2 || this.selectedIds.size >= 2) return 'marquee';
+    const s = this.selectedStepId ? this.findStep(this.selectedStepId) : undefined;
+    if (s && this.isNonAtomic(s)) return 'group';
+    return 'atomic';
+  }
+
+  /** 浮动打包簇贴在选区包围盒右侧；右侧不够则放到选区上方。 */
+  private placePackMenu(menu: HTMLElement, canvas: HTMLElement): void {
+    const ids = this.packOverlayIds();
+    this.placeOverlayNearIds(menu, canvas, ids, 'toolbar');
+  }
+
+  private placeDetailOverlay(pane: HTMLElement, canvas: HTMLElement): void {
+    const id = this.selectedStepId;
+    this.placeOverlayNearIds(pane, canvas, id ? [id] : [], 'detail');
+  }
+
+  /** pan/zoom/resize 后按当前节点盒重放浮动层，不整页 render。 */
+  private repositionFloatingChrome(): void {
+    const canvas = this.mount.querySelector('.ui-shell-cfg-canvas') as HTMLElement | null;
+    if (!canvas) return;
+    const menu = canvas.querySelector('[data-pack-menu]') as HTMLElement | null;
+    if (menu) this.placePackMenu(menu, canvas);
+    const pane = canvas.querySelector('[data-detail]') as HTMLElement | null;
+    if (pane && pane.getAttribute('data-detail-open') === 'true') {
+      this.placeDetailOverlay(pane, canvas);
+    }
+  }
+
+  private watchFloatingChrome(canvas: HTMLElement): void {
+    this.chromeObserver?.disconnect();
+    if (typeof ResizeObserver === 'undefined' || canvas.clientWidth < 1) return;
+    this.chromeObserver = new ResizeObserver(() => this.repositionFloatingChrome());
+    this.chromeObserver.observe(canvas);
+  }
+
+  /** 节点盒相对画布；GCR 为空时走 offset，避免退回 CFG 原点。 */
+  private nodeBoxInCanvas(node: HTMLElement, canvas: HTMLElement, canvasRect: DOMRect): FloatBox {
+    const r = node.getBoundingClientRect();
+    if (r.width >= 1 && r.height >= 1) {
+      return { left: r.left - canvasRect.left, top: r.top - canvasRect.top, right: r.right - canvasRect.left, bottom: r.bottom - canvasRect.top };
+    }
+    let x = 0;
+    let y = 0;
+    let cur: HTMLElement | null = node;
+    while (cur && cur !== canvas) {
+      x += cur.offsetLeft;
+      y += cur.offsetTop;
+      const next = cur.offsetParent as HTMLElement | null;
+      if (!next || next === cur) break;
+      cur = next;
+    }
+    const w = node.offsetWidth || 120;
+    const h = node.offsetHeight || 36;
+    return { left: x, top: y, right: x + w, bottom: y + h };
+  }
+
+  private placeOverlayNearIds(el: HTMLElement, canvas: HTMLElement, ids: string[], kind: 'toolbar' | 'detail'): void {
+    const cr = canvas.getBoundingClientRect();
+    let minL = Infinity;
+    let minT = Infinity;
+    let maxR = -Infinity;
+    let maxB = -Infinity;
+    let hit = false;
+    for (const node of canvas.querySelectorAll('[data-cfg-node]')) {
+      const id = node.getAttribute('data-cfg-node');
+      if (!id || !ids.includes(id)) continue;
+      const box = this.nodeBoxInCanvas(node as HTMLElement, canvas, cr);
+      minL = Math.min(minL, box.left);
+      minT = Math.min(minT, box.top);
+      maxR = Math.max(maxR, box.right);
+      maxB = Math.max(maxB, box.bottom);
+      hit = true;
+    }
+    el.style.position = 'absolute';
+    el.style.zIndex = kind === 'detail' ? '18' : '16';
+    el.style.removeProperty('right');
+    el.style.removeProperty('bottom');
+    const canvasW = Math.max(cr.width, canvas.clientWidth, 1);
+    const canvasH = Math.max(cr.height, canvas.clientHeight, 1);
+    if (!hit) {
+      // 没有命中节点才贴内边距；有选区时禁止假装停在 CFG 原点。
+      el.style.left = '8px';
+      el.style.top = '8px';
+      el.setAttribute('data-float-origin', 'fallback');
+      return;
+    }
+    const nodeBox: FloatBox = { left: minL, top: minT, right: maxR, bottom: maxB };
+    const ow = Math.max(el.offsetWidth || 0, kind === 'detail' ? 280 : 168);
+    const oh = Math.max(el.offsetHeight || 0, kind === 'detail' ? 180 : 32);
+    const pos = floatingChromePosition(nodeBox, { width: canvasW, height: canvasH }, { width: ow, height: oh }, kind);
+    el.style.left = `${pos.left}px`;
+    el.style.top = `${pos.top}px`;
+    el.setAttribute('data-float-origin', 'bbox');
+  }
+
+  /**
+   * 页面壳：跟指针的雾块。点阵只在 CFG 画布，不要铺到顶栏或整页。
+   */
+  private renderFluidField(): HTMLElement {
+    const field = document.createElement('div');
+    field.className = 'ui-shell-app-field';
+    field.setAttribute('data-app-field', 'true');
+    field.setAttribute('aria-hidden', 'true');
+    field.setAttribute('data-pointer', 'none');
+    field.style.pointerEvents = 'none';
+    const fluid = document.createElement('div');
+    fluid.className = 'ui-shell-fluid';
+    fluid.setAttribute('data-fluid', 'true');
+    const follow = document.createElement('div');
+    follow.className = 'ui-shell-fluid-follow';
+    for (let i = 1; i <= 3; i++) {
+      const blob = document.createElement('span');
+      blob.className = `ui-shell-fluid-blob ui-shell-fluid-blob--${i}`;
+      blob.setAttribute('data-fluid-blob', String(i));
+      follow.appendChild(blob);
+    }
+    fluid.appendChild(follow);
+    const spot = document.createElement('span');
+    spot.className = 'ui-shell-fluid-spot';
+    spot.setAttribute('data-fluid-spot', 'true');
+    fluid.appendChild(spot);
+    field.appendChild(fluid);
+    return field;
   }
 
   // ---- 渲染（全量重渲染，步骤规模小，简单优先）----
 
   render(): void {
+    if (this.motionTimer !== undefined) {
+      clearTimeout(this.motionTimer);
+      this.motionTimer = undefined;
+    }
     const root = this.mount;
     root.innerHTML = '';
 
     // 持久横幅（演示模式/录制警告）：render 每次重建 DOM，故 banner 必须从实例字段重新渲染，
     // 否则 insertStep 等后续 render 会把它冲掉（此前 banner 在 render 外 prepend 即被此问题吞掉）。
+    root.classList.add('ui-shell-app');
+    root.setAttribute('data-layout', this.layoutMode());
+    root.setAttribute('data-workbench-inset', '12-14-14');
+    root.style.padding = '12px 14px 14px';
+    root.style.gap = '10px';
+    root.style.overflow = 'hidden';
+    root.style.maxWidth = '100%';
+    root.appendChild(this.renderFluidField());
     if (this.bannerText) {
       const bar = document.createElement('div');
       bar.className = 'ui-shell-banner' + (this.bannerDemo ? ' banner--demo' : '');
@@ -865,25 +2057,76 @@ export class UiShell {
       root.appendChild(bar);
     }
 
+    // 录制中提示（spec §2.2）：按钮文案之外再给一条横幅，避免「点了开始录制却像没反应」。
+    if (this.recording) {
+      const bar = document.createElement('div');
+      bar.className = 'ui-shell-banner banner--recording';
+      bar.setAttribute('data-recording-banner', 'true');
+      bar.textContent = '录制中：请到靶机里点击或输入，步骤会实时出现在工作台。再点「停止录制」结束。';
+      root.appendChild(bar);
+    }
+
+    // 点选态提示（spec §2.3）：进入点选后顶部提示用户切到靶机点击，并提供取消。
+    if (this.pickMode) {
+      const bar = document.createElement('div');
+      bar.className = 'ui-shell-banner banner--pick';
+      bar.setAttribute('data-pick-mode', 'true');
+      bar.textContent = '请到真实软件里点选目标元素。这次点击只写回当前表单，不会当成普通录制步骤。';
+      const cancel = document.createElement('button');
+      cancel.className = 'ui-shell-pick-cancel';
+      cancel.textContent = '取消点选';
+      cancel.setAttribute('data-action', 'cancel-pick');
+      bar.appendChild(cancel);
+      root.appendChild(bar);
+    }
+
     const header = document.createElement('div');
     header.className = 'ui-shell-header';
-    header.innerHTML = '';
+    header.setAttribute('data-header', 'true');
 
+    const brand = document.createElement('div');
+    brand.className = 'ui-shell-header-brand';
+    brand.setAttribute('data-header-brand', 'true');
+
+    const wordmark = document.createElement('div');
+    wordmark.className = 'ui-shell-wordmark';
+    wordmark.setAttribute('data-wordmark', 'true');
     const titleText = document.createElement('span');
-    titleText.textContent = `可视化蒙版 · ${this.script.app.name} · ${this.connected ? '已连接' : '未连接'}${this.recording ? ' · 录制中' : ''}`;
-    header.appendChild(titleText);
+    titleText.className = 'ui-shell-wordmark-label';
+    titleText.setAttribute('data-product-title', 'true');
+    titleText.textContent = WORDMARK_TEXT;
+    wordmark.appendChild(titleText);
+    brand.appendChild(wordmark);
+    mountWordmark(wordmark);
 
-    // 录制指示灯
+    const conn = document.createElement('span');
+    conn.className = 'ui-shell-conn';
+    conn.setAttribute('data-conn-status', 'true');
+    conn.textContent = this.connected ? '已连接' : '未连接';
+    const targetTitle = this.connectedTargetTitle();
+    if (targetTitle) conn.title = targetTitle;
+    brand.appendChild(conn);
+
+    if (typeof document !== 'undefined') document.title = WORDMARK_TEXT;
+
     const dot = document.createElement('span');
     dot.className = 'rec-dot' + (this.recording ? ' on' : '');
-    header.appendChild(dot);
+    brand.appendChild(dot);
 
-    // 目标选择下拉（窗口/webview）
-    const targets = this.listTargets();
-    if (this.connected && targets.length > 0) {
+    // CDP 目标下拉：单窗口没用，多 webview 才需要。标签是「当前窗口」不是产品名。
+    let targets: { id: string; type?: string; title?: string }[] = [];
+    try { targets = (this.listTargets() ?? []) as { id: string; type?: string; title?: string }[]; } catch { targets = []; }
+    if (this.connected && targets.length > 1 && !this.recording) {
+      const lab = document.createElement('label');
+      lab.className = 'ui-shell-target-label';
+      lab.setAttribute('data-target-label', 'true');
+      const labText = document.createElement('span');
+      labText.textContent = '当前窗口';
+      lab.appendChild(labText);
       const sel = document.createElement('select');
       sel.className = 'ui-shell-target-select';
       sel.setAttribute('data-action', 'select-target');
+      sel.setAttribute('data-target-select', 'true');
       targets.forEach((t) => {
         const opt = document.createElement('option');
         opt.value = t.id;
@@ -891,122 +2134,241 @@ export class UiShell {
         if (t.id === this.currentTargetId) opt.selected = true;
         sel.appendChild(opt);
       });
-      header.appendChild(sel);
+      sel.addEventListener('change', () => this.selectTarget(sel.value));
+      lab.appendChild(sel);
+      brand.appendChild(lab);
     }
-    root.appendChild(header);
+    header.appendChild(brand);
 
-    // 顶部操作栏
+    // 操作栏进顶栏第二行，不再钉在窗口底。data-action 名不变。
     const actions = document.createElement('div');
     actions.className = 'ui-shell-actions';
     actions.setAttribute('data-actions', 'true');
-    const addBtn = (label: string, action: string, cls = '') => {
+    const addBtn = (label: string, action: string, cls = '', disabled = false) => {
       const b = document.createElement('button');
       b.className = cls;
       b.textContent = label;
       b.setAttribute('data-action', action);
+      b.disabled = disabled;
       actions.appendChild(b);
+      return b;
     };
-    addBtn('插入步骤', 'insert', 'primary');
-    addBtn('开始录制', 'toggle-record');
-    addBtn('包成选择组', 'wrap-if');
-    addBtn('包成循环组', 'wrap-while');
+    {
+      const rec = document.createElement('button');
+      rec.textContent = this.recording ? '停止录制' : '开始录制';
+      rec.setAttribute('data-action', 'toggle-record');
+      rec.setAttribute('data-recording', this.recording ? 'true' : 'false');
+      rec.disabled = !this.connected && !this.recording;
+      if (this.recording) rec.className = 'danger';
+      else rec.className = 'primary';
+      actions.appendChild(rec);
+    }
+    const insertBtn = addBtn('插入步骤 ▾', 'insert');
+    const insertWrap = document.createElement('div');
+    insertWrap.className = 'ui-shell-insert-wrap';
+    insertWrap.setAttribute('data-insert-wrap', 'true');
+    insertBtn.replaceWith(insertWrap);
+    insertWrap.appendChild(insertBtn);
     addBtn('运行全部', 'run-all');
+    addBtn('导入', 'import');
     addBtn('导出', 'export');
     addBtn('清空', 'clear', 'danger');
-    root.appendChild(actions);
-
-    // 插入 4 类手动步骤的子菜单（spec §2.3.1：仅 wait/waitUntil/assert/repeat）。
-    // 仅当用户点击「插入步骤」展开后才渲染；初始不展开，避免遮挡主区。
-    if (this.insertMenuOpen) {
-      const menu = document.createElement('div');
-      menu.className = 'ui-shell-insert-menu';
-      menu.setAttribute('data-insert-menu', 'true');
-      const kinds: { type: string; label: string }[] = [
-        { type: 'wait', label: '等待时间（wait）' },
-        { type: 'waitUntil', label: '等待条件（waitUntil）' },
-        { type: 'assert', label: '断言（assert，可作选择组条件）' },
-        { type: 'repeat', label: '循环（repeat）' },
-      ];
-      kinds.forEach((k) => {
-        const b = document.createElement('button');
-        b.className = 'ui-shell-insert-item';
-        b.textContent = k.label;
-        b.setAttribute('data-action', 'insert-type');
-        b.setAttribute('data-insert-type', k.type);
-        menu.appendChild(b);
+    const file = document.createElement('input');
+    file.type = 'file';
+    file.accept = 'application/json';
+    file.multiple = true;
+    file.setAttribute('data-import-file', 'true');
+    file.style.display = 'none';
+    file.addEventListener('change', () => {
+      const files = Array.from(file.files ?? []);
+      if (files.length === 0) return;
+      const scriptFile = files.find((f) => !/\.shots\.json$/i.test(f.name)) ?? files[0];
+      const shotsFile = files.find((f) => /\.shots\.json$/i.test(f.name));
+      void scriptFile.text().then(async (txt) => {
+        try {
+          const sidecar = shotsFile ? await shotsFile.text() : undefined;
+          this.importScript(txt, sidecar);
+        } catch (err) {
+          this.setBanner(`导入失败：${err instanceof Error ? err.message : String(err)}`);
+        }
       });
-      root.appendChild(menu);
-    }
+    });
+    actions.appendChild(file);
+    header.appendChild(actions);
+    root.appendChild(header);
 
-    // 运行失败提醒（spec §2.3.4：中途失败需暂停提醒，指明失败步骤）
-    if (this.lastFailedStepId) {
-      const failed = this.flattenSteps().find((s) => s.id === this.lastFailedStepId);
+    // 运行失败 / 未连接提醒（spec §2.3.4：失败要有 notice，不能静默禁用按钮）
+    const noticeText = (() => {
+      if (this.lastFailedStepId) {
+        const failed = this.flattenSteps().find((s) => s.id === this.lastFailedStepId);
+        return failed
+          ? `运行中断：第 ${this.flattenSteps().indexOf(failed) + 1} 步「${describeStep(failed)}」失败，请检查后重跑。`
+          : `运行中断：步骤 ${this.lastFailedStepId} 失败。`;
+      }
+      return this.runNoticeText;
+    })();
+    if (noticeText) {
       const notice = document.createElement('div');
       notice.className = 'ui-shell-run-notice';
       notice.setAttribute('data-run-notice', 'true');
-      notice.textContent = failed
-        ? `运行中断：第 ${this.flattenSteps().indexOf(failed) + 1} 步「${describeStep(failed)}」失败，请检查后重跑。`
-        : `运行中断：步骤 ${this.lastFailedStepId} 失败。`;
+      notice.textContent = noticeText;
       root.appendChild(notice);
     }
 
-    // 多栏主体：被测软件视图 + 步骤列表 + CFG 视图（横向 4 栏，由 .ui-shell-body flex 承载）。
+    // 主体：步骤流图 | 预览舞台。详情是叠加层，不占常驻右栏。
     const body = document.createElement('div');
     body.className = 'ui-shell-body';
     root.appendChild(body);
 
-    // 中间：被测软件视图（截图流 <img> + 高亮层）
+    const cfg = document.createElement('div');
+    cfg.className = 'ui-shell-cfg';
+    cfg.setAttribute('data-cfg', 'true');
+    cfg.style.position = 'relative';
+    cfg.style.overflow = 'hidden';
+    const cfgTitle = document.createElement('div');
+    cfgTitle.className = 'ui-shell-pane-title';
+    cfgTitle.innerHTML = '<span>步骤流图</span><span>拖拽调序 · 框选打包 · 单选编辑</span>';
+    cfg.appendChild(cfgTitle);
+    const cfgTree = document.createElement('div');
+    cfgTree.className = 'ui-shell-cfg-canvas';
+    cfgTree.style.overflow = 'hidden';
+    cfg.appendChild(cfgTree);
+    if (!this.cfgView) {
+      this.cfgView = new CfgView({
+        mount: cfgTree,
+        onSelect: (stepId, mods) => {
+          if (mods?.additive) {
+            this.packMenuIds = undefined;
+            if (this.selectedIds.has(stepId)) this.selectedIds.delete(stepId);
+            else this.selectedIds.add(stepId);
+            this.selectedStepId = stepId;
+            this.detailOpen = false;
+            this.cfgPrimary = true;
+            this.previewFromHover = false;
+            this.previewStepId = this.selectedIds.size >= 2 ? undefined : this.previewTargetOf(stepId);
+            this.render();
+            return;
+          }
+          this.selectForView(stepId);
+        },
+        onReorder: (dragId, dropId) => {
+          this.script = ScriptEditor.relocate(this.script, dragId, dropId);
+          this.render();
+        },
+        onMarquee: (ids) => {
+          this.selectedIds = new Set(ids);
+          this.selectedStepId = ids[0];
+          this.packMenuIds = ids;
+          this.detailOpen = false;
+          this.cfgPrimary = true;
+          this.previewFromHover = false;
+          this.previewStepId = undefined;
+          this.render();
+        },
+        onBlank: () => this.clearCfgBlank(),
+        onHover: (stepId) => {
+          this.previewFromHover = true;
+          this.previewStepId = stepId;
+          this.showStoredShot(stepId);
+        },
+        onViewChange: () => this.repositionFloatingChrome(),
+      });
+    } else {
+      this.cfgView.rebindMount(cfgTree);
+    }
+    this.cfgMount = cfgTree;
+    this.cfgView.update(this.script);
+    this.syncAllCfgStatuses();
+    if (this.selectedStepId) this.cfgView.setSelected(this.selectedStepId, this.selectedIds);
+    if (this.shouldShowPackOverlay()) {
+      const menu = document.createElement('div');
+      menu.className = 'ui-shell-pack-menu';
+      menu.setAttribute('data-pack-menu', 'true');
+      menu.setAttribute('data-pack-float', 'true');
+      menu.setAttribute('data-pack-compact', 'true');
+      menu.setAttribute('data-pack-anchor', 'bbox');
+      menu.setAttribute('data-ui-motion', '180');
+      const packSet = this.packButtonSet();
+      menu.setAttribute('data-pack-set', packSet);
+      const mk = (kind: 'sequence' | 'if' | 'while', action: string, label: string, title: string) => {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.title = title;
+        b.setAttribute('data-action', action);
+        b.setAttribute('data-pack-choice', kind);
+        menu.appendChild(b);
+      };
+      const mkEdit = () => {
+        if (!this.selectedStepId) return;
+        const edit = document.createElement('button');
+        edit.textContent = '编辑';
+        edit.setAttribute('data-action', 'edit');
+        edit.setAttribute('data-step-id', this.selectedStepId);
+        menu.appendChild(edit);
+      };
+      if (packSet === 'marquee') {
+        mk('sequence', 'wrap-sequence', '打包', '框选打包为顺序组');
+        mk('if', 'wrap-if', '分支', '设为分支组');
+        mk('while', 'wrap-while', '循环', '设为循环组');
+      } else if (packSet === 'group') {
+        mkEdit();
+        mk('if', 'wrap-if', '分支', '设为分支组');
+        mk('while', 'wrap-while', '循环', '设为循环组');
+        const unpack = document.createElement('button');
+        unpack.textContent = '拆包';
+        unpack.setAttribute('data-action', 'unpack');
+        unpack.setAttribute('data-step-id', this.selectedStepId ?? '');
+        menu.appendChild(unpack);
+      } else {
+        mkEdit();
+        mk('if', 'wrap-if', '分支', '设为分支组');
+        mk('while', 'wrap-while', '循环', '设为循环组');
+      }
+      cfgTree.appendChild(menu);
+    }
+    body.appendChild(cfg);
+
+    const stageWrap = document.createElement('div');
+    stageWrap.className = 'ui-shell-stage-wrap';
     const stage = document.createElement('div');
     stage.className = 'ui-shell-stage';
     stage.setAttribute('data-stage', 'true');
     const frameHint = document.createElement('div');
     frameHint.className = 'ui-shell-frame';
     frameHint.setAttribute('data-frame', 'true');
-    frameHint.textContent = '[ 被测软件视图：连接后自动拉取截图流 ]';
+    frameHint.textContent = this.connected
+      ? '该步截图（不是实时软件画面）'
+      : (this.stepShots.size > 0
+        ? '该步截图来自导入文件，无需连接靶机'
+        : '[ 连接后：选中或录制一步才会出现该步截图 ]');
     stage.appendChild(frameHint);
-    body.appendChild(stage);
+    stageWrap.appendChild(stage);
+    body.appendChild(stageWrap);
 
-    // 侧边：步骤列表（用户友好形式，每条带操作按钮；支持多选建组）
-    const side = document.createElement('div');
-    side.className = 'ui-shell-steps';
-    side.setAttribute('data-steps', 'true');
-    const title = document.createElement('div');
-    title.className = 'ui-shell-steps-title';
-    title.textContent = `步骤 (${this.script.steps.length})`;
-    side.appendChild(title);
-
-    this.script.steps.forEach((step, idx) => {
-      side.appendChild(this.buildStepItem(step, idx));
-    });
-
-    this.stepsEl = side;
-    body.appendChild(side);
-
-    // 右侧：CFG 图形化视图（M3-R4）。独立 SRP 组件，由 UiShell 编排联动。
-    const cfg = document.createElement('div');
-    cfg.className = 'ui-shell-cfg';
-    cfg.setAttribute('data-cfg', 'true');
-    // 复用同一挂载区：若已存在 CfgView 则复用其实例，避免重复 new 导致事件重复绑定。
-    if (!this.cfgView) {
-      this.cfgView = new CfgView({
-        mount: cfg,
-        onSelect: (stepId) => this.selectStep(stepId),
-      });
-    } else {
-      // 重新挂到新创建的挂载区（render 会 innerHTML=''，旧 mount 已脱离文档）。
-      this.cfgView.rebindMount(cfg);
+    const detail = document.createElement('div');
+    detail.className = 'ui-shell-detail' + (this.detailOpen ? ' is-open' : '');
+    detail.setAttribute('data-detail', 'true');
+    detail.setAttribute('data-detail-open', this.detailOpen ? 'true' : 'false');
+    detail.setAttribute('data-detail-anchor', 'node');
+    detail.setAttribute('data-ui-motion', '180');
+    detail.style.overflow = 'hidden';
+    detail.style.maxHeight = 'min(72vh, 520px)';
+    const detailTitle = document.createElement('div');
+    detailTitle.className = 'ui-shell-pane-title';
+    detailTitle.textContent = '详情 / 编辑';
+    detail.appendChild(detailTitle);
+    cfgTree.appendChild(detail);
+    if (this.detailOpen && this.selectedStepId) {
+      const sel = this.findStep(this.selectedStepId);
+      if (sel) this.renderEditArea(sel);
     }
-    this.cfgMount = cfg;
-    // update 幂等：重复 render 不会产生重复节点。
-    this.cfgView.update(this.script);
-    // 重建后回填运行态（update 会重置为 pending，需用同一真相源 stepStatus 恢复）。
-    this.syncAllCfgStatuses();
-    // 重建后恢复当前选中态（若运行/编辑期间有选中）。
-    if (this.selectedStepId) this.cfgView.setSelected(this.selectedStepId);
-    body.appendChild(cfg);
+    // 先挂进文档再量包围盒：脱离文档时 GCR 全是 0，浮动钮会假停在 CFG 原点。
+    this.repositionFloatingChrome();
+    this.watchFloatingChrome(cfgTree);
+    this.applyPreview();
 
-    // Git 版本面板：按产品决策默认不挂载（解耦可选插件，保留 VersionPanel 类与
-    // version-store 接口，由宿主配置决定是否启用）。主体「生成脚本」流程不依赖它。
+    this.stepsEl = undefined;
+
     if (this.enableVersionPanel) {
       const ver = document.createElement('div');
       ver.className = 'ui-shell-version';
@@ -1024,6 +2386,30 @@ export class UiShell {
         this.versionPanel.update(this.versionStore);
       }
       body.appendChild(ver);
+    }
+
+    if (this.insertMenuOpen) {
+      const menu = document.createElement('div');
+      menu.className = 'ui-shell-insert-menu';
+      menu.setAttribute('data-insert-menu', 'true');
+      const kinds: { type: string; label: string }[] = [
+        { type: 'wait', label: '等待时间' },
+        { type: 'waitUntil', label: '等待元素出现' },
+        { type: 'assert', label: '断言' },
+      ];
+      kinds.forEach((k) => {
+        const b = document.createElement('button');
+        b.className = 'ui-shell-insert-item';
+        b.textContent = k.label;
+        b.setAttribute('data-action', 'insert-type');
+        b.setAttribute('data-insert-type', k.type);
+        menu.appendChild(b);
+      });
+      const off = document.createElement('div');
+      off.className = 'ui-shell-insert-off';
+      off.textContent = '循环不在这里 · 选中组后设 kind';
+      menu.appendChild(off);
+      insertWrap.appendChild(menu);
     }
   }
 
@@ -1078,14 +2464,13 @@ export class UiShell {
     return item;
   }
 
-  /** 增量追加一个步骤 DOM（录制实时生成用，避免全列表重渲染）。 */
-  private appendStepEl(step: Step): void {
-    if (!this.stepsEl) {
+  /** 增量把新录制步画进 CFG（不再维护线性步骤列表）。 */
+  private appendStepEl(_step: Step): void {
+    if (!this.cfgView) {
       this.render();
       return;
     }
-    this.stepsEl.appendChild(this.buildStepItem(step, this.script.steps.length - 1));
-    const title = this.stepsEl.querySelector('.ui-shell-steps-title');
-    if (title) title.textContent = `步骤 (${this.script.steps.length})`;
+    this.cfgView.update(this.script);
+    this.syncAllCfgStatuses();
   }
 }

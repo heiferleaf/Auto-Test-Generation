@@ -14,7 +14,6 @@ REM   CDP_PORT      override port, default 9244 (avoid CodeBuddy 9222 / WorkBudd
 REM   ATG_NOPAUSE=1 skip pause (for automation). Any script argument also skips pause.
 
 if not defined CDP_PORT set CDP_PORT=9244
-set "USER_DATA=%TEMP%\atg-vscode-cdp"
 set "EXE="
 
 REM Skip pause for automation: ATG_NOPAUSE=1, or any argument (e.g. nopause).
@@ -122,18 +121,70 @@ if not exist "%EXE%" (
   exit /b 1
 )
 
-echo Starting VS Code with --remote-debugging-port=%CDP_PORT% ...
-echo Executable: %EXE%
-echo Isolated user-data-dir: %USER_DATA%
-echo Using a separate user-data-dir so an already-running VS Code does not ignore the debug-port flag.
-start "" "%EXE%" --remote-debugging-port=%CDP_PORT% --user-data-dir="%USER_DATA%" --disable-workspace-trust
+REM Skip ports that listen but do not serve /json (ghost bind: WSAEADDRINUSE 0x2740, DevTools never starts).
+call :pick_live_port
+if errorlevel 1 (
+  echo [error] Could not find a free CDP port in 9244-9254.
+  call :maybe_pause
+  exit /b 1
+)
 
-echo Started. Open http://localhost:%CDP_PORT%/json to verify the debug port.
-echo After that: set VSCODE_LIVE=1 ^&^& npm test -- test/integration-vscode.test.ts
-echo (integration test not landed yet; confirm /json lists targets first.)
+REM Per-port profile: a second launch with the same user-data-dir is forwarded to the
+REM first process, which then ignores --remote-debugging-port (so CDP never comes up).
+set "USER_DATA=%TEMP%\atg-vscode-cdp-!CDP_PORT!"
+
+echo Starting VS Code with --remote-debugging-port=!CDP_PORT! ...
+echo Executable: %EXE%
+echo Isolated user-data-dir: !USER_DATA!
+echo Using a separate user-data-dir so an already-running VS Code does not ignore the debug-port flag.
+
+curl.exe -s -m 2 "http://127.0.0.1:!CDP_PORT!/json" 2>nul | findstr /C:"webSocketDebuggerUrl" >nul
+if not errorlevel 1 (
+  echo [ok] Debug port !CDP_PORT! already serves /json. Not launching a second instance.
+  goto :print_url
+)
+
+start "" "%EXE%" --remote-debugging-port=!CDP_PORT! --user-data-dir="!USER_DATA!" --disable-workspace-trust
+
+echo Waiting for http://127.0.0.1:!CDP_PORT!/json ...
+set /a TRIES=0
+:wait_json
+timeout /t 1 /nobreak >nul
+set /a TRIES+=1
+curl.exe -s -m 2 "http://127.0.0.1:!CDP_PORT!/json" 2>nul | findstr /C:"webSocketDebuggerUrl" >nul
+if not errorlevel 1 goto :print_url
+if !TRIES! LSS 20 goto :wait_json
+echo [error] VS Code window may be open, but DevTools HTTP did not start on !CDP_PORT!.
+echo If the log says bind 0x2740 / "Cannot start http server for devtools", that port is a ghost.
+echo Re-run this script; it will skip dead ports. Or set CDP_PORT=9246
+call :maybe_pause
+exit /b 1
+
+:print_url
+echo [ok] CDP is live: http://localhost:!CDP_PORT!/json
+echo Open the workbench; if the default CDP port is dead it probes /json on the local debug band:
+echo   http://localhost:5173/
+echo If npm run ui printed another UI port, use that host. Optional override: ?cdp=!CDP_PORT!
+echo After that: set VSCODE_LIVE=1 ^&^& set CDP_PORT=!CDP_PORT! ^&^& npm test -- test/integration-vscode.test.ts
 call :maybe_pause
 endlocal
 goto :eof
+
+:pick_live_port
+REM If /json already works, keep CDP_PORT. If LISTENING but dead, increment.
+set /a GUARD=0
+:pick_loop
+set /a GUARD+=1
+if %GUARD% GTR 12 exit /b 1
+curl.exe -s -m 2 "http://127.0.0.1:%CDP_PORT%/json" 2>nul | findstr /C:"webSocketDebuggerUrl" >nul
+if not errorlevel 1 exit /b 0
+netstat -ano | findstr /C:":%CDP_PORT%" | findstr /C:"LISTENING" >nul
+if not errorlevel 1 (
+  echo [warn] port %CDP_PORT% is occupied but /json is dead; trying next
+  set /a CDP_PORT+=1
+  goto :pick_loop
+)
+exit /b 0
 
 :maybe_pause
 if defined DO_PAUSE pause

@@ -13,8 +13,9 @@ import type { StepProgress } from '../executor/executor';
 import type { UiKernel } from './shell';
 import type { Script, Locator } from '../types/step';
 import { STEP_TYPES, CONTROL_KINDS } from '../types/step';
+import { importScript as loadScriptJson } from '../script/io';
 
-type RpcReq = { id: number; method: keyof UiKernel; args: unknown[] };
+type RpcReq = { id: number; method: keyof UiKernel | 'loadScript'; args: unknown[] };
 type RpcRes = { id: number; ok: true; result?: unknown } | { id: number; ok: false; error: string };
 /** 服务端主动推送消息（非请求/响应），用于录制增量事件、运行进度等。 */
 type WsEvent = { type: 'event'; event: string; data: unknown };
@@ -129,13 +130,28 @@ export function assertRunnableScript(v: unknown): Script {
   return v as Script;
 }
 
+/**
+ * 解析 loadScript 入参（对象或 JSON 字符串）。
+ * 跨 WS 的 null 还原成 {} 后再走 importScript，缺 schema 会明确失败，不会推进 UI。
+ */
+export function parseLoadScriptArg(raw: unknown): Script {
+  const v = raw ?? {};
+  if (typeof v === 'string') return loadScriptJson(v);
+  if (typeof v !== 'object') {
+    throw new Error(`loadScript 需要 script 对象或 JSON 字符串（实际: ${describeValue(raw)}）`);
+  }
+  return loadScriptJson(JSON.stringify(v));
+}
+
 /** 桥端所需的 adapter 能力（DIP：桥只依赖此抽象，不绑定 Playwright 实现）。 */
 export type BridgeAdapter = CdpAdapter & {
   screenshot(opts?: unknown): Promise<Buffer>;
   locateVisual(loc: Locator): Promise<VisualRect>;
   startRecording(onEvent?: (ev: unknown) => void): void;
   stopRecording(): Promise<unknown[]>;
-  playback(script: Script, onStep?: StepProgress): Promise<{ ok: boolean; failedStepId?: string }>;
+  startPick(onPick: (locator: Locator) => void): void;
+  cancelPick(): void;
+  playback(script: Script, onStep?: StepProgress, fromStepId?: string): Promise<{ ok: boolean; failedStepId?: string }>;
 };
 
 /**
@@ -153,7 +169,7 @@ export function attachKernelBridge(
   // 直接赋值（不用 as unknown as 强转）：若将来 BridgeAdapter 收窄而
   // PlaywrightCdpAdapter 未跟上，此处会**编译期报错**，而非被强转静默掩盖。
   adapter: BridgeAdapter = new PlaywrightCdpAdapter(),
-): { close: () => Promise<void> } {
+): { close: () => Promise<void>; loadScript: (raw: unknown) => Script } {
   let connected = false;
   const clients = new Set<WebSocket>();
 
@@ -210,15 +226,41 @@ export function attachKernelBridge(
           send({ id: req.id, ok: true, result: undefined });
           return;
         }
+        if (method === 'startPick') {
+          // 点选子模式（spec §2.3）：命中后把完整 locator 经 'pick' 事件推给浏览器端，
+          // 由 UiShell 写回当前编辑步骤的 assertion.locator / control.condition.locator。
+          adapter.startPick((locator) => pushEvent('pick', { locator }));
+          send({ id: req.id, ok: true, result: undefined });
+          return;
+        }
+        if (method === 'cancelPick') {
+          adapter.cancelPick();
+          send({ id: req.id, ok: true, result: undefined });
+          return;
+        }
+        if (method === 'loadScript') {
+          // 把 Script JSON 推进当前工作台会话（将来 MCP script.open 一行调这里）。
+          // 不走 adapter：这是 UI 会话，不是 CDP。校验失败不广播。
+          const args = sanitizeArgs(req.args as unknown[]);
+          const script = parseLoadScriptArg(args[0]);
+          pushEvent('load-script', script);
+          send({ id: req.id, ok: true, result: { ok: true } });
+          return;
+        }
         if (method === 'playback') {
-          // 运行全部（R3）：函数不可跨 WS 传递，故在桥端注册进度回调，
+          // 运行全部 / 从此处运行（R3 / spec §2.7）：函数不可跨 WS 传递，故在桥端注册进度回调，
           // 用 R1 的单向推送通道把每步 running/pass/fail 下发给浏览器端。
           // 必须走专门分支（同 startRecording），不能落到下方通用 fn.apply。
           // 边界校验：null/undefined/缺 steps 直接回明确错误，
           // 不让它流到 runScript 里变成 "failedStepId:undefined" 的静默误提示。
-          const script = assertRunnableScript(sanitizeArgs(req.args as unknown[])[0]);
-          const res = await adapter.playback(script, (stepId, status) =>
-            pushEvent('step-progress', { stepId, status }),
+          const args = sanitizeArgs(req.args as unknown[]);
+          const script = assertRunnableScript(args[0]);
+          // fromStepId 可选（第 2 参）；跨 WS 的 undefined 经 JSON 变 null，统一还原。
+          const fromStepId = args[1] === null || args[1] === undefined ? undefined : String(args[1]);
+          const res = await adapter.playback(
+            script,
+            (stepId, status) => pushEvent('step-progress', { stepId, status }),
+            fromStepId,
           );
           send({ id: req.id, ok: true, result: res });
           return;
@@ -250,6 +292,12 @@ export function attachKernelBridge(
     close: () => new Promise<void>((resolve) => {
       wss.close(() => resolve());
     }),
+    /** 进程内入口：将来 MCP `script.open` = 这一行。工作台导入按钮仍保留。 */
+    loadScript: (raw: unknown): Script => {
+      const script = parseLoadScriptArg(raw);
+      pushEvent('load-script', script);
+      return script;
+    },
   };
 }
 

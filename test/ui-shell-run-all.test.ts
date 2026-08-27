@@ -177,15 +177,14 @@ describe('R3 步骤运行态流转', () => {
 });
 
 describe('R3 步骤态渲染', () => {
-  it('render 后步骤项带状态 class（data-step-status）', async () => {
+  it('render 后 CFG 节点带运行态（data-cfg-status）', async () => {
     const k = makeRunAllKernel({ failAt: 1 });
     const { shell, mount } = mountShell(makeScript(3), k);
     await shell.runAll();
-    const items = mount.querySelectorAll('[data-step-item]');
-    expect(items[0].getAttribute('data-step-status')).toBe('pass');
-    expect(items[1].getAttribute('data-step-status')).toBe('fail');
-    expect(items[2].getAttribute('data-step-status')).toBe('pending');
-    expect(items[1].className).toContain('is-fail');
+    expect(mount.querySelector('[data-cfg-node="s0"]')?.getAttribute('data-cfg-status')).toBe('pass');
+    expect(mount.querySelector('[data-cfg-node="s1"]')?.getAttribute('data-cfg-status')).toBe('fail');
+    expect(mount.querySelector('[data-cfg-node="s2"]')?.getAttribute('data-cfg-status')).toBe('pending');
+    expect(mount.querySelector('[data-cfg-node="s1"]')?.className).toContain('is-fail');
   });
 
   it('失败时显示失败提醒（含失败步描述），成功时无提醒', async () => {
@@ -203,44 +202,34 @@ describe('R3 步骤态渲染', () => {
   });
 });
 
-describe('R3 高亮自动跟随当前步骤（P1）', () => {
-  it('每步进入 running 时调用 locateVisual 定位该步元素', async () => {
+describe('R3 运行跟随：该步截图（高亮已画进图），不再 locateVisual 叠框', () => {
+  it('运行全部不调用 locateVisual（坐标映射会随舞台缩放对不齐）', async () => {
     const k = makeRunAllKernel();
     const { shell } = mountShell(makeScript(3), k);
     await shell.runAll();
-    expect(k.locateCalls.map((l) => l.name)).toEqual(['按钮0', '按钮1', '按钮2']);
+    expect(k.locateCalls).toEqual([]);
   });
 
-  it('高亮标记只保留当前 running 步（上一步高亮被清除）', async () => {
+  it('运行中与结束后舞台都不叠 [data-highlight] overlay', async () => {
     const k = makeRunAllKernel();
     const { shell, mount } = mountShell(makeScript(3), k);
-    const marks: (string | undefined)[] = [];
+    const overlayCounts: number[] = [];
     shell.onStepStatusChange = (_id, status) => {
-      if (status === 'running') {
-        const all = mount.querySelectorAll('[data-highlight]');
-        marks.push(`${all.length}:${all[0]?.getAttribute('data-highlight-step') ?? ''}`);
-      }
+      if (status === 'running') overlayCounts.push(mount.querySelectorAll('[data-highlight]').length);
     };
     await shell.runAll();
-    // 每次进入 running 时舞台上恰有 1 个高亮框，且指向当前步
-    expect(marks).toEqual(['1:s0', '1:s1', '1:s2']);
-  });
-
-  it('运行结束后清除高亮标记', async () => {
-    const k = makeRunAllKernel();
-    const { shell, mount } = mountShell(makeScript(2), k);
-    await shell.runAll();
+    expect(overlayCounts).toEqual([0, 0, 0]);
     expect(mount.querySelectorAll('[data-highlight]').length).toBe(0);
   });
 
-  it('无 locator 的步骤（如纯 wait）不触发 locateVisual 且不打断运行', async () => {
+  it('无 locator 的步骤（如纯 wait）不打断运行', async () => {
     const k = makeRunAllKernel();
     const script = makeScript(1);
     script.steps.push({ id: 'w0', type: 'wait', source: 'manual', params: { durationMs: 10 } });
     const { shell } = mountShell(script, k);
     const res = await shell.runAll();
     expect(res.ok).toBe(true);
-    expect(k.locateCalls.length).toBe(1); // 只有 s0 有 locator
+    expect(k.locateCalls).toEqual([]);
     expect(shell.getStepStatus('w0')).toBe('pass');
   });
 
@@ -280,42 +269,17 @@ describe('R3 向后兼容（OCP）', () => {
 // 以下三例由「可运行性审查」角色裁定必须补齐（CODEBUDDY.md §4.1）：
 // locateVisual 是真实 CDP 往返，耗时不定，fire-and-forget 的异步渲染存在
 // 乱序与迟到两类真实缺陷，必须由测试守住；flatten 索引优化亦需功能不变的守护。
-describe('R3 异步高亮的乱序与迟到防护（可运行性审查要求）', () => {
-  /** 构造 locateVisual 按步骤名给出不同延迟的内核，用于制造乱序 resolve。 */
-  function makeDelayedKernel(delayByName: Record<string, number>) {
+describe('R3 运行不再异步 locateVisual，故无乱序幽灵框', () => {
+  it('即使 locateVisual 很慢，运行结束后舞台也没有 overlay', async () => {
     const k = makeRunAllKernel();
-    k.locateVisual = vi.fn(async (l: Locator) => {
-      const ms = delayByName[l.name ?? ''] ?? 0;
-      await new Promise((r) => setTimeout(r, ms));
+    k.locateVisual = vi.fn(async () => {
+      await new Promise((r) => setTimeout(r, 80));
       return { x: 10, y: 20, width: 30, height: 40, visible: true, inViewport: true };
     }) as any;
-    return k;
-  }
-
-  it('先发起的慢定位晚于后续步骤 resolve 时，不得把高亮拉回旧步骤', async () => {
-    // 第 0 步定位慢(50ms)、第 1 步快(1ms)：s0 的 resolve 会晚于 s1
-    const k = makeDelayedKernel({ 按钮0: 50, 按钮1: 1 });
-    const { shell, mount } = mountShell(makeScript(2), k);
-    let lastRunningMark: string | null = null;
-    // 运行中不断记录：任何时刻高亮都不该指向"已完成的旧步"
-    shell.onStepStatusChange = (id, status) => {
-      if (status === 'running') {
-        lastRunningMark = mount.querySelector('[data-highlight]')?.getAttribute('data-highlight-step') ?? null;
-      }
-    };
-    await shell.runAll();
-    // 运行期间进入 s1 时，高亮应已是 s1（而非仍停在 s0）
-    expect(lastRunningMark).toBe('s1');
-  });
-
-  it('运行结束后，迟到的定位回调不得留下幽灵高亮框', async () => {
-    // 末步定位很慢，必然晚于 runAll 结束
-    const k = makeDelayedKernel({ 按钮0: 1, 按钮1: 60 });
     const { shell, mount } = mountShell(makeScript(2), k);
     await shell.runAll();
     expect(mount.querySelectorAll('[data-highlight]').length).toBe(0);
-    // 再等足够时间让迟到的 promise resolve，仍不得冒出高亮框
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 120));
     expect(mount.querySelectorAll('[data-highlight]').length).toBe(0);
   });
 
@@ -327,8 +291,9 @@ describe('R3 异步高亮的乱序与迟到防护（可运行性审查要求）'
     const { shell } = mountShell(script, k);
     await shell.runAll();
     expect(k.playback).toHaveBeenCalledTimes(1);
-    expect(k.playback.mock.calls[0].length).toBe(1);
-    expect(k.playback).toHaveBeenCalledWith(script);
+    // runAll 现以 (script, fromStepId?) 调用（§2.7）；从头跑时第二参为 undefined（2 个参数）。
+    expect(k.playback.mock.calls[0].length).toBe(2);
+    expect(k.playback).toHaveBeenCalledWith(script, undefined);
   });
 
   it('运行结束后退订进度监听，多次 runAll 不叠加回调', async () => {
@@ -339,8 +304,8 @@ describe('R3 异步高亮的乱序与迟到防护（可运行性审查要求）'
     await shell.runAll();
     // 每次运行订阅一次、退订一次 → 监听器集合最终为空
     expect(k.listeners['step-progress']?.size ?? 0).toBe(0);
-    expect(k.on).toHaveBeenCalledTimes(3);
-    expect(k.off).toHaveBeenCalledTimes(3);
+    expect(k.on?.mock.calls.filter((c: unknown[]) => c[0] === 'step-progress')).toHaveLength(3);
+    expect(k.off?.mock.calls.filter((c: unknown[]) => c[0] === 'step-progress')).toHaveLength(3);
   });
 
   it('内核不支持 on/off（旧内核）时不崩，降级为汇总回填', async () => {
@@ -395,6 +360,26 @@ describe('R3 异步高亮的乱序与迟到防护（可运行性审查要求）'
     }) as any;
     await shell.runAll();
     expect(shell.getStepStatus('inner0')).toBe('pass');
-    expect(k.locateCalls.map((l) => l.name)).toEqual(['内层按钮']);
+    expect(k.locateCalls).toEqual([]);
+  });
+});
+
+describe('Import + 运行全部：禁止零反馈', () => {
+  it('playback 抛错时 runAll 仍返回失败并渲染 [data-run-notice]', async () => {
+    const k = makeRunAllKernel();
+    k.playback = vi.fn(async () => { throw new Error('assertRunnableScript: bad if'); }) as any;
+    const { shell, mount } = mountShell(makeScript(2), k);
+    const res = await shell.runAll();
+    expect(res.ok).toBe(false);
+    expect(mount.querySelector('[data-run-notice]')?.textContent).toMatch(/运行失败|bad if/);
+  });
+
+  it('playback 返回失败但没有 failedStepId 时仍有 run-notice（不能静默）', async () => {
+    const k = makeRunAllKernel();
+    k.playback = vi.fn(async () => ({ ok: false })) as any;
+    const { shell, mount } = mountShell(makeScript(1), k);
+    const res = await shell.runAll();
+    expect(res.ok).toBe(false);
+    expect(mount.querySelector('[data-run-notice]')).toBeTruthy();
   });
 });

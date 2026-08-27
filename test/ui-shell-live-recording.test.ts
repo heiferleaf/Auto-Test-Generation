@@ -89,9 +89,9 @@ describe('R2 嵌入实时录制', () => {
     const shell = new UiShell({ kernel: k as any, mount });
     await shell.startRecording();
     k.emit('recording', { type: 'click', locator: { name: 'A' } });
-    const items = mount.querySelectorAll('[data-step-item]');
+    const items = mount.querySelectorAll('[data-cfg-node]');
     expect(items.length).toBe(1);
-    expect(items[0].getAttribute('data-step-id')).toBe(shell.getScript().steps[0].id);
+    expect(items[0].getAttribute('data-cfg-node')).toBe(shell.getScript().steps[0].id);
   });
 
   it('停止录制时，stopRecording 拉回的事件对实时已插入的做去重', async () => {
@@ -110,5 +110,49 @@ describe('R2 嵌入实时录制', () => {
     const shell = new UiShell({ kernel: k as any, mount: document.createElement('div') });
     k.emit('recording', { type: 'click', locator: { name: 'X' } });
     expect(shell.getScript().steps.length).toBe(0);
+  });
+
+  it('点击「开始录制」后按钮变为「停止录制」，标题含录制中，并出现录制横幅', async () => {
+    const k = makeR2Kernel();
+    const mount = document.createElement('div');
+    document.body.appendChild(mount);
+    const shell = new UiShell({ kernel: k as any, mount });
+    shell.render();
+    const btn = mount.querySelector('[data-action="toggle-record"]') as HTMLButtonElement;
+    expect(btn.textContent).toBe('开始录制');
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+    const after = mount.querySelector('[data-action="toggle-record"]') as HTMLButtonElement;
+    expect(after.textContent).toBe('停止录制');
+    expect(after.getAttribute('data-recording')).toBe('true');
+    expect(mount.textContent).toContain('录制中');
+    expect(mount.querySelector('[data-recording-banner]')).toBeTruthy();
+    expect(shell.isRecording()).toBe(true);
+  });
+
+  it('录制中隐藏「当前窗口」下拉；事件上的 target 写入步骤', async () => {
+    const k = makeR2Kernel();
+    k.listTargets = vi.fn(() => [
+      { id: 'main', type: 'page', title: '主窗口' },
+      { id: 'wv1', type: 'webview', title: '侧栏' },
+    ]) as typeof k.listTargets;
+    const mount = document.createElement('div');
+    document.body.appendChild(mount);
+    const shell = new UiShell({ kernel: k as any, mount });
+    await shell.connect();
+    expect(mount.querySelector('[data-target-select]')).toBeTruthy();
+    await shell.startRecording();
+    expect(mount.querySelector('[data-target-select]')).toBeNull();
+    k.emit('recording', { type: 'click', locator: { name: 'Send' }, target: 'wv1' });
+    expect(shell.getScript().steps[0].target).toBe('wv1');
+    await vi.waitFor(() => {
+      expect(k.screenshot).toHaveBeenCalledWith(expect.objectContaining({
+        target: 'wv1',
+        highlight: expect.objectContaining({ name: 'Send' }),
+      }));
+    });
+    await shell.stopRecording();
+    expect(mount.querySelector('[data-target-select]')).toBeTruthy();
   });
 });

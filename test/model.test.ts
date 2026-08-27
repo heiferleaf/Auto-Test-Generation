@@ -66,4 +66,14 @@ describe('脚本导入/导出往返 (Script IO)', () => {
   it('导入缺 steps 应抛出明确错误', () => {
     expect(() => importScript(JSON.stringify({ schema: 'electron-auto-test/step/v1' }))).toThrow(/steps/i);
   });
+
+  it('可选 shots 根字段往返保留，步骤上没有 png', () => {
+    const withShots: Script = {
+      ...sample,
+      shots: { s1: 'data:image/png;base64,AAAA' },
+    };
+    const back = importScript(exportScript(withShots));
+    expect(back.shots?.s1).toMatch(/AAAA/);
+    expect(back.steps.every((s) => !('png' in s))).toBe(true);
+  });
 });

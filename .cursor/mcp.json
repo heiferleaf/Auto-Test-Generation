@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "electron-auto-test": {
+      "command": "npm",
+      "args": ["run", "mcp"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "schema": "electron-auto-test/step/v1",
+  "app": {
+    "name": "VS Code (Electron sample)",
+    "version": "agent-analysis"
+  },
+  "note": "Agent 分析：对话填入 atg-agent-0827 后点发送，waitUntil textContains 该 token（整页文本，无需 locator）。聊天框无稳定 accessible name 时 locator 只用该节点 tag 路径，不含 monaco-editor class。截图不写入本 JSON（D12）；导入时若已连接靶机，工作台会按 step.id 补拍舞台图。",
+  "createdAt": "2026-08-27T06:35:44.235Z",
+  "steps": [
+    {
+      "id": "agent-wait",
+      "type": "wait",
+      "source": "agent",
+      "params": {
+        "durationMs": 400
+      },
+      "control": {
+        "kind": "sequence",
+        "name": "等待界面稳定"
+      }
+    },
+    {
+      "id": "agent-fill-chat",
+      "type": "fill",
+      "source": "agent",
+      "locator": {
+        "css": "div:nth-of-type(7) > div:nth-of-type(9) > div > div:nth-of-type(2) > div > div > div > div:nth-of-type(1)"
+      },
+      "params": {
+        "value": "atg-agent-0827"
+      },
+      "control": {
+        "kind": "sequence",
+        "name": "填入 atg-agent-0827"
+      }
+    },
+    {
+      "id": "agent-click-send",
+      "type": "click",
+      "source": "agent",
+      "locator": {
+        "role": "button",
+        "name": "发送"
+      },
+      "control": {
+        "kind": "sequence",
+        "name": "点击「发送」"
+      }
+    },
+    {
+      "id": "agent-wait-token",
+      "type": "waitUntil",
+      "source": "agent",
+      "params": {
+        "timeoutMs": 20000,
+        "assertion": {
+          "kind": "textContains",
+          "value": "atg-agent-0827"
+        }
+      },
+      "control": {
+        "kind": "sequence",
+        "name": "等待出现 atg-agent-0827"
+      }
+    }
+  ]
+}

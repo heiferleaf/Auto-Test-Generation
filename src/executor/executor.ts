@@ -18,11 +18,16 @@ export type StepProgress = (stepId: string, status: 'running' | 'pass' | 'fail')
 /**
  * 执行整个脚本：对每条顶层 step 调递归 runNode。
  * @param onStep 可选进度回调；不传则行为与 R3 之前完全一致（向后兼容）。
+ * @param fromStepId 可选「从此处运行」起点（spec §2.7）：按前序跳过该步之前的所有步骤，
+ *   从该步（含其子树）起继续执行其后所有兄弟。未传时从头执行（向后兼容）。
+ *   语义：前序遍历到该 id 才置 started=true；未 started 的节点整棵跳过、不上报进度。
+ *   限制：若 fromStepId 落在 if 未选中分支或不存在，则其本身不执行（无步可跑），不报错。
  */
 export async function runScript(
   adapter: CdpAdapter,
   script: Script,
   onStep?: StepProgress,
+  fromStepId?: string,
 ): Promise<void> {
   // 进度上报是辅助能力：订阅方回调抛错不得中断脚本执行。
   const report: StepProgress = onStep
@@ -34,8 +39,10 @@ export async function runScript(
         }
       }
     : () => {};
+  // started：未指定 fromStepId 时一开始就执行；指定后等到前序命中该 id 才开始。
+  const state = { started: fromStepId === undefined, fromStepId };
   for (const step of script.steps) {
-    await runNode(adapter, step, report);
+    await runNode(adapter, step, report, state);
   }
 }
 
@@ -63,10 +70,19 @@ function childrenOf(node: Step): Step[] {
   return children;
 }
 
-async function runNode(adapter: CdpAdapter, node: Step, onStep: StepProgress): Promise<void> {
+async function runNode(adapter: CdpAdapter, node: Step, onStep: StepProgress, state: { started: boolean; fromStepId?: string }): Promise<void> {
+  // 「从此处运行」：命中起点 id（叶或组）即置 started；此后该节点及其后序节点正常执行。
+  // 关键：未 started 时不能整棵跳过控制节点 —— fromStepId 可能在组内，
+  //   故对 sequence/while 仍需下钻寻找起点，仅在叶子处 gate 执行。
+  if (!state.started && node.id === state.fromStepId) state.started = true;
+
   const ctrl = node.control;
-  if (!ctrl) {
-    // 仅可执行叶子步骤上报进度；控制流节点自身不是用户可见的"一步"。
+  // 叶子，或「原子顺序组」（spec §2.5：一步默认就是一个组，control.sequence 且无 children）：
+  // 节点自身仍是可执行动作，不能当成空 sequence 跳过，否则录制步全部不跑。
+  const atomicGroup = ctrl?.kind === 'sequence' && !(node.children?.length);
+  if (!ctrl || atomicGroup) {
+    // 叶子：未到起点则跳过（不执行、不上报进度）。
+    if (!state.started) return;
     onStep(node.id, 'running');
     try {
       await runStep(adapter, node);
@@ -80,31 +96,55 @@ async function runNode(adapter: CdpAdapter, node: Step, onStep: StepProgress): P
   switch (ctrl.kind) {
     case 'sequence':
       for (const child of childrenOf(node)) {
-        await runNode(adapter, child, onStep);
+        await runNode(adapter, child, onStep, state);
       }
       break;
     case 'if': {
-      const result = ctrl.condition
-        ? await runAssertion(adapter, ctrl.condition)
-        : { passed: true };
-      const branches = childrenOf(node);
-      // children[0]=then, children[1]=else
-      const chosen = result.passed ? branches[0] : branches[1];
-      if (chosen) await runNode(adapter, chosen, onStep);
+      // 未 started 且起点不在本 if 子树时，整棵跳过 —— 避免无谓地求值条件（副作用/可能失败）。
+      if (!state.started && state.fromStepId && !containsId(node, state.fromStepId)) break;
+      // 求值条件前先标 running：snapshot/定位可能很慢，不能让「运行全部」看起来没反应。
+      if (state.started) onStep(node.id, 'running');
+      try {
+        const result = ctrl.condition
+          ? await runAssertion(adapter, ctrl.condition)
+          : { passed: true };
+        if (state.started) onStep(node.id, 'pass');
+        const branches = childrenOf(node);
+        // children[0]=then, children[1]=else
+        const chosen = result.passed ? branches[0] : branches[1];
+        if (chosen) await runNode(adapter, chosen, onStep, state);
+      } catch (err) {
+        if (state.started) onStep(node.id, 'fail');
+        if (err instanceof AssertionError) throw err;
+        const wrapped = new Error(`step ${node.id} failed: ${(err as Error).message}`);
+        (wrapped as Error & { stepId?: string }).stepId = node.id;
+        throw wrapped;
+      }
       break;
     }
     case 'while': {
       const count = ctrl.loopCount ?? 1;
       // 复杂度说明：校验一次即可，不必每轮循环重复校验（O(count·n) → O(n + count·n) 的常量项优化）。
       const children = childrenOf(node);
+      // 已知限制（罕见组合）：fromStepId 落在循环体内时，仅在首轮定位起点；
+      //   一旦 started，后续每一轮整轮执行（含起点之前的步）。循环+fromStepId 不强求严格语义。
       for (let i = 0; i < count; i++) {
         for (const child of children) {
-          await runNode(adapter, child, onStep);
+          await runNode(adapter, child, onStep, state);
         }
       }
       break;
     }
   }
+}
+
+/** 节点子树（含自身）是否包含某 id —— 仅供 fromStepId 在 if 子树内的判定，O(n) 一次遍历。 */
+function containsId(node: Step, id: string): boolean {
+  if (node.id === id) return true;
+  const ch = node.children;
+  if (!ch) return false;
+  for (const c of ch) if (containsId(c, id)) return true;
+  return false;
 }
 
 async function runStep(adapter: CdpAdapter, step: Step): Promise<void> {

@@ -10,6 +10,7 @@ import WebSocket from 'ws';
 import type { TargetType } from './targets';
 import type { SerializedNode } from './adapter';
 import type { Page, Frame } from 'playwright';
+import { asPlaywrightExpression } from '../recorder/inject';
 
 /** 一个执行上下文（含 webview host 默认 context 与内层 iframe context）。 */
 export type ExecContext = {
@@ -28,6 +29,39 @@ function isConstructor(fn: unknown): boolean {
     return false;
   }
 }
+
+/**
+ * 可交互节点切片（主 page / webview / frame 共用）。
+ * rect 来自 getBoundingClientRect，便宜；没有完整视觉框时仍给 x/y/width/height。
+ */
+export const SNAPSHOT_COLLECT = `(() => {
+  const SELECTOR = 'a,button,input,select,textarea,[role],[data-testid],[contenteditable="true"],[contenteditable=""],textarea';
+  const out = [];
+  for (const el of Array.from(document.querySelectorAll(SELECTOR))) {
+    const he = el;
+    const r = he.getBoundingClientRect();
+    out.push({
+      role: he.getAttribute('role') || undefined,
+      name: he.getAttribute('aria-label') || he.getAttribute('name') || undefined,
+      text: (he.innerText || he.textContent || '').trim().slice(0, 200),
+      tag: he.tagName.toLowerCase(),
+      testId: he.getAttribute('data-testid') || undefined,
+      enabled: !he.disabled,
+      visible: (() => {
+        if (r.width <= 0 || r.height <= 0) return false;
+        if (he.getAttribute('aria-hidden') === 'true' || he.hasAttribute('inert')) return false;
+        if (typeof he.checkVisibility === 'function') {
+          try { return he.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }); }
+          catch (_) { return true; }
+        }
+        const st = getComputedStyle(he);
+        return st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0';
+      })(),
+      rect: { x: r.left, y: r.top, width: r.width, height: r.height },
+    });
+  }
+  return out;
+})()`;
 
 /** 统一目标操作接口（ISP）：page 与 webview 各自实现，避免 fat adapter。 */
 export interface CdpTarget {
@@ -178,26 +212,7 @@ export class WebviewCdpTarget implements CdpTarget {
   }
 
   async snapshot(): Promise<SerializedNode[]> {
-    return this.evaluate<SerializedNode[]>(
-      `(() => {
-        const SELECTOR = 'a,button,input,select,textarea,[role],[data-testid],[contenteditable="true"],textarea';
-        const out = [];
-        for (const el of Array.from(document.querySelectorAll(SELECTOR))) {
-          const he = el;
-          const rect = he.getBoundingClientRect();
-          out.push({
-            role: he.getAttribute('role') ?? undefined,
-            name: he.getAttribute('aria-label') ?? he.getAttribute('name') ?? undefined,
-            text: (he.innerText ?? he.textContent ?? '').trim().slice(0, 200),
-            tag: he.tagName.toLowerCase(),
-            testId: he.getAttribute('data-testid') ?? undefined,
-            enabled: !(he).disabled,
-            visible: rect.width > 0 && rect.height > 0,
-          });
-        }
-        return out;
-      })()`,
-    ).catch(() => []);
+    return this.evaluate<SerializedNode[]>(SNAPSHOT_COLLECT).catch(() => []);
   }
 
   async fill(locatorExpr: string, value: string): Promise<void> {
@@ -234,6 +249,24 @@ export class WebviewCdpTarget implements CdpTarget {
   dispose() {
     this.session.close();
   }
+
+  /** webview 内层没有 Playwright 指针，用 CDP Input 在坐标点一下。 */
+  async mouseClick(x: number, y: number): Promise<void> {
+    await this.session.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x,
+      y,
+      button: 'left',
+      clickCount: 1,
+    });
+    await this.session.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x,
+      y,
+      button: 'left',
+      clickCount: 1,
+    });
+  }
 }
 
 /**
@@ -257,38 +290,30 @@ export class PlaywrightPageTarget implements CdpTarget {
   }
 
   async evaluate<T = unknown>(expr: string, _ctxId?: number): Promise<T> {
-    return this.page.evaluate(`(() => (${expr}))()`) as Promise<T>;
+    // Playwright 把 string 当表达式。注入脚本是多段语句，必须经 asPlaywrightExpression
+    // 才能在 VS Code 主窗口（page 目标，含右侧聊天）装上监听。
+    return this.page.evaluate(asPlaywrightExpression(expr)) as Promise<T>;
   }
 
   async snapshot(): Promise<SerializedNode[]> {
-    return this.page.evaluate(() => {
-      const SELECTOR = 'a,button,input,select,textarea,[role],[data-testid]';
-      const out: Array<Record<string, unknown>> = [];
-      for (const el of Array.from(document.querySelectorAll(SELECTOR)) as Array<HTMLElement>) {
-        const rect = el.getBoundingClientRect();
-        out.push({
-          role: el.getAttribute('role') ?? undefined,
-          name: el.getAttribute('aria-label') ?? el.getAttribute('name') ?? undefined,
-          text: (el.innerText ?? el.textContent ?? '').trim().slice(0, 200),
-          tag: el.tagName.toLowerCase(),
-          testId: el.getAttribute('data-testid') ?? undefined,
-          enabled: !(el as HTMLButtonElement).disabled,
-          visible: rect.width > 0 && rect.height > 0,
-        });
-      }
-      return out;
-    }) as Promise<SerializedNode[]>;
+    return this.evaluate<SerializedNode[]>(SNAPSHOT_COLLECT);
   }
 
   async fill(locatorExpr: string, value: string): Promise<void> {
     await this.page.evaluate(
       ({ locatorExpr, value }) => {
-        const e = document.querySelector(locatorExpr) as HTMLInputElement | HTMLTextAreaElement | null;
+        const e = document.querySelector(locatorExpr) as HTMLElement | null;
         if (!e) throw new Error(`PAGE_FILL: 未找到元素 ${locatorExpr}`);
-        const proto = Object.getPrototypeOf(e);
-        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-        if (setter) setter.call(e, value);
-        else (e as unknown as HTMLDivElement).textContent = value;
+        e.focus();
+        const tag = e.tagName.toLowerCase();
+        if (tag === 'input' || tag === 'textarea') {
+          const proto = Object.getPrototypeOf(e);
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+          if (setter) setter.call(e, value);
+          else (e as HTMLInputElement).value = value;
+        } else {
+          e.textContent = value;
+        }
         e.dispatchEvent(new Event('input', { bubbles: true }));
         e.dispatchEvent(new Event('change', { bubbles: true }));
       },
@@ -317,27 +342,11 @@ export class PlaywrightFrameTarget implements CdpTarget {
   }
 
   async evaluate<T = unknown>(expr: string, _ctxId?: number): Promise<T> {
-    return this.frame.evaluate(`(() => (${expr}))()`) as Promise<T>;
+    return this.frame.evaluate(asPlaywrightExpression(expr)) as Promise<T>;
   }
 
   async snapshot(): Promise<SerializedNode[]> {
-    return this.frame.evaluate(() => {
-      const SELECTOR = 'a,button,input,select,textarea,[role],[data-testid]';
-      const out: Array<Record<string, unknown>> = [];
-      for (const el of Array.from(document.querySelectorAll(SELECTOR)) as Array<HTMLElement>) {
-        const rect = el.getBoundingClientRect();
-        out.push({
-          role: el.getAttribute('role') ?? undefined,
-          name: el.getAttribute('aria-label') ?? el.getAttribute('name') ?? undefined,
-          text: (el.innerText ?? el.textContent ?? '').trim().slice(0, 200),
-          tag: el.tagName.toLowerCase(),
-          testId: el.getAttribute('data-testid') ?? undefined,
-          enabled: !(el as HTMLButtonElement).disabled,
-          visible: rect.width > 0 && rect.height > 0,
-        });
-      }
-      return out;
-    }) as Promise<SerializedNode[]>;
+    return this.evaluate<SerializedNode[]>(SNAPSHOT_COLLECT);
   }
 
   async fill(locatorExpr: string, value: string): Promise<void> {

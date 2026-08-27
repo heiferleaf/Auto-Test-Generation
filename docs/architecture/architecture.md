@@ -58,7 +58,13 @@ UI 壳是「人操作界面」，与内核（CDP 适配层 / 录制 / 执行器�
 - **演示模式** `DemoKernel` 让 UI 形态/交互可在无真机时查看（供 UI 设计）。
 - **录制/回放能力上提至内核**：`UiKernel.playback(script, fromStepId?)` 由 `PlaywrightCdpAdapter` 实现（内部 `runCli`），UI 壳不 import 执行器/playwright 链——满足 §4 SOLID/DIP 基线。`fromStepId` 为「从此处运行」起点（spec §2.7），可选。
 - 关键修复：adpater 连接统一用 `127.0.0.1`（避免 `localhost` 解析 `::1` IPv6 导致 `ECONNREFUSED`）。
+- **调试端口**：页面默认 9222（spec D9）。优先级：URL `?cdp=` > 宿主注入 `window.__ATG_CDP_PORT`（`serve.ts` 把环境变量 `CDP_PORT` 写入 HTML）> 9222。首选口 `connectOverCDP` 失败时，适配器并行探测 `/json`：本次端口、上次成功口、环境变量 `CDP_PROBE_PORTS`、以及本机常见调试号段 9222–9260。须带 `webSocketDebuggerUrl`（跳过幽灵口）。不必手输 `?cdp=`。各靶机启动脚本仍可选用自己的默认口（CodeBuddy 9222 / WorkBuddy 9233 / VS Code 9244），那是启动约定，不是 locator 知识。
+- **page 目标录制注入**：`PlaywrightPageTarget.evaluate` 必须经 `asPlaywrightExpression`（间接 eval）把多段 IIFE 当脚本跑。Playwright `page.evaluate(string)` 把参数当表达式，直接塞 `RECORD_INJECT` 在部分包层下会 SyntaxError，错误被 catch 后表现为「点了没步骤」。
+- **webview 注入重试**：右侧聊天常是 `/json` 里的 `iframe`（归为 webview）。第一次 `evaluate` 若 `WEBVIEW_NO_CONTEXT`，不得写入 `injectedTargets`；录制轮询里继续重试，否则聊天点/输入永远没步骤。
+- **CFG 边同层**：`buildCfgGraph` 只在同一 `children` 数组的相邻兄弟之间建 `flow`；`if` 的 True/False 之间不建 flow；顺序组不再从组头拉边进第一个子节点。分支 SVG 从**条件头**锚到同层 True/False 列头（不用组外框底边，避免倒插入盒的 V）。循环回环从末步右侧绕出组框再回到循环头。不渲染 minimap。
+- **步骤截图在同一份 JSON（可选 `shots`）**：`UiShell.stepShots` 按 `step.id` 存 PNG。录制/插入当场拍；**导入**先灌 `shots`（或同一次选中的 `*.shots.json`），未连接也能看舞台。无配图且已连接则按叶子补拍（有 locator → `screenshot({ highlight })`）。`exportScript` 把 Map 写成根字段 `shots`（data URL），步骤对象不加 png。不是第二种 schema。
 - **跨进程截图序列化**：`screenshot()` 返回 Node `Buffer`，经 WS 会变成 `{type:'Buffer',data:[...]}`（浏览器无法解码）。修复：`bridge-server.ts:serializeBuffers` 把结果中的 Buffer 递归转 base64（`{__base64}`），`ws-kernel.ts` 还原为浏览器可用的 base64 字符串；`UiShell.startFrameStream` 据此渲染到舞台 `<img>`，解决"蒙版看不到软件页面"。截图流数据路径由 `scripts/verify-ui-live.mjs` 硬断言保护（base64 长度 < 1000 即失败）。
+- **录制可交互祖先**：点击从 event target 走到最近的 button/a/input/textarea/contenteditable/ARIA 控件；`role=presentation|none|generic` 不当可交互。空 fill 丢弃；fill 绑到事件目标的可填节点，回放不用 `getByRole('presentation')`，css 优先。
 
 ### 2.2 可视化蒙版范式与 CFG + Git 融合模型（正式设计）
 
@@ -144,7 +150,7 @@ executor.runScript(adapter, script, onStep, fromStepId?)   ← 进度在 Node �
 
 **边界安全（§4.1）**：`buildCfgGraph` 对 `children` 含 `null` 的坏数据跳过而非抛错（渲染路径崩了会白屏）；`setStatus` 对未知 stepId 静默跳过。
 
-**规模可读性（spec §2.6.1 新增要求，待实现）**：用户确认 Figma 原型后补充——步骤多时 CFG 仍须形象表现执行结构。`visual-mask-ui-spec.md` §2.6.1 现要求：打包组可折叠为单节点、画布缩放/平移、minimap 或滚动定位、运行时当前步自动滚入。当前 `cfg-view.ts`（M3-R4）只画固定竖向图，折叠/缩放/minimap 尚未实现，登记为后续子阶段，**不属本次文档改动落地范围**；架构上仍是 `CfgView` 渲染层职责，不新增内核概念、不改 `Step` schema。
+**规模可读性（spec §2.6.1）**：打包组可折叠、画布缩放/平移（Ctrl+滚轮；中键或 Alt+拖平移）。左键空白拖为橡皮筋框选。CFG 有向边只连同一层兄弟（`if` 的 True/False 之间无 flow）；不渲染 minimap。预览高亮经 `mapHighlightRect` 把 CSS 视口框映射到 object-fit:contain 截图。舞台显示该步缓存截图，连接后不默认实时刷帧。
 
 **`setStatus` 原地更新（避免高频重渲染，§4.1 清单 7）**：`CfgView` 缓存 `stepId → DOM 节点` 映射，`setStatus` 只改已有节点的 `data-cfg-status`/`class`，**不整树重建**（测试断言前后 `querySelector` 返回同一 DOM 引用）。`update` 幂等（先清再画，同脚本重复 update 不产生重复节点）。
 
@@ -188,7 +194,7 @@ executor.runScript(adapter, script, onStep, fromStepId?)   ← 进度在 Node �
 | CDP 适配层 | `src/cdp/adapter.ts` | 真机控制 | **R3**：`playback(script, onStep?)` 进程内可选进度回调（跨 WS 不传，函数不可序列化）；**R5**：实现 `Pickable`（`startPick(onPick)`/`cancelPick`，注入 `PICK_INJECT` + 轮询 `PICK_DRAIN`，`disconnect` 兜底 `cancelPick`）；**R6**：`playback(script, onStep, fromStepId?)` |
 | 脚本 IO | `src/script/io.ts` | schema 校验 + 往返 | 增 v2 常量、children 递归校验；**R4**：递归校验 `control.kind ∈ CONTROL_KINDS`（本地导入路径的边界门槛，与桥边界 `assertRunnableScript` 对等，防未知 kind 静默错渲 / 被执行器跳过） |
 | 录制内核 | `src/recorder/recorder.ts` + `inject.ts` | 产出扁平叶子 | 不改（仍产叶子）；增量推送在桥/UI 层；**R5**：`inject.ts` 抽 `ATG_LOCATOR_HELPERS` 共享片段（录制/点选同源 cssPath + 可交互祖先解析），修 ASI 串接 bug |
-| UI 壳 | `src/ui/shell.ts` | 编排 + 增量渲染 + 选中态真相源 | 增量 append + CFG 视图挂载；**R3**：`runAll()` + 运行态 `Map`（不入 Step 模型）+ 高亮跟随 + generation token 作废迟到定位；**R4**：新增 `selectedStepId`/`selectStep`/`getSelectedStepId` 选中态唯一真相源，内部事件委托双向联动列表项与 CFG 节点，进度回调经 `CfgView.setStatus` 同步图节点状态（同一 `stepStatus` Map）；**R5**：点选子模式（`pickMode`/`pickTarget`/`applyPick`，详情区「在软件中点选」按钮，未连接/旧内核禁用）；**R6**：`runAll(fromStepId?)` + 详情区「从此处运行」按钮 + 失败步 `scrollStepIntoView` |
+| UI 壳 | `src/ui/shell.ts` | 编排 + 增量渲染 + 选中态真相源 | 增量 append + CFG 视图挂载；**R3**：`runAll()` + 运行态 `Map`（不入 Step 模型）+ 高亮跟随 + generation token 作废迟到定位；**R4**：新增 `selectedStepId`/`selectStep`/`getSelectedStepId` 选中态唯一真相源，内部事件委托双向联动列表项与 CFG 节点，进度回调经 `CfgView.setStatus` 同步图节点状态（同一 `stepStatus` Map）；**R5**：点选子模式（`pickMode`/`pickTarget`/`applyPick`，详情区「在软件中点选」按钮，未连接/旧内核禁用）；**R6**：`runAll(fromStepId?)` + 详情区「从此处运行」按钮 + 失败步 `scrollStepIntoView`；**导入/连接补拍**：`backfillStepShots` 遍历叶子写入 `stepShots` Map（截图仍不进 JSON） |
 | CFG 视图 | `src/ui/cfg-view.ts`（已实现，M3-R4） | 图形化控制流 | 新增组件（SRP）：`buildCfgGraph` 纯函数（图模型，与 DOM 解耦）+ `CfgView` DOM 渲染（只画图与上报点击，DIP 不 import 执行器/内核）；`setStatus` 原地更新避免高频重渲染；坏数据（`children` 含 null）跳过不抛错；**R6**：折叠/缩放平移/运行跟随滚入 + `stepIndex` O(1) 索引替 `findByStepId` 全树遍历 |
 | 展示文案 | `src/ui/step-label.ts`（已实现，M3-R4） | Step→人话文案 | 新增（SRP）：`TYPE_LABEL`/`describeLocator`/`describeStepBrief` 单一真相源，步骤列表与 CFG 视图共用，避免两处各存一份而显示不一致 |
 | 版本库（数据） | `src/script/version-store.ts`（已实现，M3-R5） | 提交树 + 不可变版本操作 | 新增（纯数据，无 UI/内核依赖）：`createStore/commit/branch/switchTo/cherryPick/tag/getHistory/getBranches/getTags/getCurrentScript/diffScripts` + `isVersionNode` 判定；写操作均返回新 store（不可变），脏数据抛 `VersionStoreError`；`diffScripts` 递归展平比对 |
@@ -227,17 +233,67 @@ executor.runScript(adapter, script, onStep, fromStepId?)   ← 进度在 Node �
 
 ### C. MCP Server
 
-**自研 MCP**（推荐），Tool 最小集：
+**自研 stdio MCP**（`@modelcontextprotocol/sdk`），入口 `npm run mcp` → `src/mcp/main.ts`。在**仓库根**跑，不依赖 git worktree。Cursor 默认走 stdio；配置见仓库里的 `.cursor/mcp.json`。
 
-- app.connect / app.disconnect / app.list_targets
-- page.snapshot
-- actions.execute_steps（执行脚本）
-- record.start / record.stop / record.get_steps
-- script.import / script.export / script.update_step
-- assert.run
-- （P1）agent.suggest_steps / agent.repair_steps
+**本机怎么开**
 
-实现语言：TypeScript（与 Playwright/MCP 生态一致）或 Python（与现有自动化栈一致），二选一主栈即可。
+1. 用 Cursor 打开本仓库根目录（克隆下来的项目文件夹本身，不要打开 `.cursor/worktree/...`）。
+2. Node 18+，在仓库根执行 `npm install`。
+3. 仓库已带 `.cursor/mcp.json`（cwd 是当前打开的文件夹）：
+
+```json
+{
+  "mcpServers": {
+    "electron-auto-test": {
+      "command": "npm",
+      "args": ["run", "mcp"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}
+```
+
+4. Cursor 设置里打开 MCP，应看到 `electron-auto-test`。改完配置后重载窗口。Skill 在 `.cursor/skills/electron-cdp-test`，打开本仓库后会自动带上，不用再拷一份。
+
+也可以在仓库根直接跑 `npm run mcp` 做手动检查（stdio 服务，终端里不会像网页那样有界面）。
+
+**给别人用**
+
+对方把本仓库克隆到自己电脑上的任意目录 → 用 Cursor **打开那个克隆的根目录** → `npm install` → 用上面同一份 mcp.json。`${workspaceFolder}` 会指向对方那份克隆，不要把 cwd 写成某台机器上的 Desktop 路径，也不要再建 worktree。
+
+stdout 只给 JSON-RPC，诊断打 stderr。
+
+Tool 是对**已有内核**的 1:1 封装（`src/index.ts` 统一 export），不重写 CDP。跨 JSON 边界每个 handler 入口 `args = args ?? {}`；`targetId: null` 当缺省，不靠函数默认参数。
+
+**产物是脚本 JSON**。主路径：`list_targets` / `snapshot` → 把 click/fill/waitUntil 写成步骤 → `script.open` → `actions.execute_steps`。`page.click` / `page.fill` / `page.wait` 是可选单步探针，不是第二条产品线。
+
+**会话（本机拉起，不要让用户自己敲 cmd）**
+
+- `launch-target`：包装仓库根下的 `scripts/launch-*.cmd` + `scripts/targets.json`，返回**实际**调试端口（VS Code 目录默认 9244，脚本遇幽灵口会 +1）。不要口播「试试 9222」。
+- `target.stop`：按该端口停被测进程。
+- `workbench.start` / `workbench.stop`：等价 `npm run ui`，返回打印出来的 URL（占用时可能不是 5173）。已在听则复用、stop 不杀外部实例。
+- `script.open`：把 Script JSON 推进**当前工作台会话**（桥 `loadScript` + WS RPC `load-script`）。`script.import`（文件解析）与工作台「导入」按钮仍保留。
+
+**观察 + 会话 + 回放**
+
+- `app.connect` / `app.disconnect` / `app.list_targets`
+- `page.snapshot`（可选 `targetId`，默认当前目标）
+- `page.screenshot`
+- `script.import` / `script.export` / `script.open`
+- `actions.execute_steps`（内核 `runCli`）
+- `target.stop`
+
+**可选单步探针**（与脚本步骤同一套原子）
+
+- `page.click` / `page.fill` / `page.wait` / `page.waitUntil`
+- `assert.run`
+- `record.start` / `record.stop` / `record.get_steps`
+
+**嵌套页面**：先 `app.list_targets`，再 `page.snapshot({ targetId })`，把该 id 写进脚本步骤的 `target` 字段。`targetId` 是 Tool 入参，**不是** Script schema 新字段；步骤里已有的 `target` 执行器照旧遵守。
+
+**本期未封装**：`script.update_step`（改步仍走工作台或导出后再 `script.open`）、`agent.suggest_steps` / `agent.repair_steps`（P1）、视觉断言专用 Tool、脚本版本库。
+
+**snapshot 文本（通用，无 App CSS）**：选择器含 `[role]`，嵌套 `listitem` / `article` 会作为独立节点进快照；每个节点 `text` 截到 200 字。`textContains` 把所有节点的 `text`/`name`/`role` 拼成 haystack（见 `src/executor/assert.ts`），因此子 listitem 上的文字即使不在父 list 的 200 字里，也可能被扫到。换靶机先跑 Skill `target-preflight`；扫不到时加宽选择器/截断，不要写某一款聊天 UI 的 class。
 
 ### D. 步骤模型（概念）
 
@@ -297,7 +353,7 @@ executor.runScript(adapter, script, onStep, fromStepId?)   ← 进度在 Node �
 |**M1** ✅|CDP 连接 + 步骤执行器 + 断言 + 脚本导入导出 + 简易编辑|脚本能否稳定控目标 App|
 |**M2** ✅|可视化能力层 + 真实靶机接入（CodeBuddy/WorkBuddy）|对真机能否做看得见、跨 webview 的集成测试|
 |**M3**|可视化 UI 编辑壳（高内聚组件）：脚本导入/编辑/录制/导出 + 对目标软件触发并响应|脚本能否在组件内闭环管理并被目标软件执行|
-|**M4**|MCP 全量 Tool + 测试向 Skill|脚本能力能否经 MCP 对外暴露|
+|**M4**|MCP 第一刀：stdio 包装内核 + 契约测试（Skill / update_step / Agent 工具未做）|脚本能力能否经 MCP 对外暴露|
 |**M5**|Agent 生成全覆盖步骤 + 参考脚本改写（为版本更新后改脚本准备）|脚本能否由 Agent 生成/演化|
 |**M6**|版本更新检测 + 更新触发 Agent 任务|版本更新后能否自动驱动脚本维护|
 

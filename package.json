@@ -11,7 +11,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "run": "tsx src/cli-main.ts",
     "cli": "tsx src/cli-main.ts",
-    "ui": "tsx src/ui/serve.ts"
+    "ui": "tsx src/ui/serve.ts",
+    "mcp": "tsx src/mcp/main.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.44.0",
@@ -24,6 +25,7 @@
     "vitest": "^1.6.0"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.0",
     "playwright": "^1.44.0",
     "ws": "^8.18.0"
   }

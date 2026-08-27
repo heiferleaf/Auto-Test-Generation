@@ -49,11 +49,15 @@ const asString = (v: unknown, fallback = ''): string => (v == null ? fallback : 
 /** 断言 kind → 判定策略的注册表。扩展新断言只需在此追加一项。 */
 export const assertionHandlers: Record<AssertionKind, AssertionHandler> = {
   textContains: async (adapter, assertion) => {
+    const a = assertion ?? {};
     const nodes = await adapter.snapshot();
-    const haystack = nodes
+    const loc = a.locator;
+    const hasLoc = !!(loc && (loc.role || loc.name || loc.text || loc.testId || loc.css || loc.xpath));
+    const pool = hasLoc ? nodes.filter((n) => nodeMatches(n, loc!)) : nodes;
+    const haystack = pool
       .map((n) => [n.text, n.name, n.role].filter(Boolean).join(' '))
       .join('\n');
-    return { passed: haystack.includes(assertion.value ?? '') };
+    return { passed: haystack.includes(a.value ?? '') };
   },
 
   exists: async (adapter, assertion) => {
@@ -134,9 +138,10 @@ export async function runAssertion(
   adapter: CdpAdapter,
   assertion: Assertion,
 ): Promise<{ passed: boolean }> {
-  const handler = assertionHandlers[assertion.kind];
+  const a = assertion ?? ({} as Assertion);
+  const handler = assertionHandlers[a.kind];
   if (!handler) {
-    throw new Error(`未知断言 kind: ${assertion.kind}`);
+    throw new Error(`未知断言 kind: ${a.kind}`);
   }
-  return handler(adapter, assertion);
+  return handler(adapter, a);
 }
