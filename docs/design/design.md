@@ -1,237 +1,163 @@
-﻿# Electron 自动化测试平台 — M1 设计文档
+﻿# 测试步骤中台 — M3 软件设计
 
-> 配套文档：`requirements/requirements.md`（产品目标与用例）、`architecture/architecture.md`（技术选型手册）
-> 本文档聚焦 **M1（最小可跑通脚本闭环）** 的工程设计与接口定义，技术栈 **TypeScript**。
+> 配套：`docs/requirements/requirements.md`（产品目标与用例）、`docs/architecture/architecture.md`（技术选型与模块边界）、`docs/design/visual-mask-ui-spec.md`（工作台交互基线）。
+> 本文描述 **当前已经落地的实现**，不是 2025 年「M1 只有 CLI、MCP 留到以后」的承诺。不改 Script schema；注释写行为与原因。
 
 ---
 
-## 1 目标与范围
+## 1 现在的 M3 是什么
 
-### 1.1 M1 交付物（来自architecture/architecture.md §4）
+产品名是 **测试步骤中台**。当前交付叠在同一套内核上，不是三套互不相通的系统：
 
-| 交付项 | 说明 |
+1. **工作台（CFG 中台）**：本地网页。人在这里看/编控制流图、导入导出脚本、运行全部、在节点旁打开详情。开始录制之后，操作发生在 **真实软件窗口**，不发生在网页截图上。
+2. **stdio MCP**：`npm run mcp` 把同一套内核（连接、快照、录制、执行、把脚本推进当前会话）暴露给 Cursor Agent。MCP 是遥控，不是第二套执行器。
+3. **Skill**（`.cursor/skills/electron-cdp-test`）：教模型走「观察 → 把步骤写进 Script JSON → `script.open` + `actions.execute_steps`」，而不是连调 `page.click` 当产物。
+
+人录制与模型写 JSON 是同一条步骤模型、同一份工作台会话。嵌套页面（外层 `page` 与内层 `webview`）对人：点哪里就录哪一层，不用选手动选层。对模型：没有鼠标，必须先 `app.list_targets`，再对需要的层 `page.snapshot`，并把该层 `id` 写进步骤已有的 `target` 字段。不要为此改 schema。
+
+**明确不在本设计里**：截图 + 提示词交给模型做视觉断言、脚本版本控制。这两项是以后的插件，见 `docs/requirements/requirements.md` 的「以后的插件 / 非本轮」。内核里已有可选的 `version-store` 与像素基线 `screenshotMatches`，不等于那两项产品能力已经作为 v1 MCP Tool 或当前 Skill 内容交付。
+
+---
+
+## 2 双路径与产物
+
+两条路最终都落到同一份 **Script JSON**：
+
+| 谁 | 怎么得到步骤 | 怎么跑 |
+|---|---|---|
+| 人 | 工作台「开始录制」，在已连接的真实窗口里点/填 | 「运行全部」（内核 `playback` → `runCli`） |
+| 模型 | `list_targets` + `snapshot`（必要时截图）后，把 click/fill/waitUntil 写成步骤 | `script.open` 推进当前中台会话，再 `actions.execute_steps` |
+
+`page.click` / `page.fill` / `page.wait` / `page.waitUntil` 是可选的 **单步探针**：locator 不确定时试一次。它们和脚本步骤用同一套原子（同一 `Step`、同一执行器）。产品路径是把步骤写进 Script，再 open + execute，不是再发明一条「只点不写脚本」的模型。
+
+`script.open` 的行为是调用工作台会话的 `loadScript`（桥 RPC + WS 广播 `load-script`），把这份 JSON 推进 **当前已打开的中台**。工作台顶栏的「导入」按钮仍然保留：人从文件选 JSON 也是同一套 `importScript` 校验。`script.import` 只解析/校验，不推进工作台。三条路径并存，不要把可视化理解成「只能 Import」。
+
+---
+
+## 3 分层（与代码目录对齐）
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Cursor Agent + Skill（electron-cdp-test）                 │
+│  stdio MCP：npm run mcp  →  src/mcp/main.ts               │
+├──────────────────────────────────────────────────────────┤
+│  测试步骤中台网页：src/ui/（app.ts / shell.ts / cfg-view） │
+│  真机经 WS 桥：ws-kernel ↔ bridge-server                   │
+├──────────────────────────────────────────────────────────┤
+│  内核（MCP 与 UI 共用）                                    │
+│  CDP 适配 PlaywrightCdpAdapter / 录制 Recorder            │
+│  执行器 runScript + 断言 / 脚本 IO importScript            │
+├──────────────────────────────────────────────────────────┤
+│  目标 Electron（--remote-debugging-port，端口由 launch 返回）│
+└──────────────────────────────────────────────────────────┘
+```
+
+浏览器跑不了 Playwright，所以真机必须走 Node 桥。演示模式 `?demo=1` 用内存内核看交互，默认打开是连真机。MCP 进程自己持有一份 `PlaywrightCdpAdapter` 与工作台子进程句柄（`src/mcp/session.ts`），`script.open` 通过已启动的工作台 URL 做 RPC，而不是在 MCP 里再画一套 UI。
+
+跨 JSON / WS / CDP 边界：入参一律 `args = args ?? {}`。`targetId: null` 当缺省（当前页），不要把 `null` 当成 id。函数默认参数在 `null` 传到服务端时不会生效。
+
+---
+
+## 4 统一步骤模型（当前契约，不改字段）
+
+所有模式共用 `src/types/step.ts`。schema 可以是 `electron-auto-test/step/v1` 或 `v2`；`io.ts` 兼容扁平 v1。步骤可带递归 `children` 与 `control.kind`（`sequence` / `if` / `while`），这是 CFG 与执行器已经在用的加法扩展，不是新文件格式。
+
+叶子类型：`click` `fill` `select` `wait` `assert` `hover` `eval` `snapshot` `waitUntil` `repeat`。`repeat` 必须作为带 `children` 的循环组出现，不能当叶子执行。
+
+定位 `Locator`：优先 `role` + `name` / `text` / `testId`，脆了再 `css` / `xpath`。回放不要用某一款 App 的 class 当知识。
+
+断言 `kind` 现有：`exists` `visible` `textContains` `titleIs` `urlMatches` `expr` `elementVisibleInViewport` `screenshotMatches`。`textContains` 的 `locator` 可选：有则只搜匹配到的节点，无则把 snapshot 里各节点的 `text` / `name` / `role` 拼成 haystack。原因：嵌套 `listitem` 上的字可能不在父节点截断后的 200 字里，整页拼接才能等到弹层里那句独特的话。
+
+可选根字段 `shots`：`stepId → png data URL`。步骤对象本身不加 png。导入后未连接也能在舞台看图；无配图且已连接则按叶子补拍。这不是第二种 schema。
+
+`source`：`manual` | `agent` | `repaired` | `recorded`。模型写的步骤用 `agent`。
+
+`target`：window/webview 标识，缺省=当前主目标。执行器按步切换。模型必须把 `list_targets` 的 id 写在这里；人录制时由注入脚本带上事件所在层。
+
+运行态 `pending/running/pass/fail` **不进 Step**，只存在工作台的 Map 里。原因：Step 要导出落盘，瞬时 UI 态混进去会污染脚本文件。
+
+---
+
+## 5 MCP：会话、观察、回放
+
+入口：`package.json` 的 `npm run mcp` → `src/mcp/main.ts`。在 **仓库根** 跑。Cursor 配置必须是仓库里的 `.cursor/mcp.json`，`command` 为 `npm`、`args` 为 `["run", "mcp"]`、`cwd` 为 `${workspaceFolder}`。**不要**把 cwd 写成某台机器上的 Desktop 路径，也 **不要** 写成 `.cursor/worktree/...`。对方克隆后打开克隆根目录即可，`${workspaceFolder}` 会指向那份克隆。stdout 只给 JSON-RPC，诊断打 stderr。
+
+Tool 是对已有内核的 1:1 封装（`src/mcp/dispatch.ts` 调 `src/index.ts` 导出的能力），不重写 CDP。
+
+### 5.1 会话（本机拉起，不要让用户自己敲 cmd）
+
+| Tool | 行为 |
 |---|---|
-| CDP 连接 | 连接目标 Electron 应用并枚举 target（window/webview），选中主操作目标 |
-| 步骤执行器 | 解释步骤 JSON，逐条执行操作 + 断言 |
-| 断言 | 元素存在/可见、文案包含、URL/标题、自定义表达式 |
-| 脚本导入导出 | 读写标准步骤 JSON（脚本库），导入导出与 MCP 一致 |
-| 简易编辑 | 步骤列表的增删改（为 M2 录制、M3 MCP 全量 Tool 打基础） |
+| `launch-target` | 包装仓库根 `scripts/launch-*.cmd` + `scripts/targets.json`，返回 **实际** 调试端口。VS Code 目录默认 9244，遇幽灵口会 +1。不要口播「试试 9222」。 |
+| `target.stop` | 按该端口停被测进程。 |
+| `workbench.start` / `workbench.stop` | 等价 `npm run ui`，返回打印出来的 URL（占用时可能不是 5173）。已在听则复用；stop 不杀外部实例。 |
+| `app.connect` / `app.disconnect` / `app.list_targets` | CDP 连接、断开、列出外层 page 与嵌套 webview。`connect` 的 port 用 launch-target 的返回值。 |
 
-**M1 验收问题**：脚本能否稳定控目标 App（见 §8）。
+### 5.2 观察 + 跑脚本
 
-### 1.2 本期不做（明确边界）
-
-- 版本监听触发（M2）
-- 录制 UI（M2）
-- MCP 全量 Tool / 测试向 Skill / Agent 执行导出（M3）
-- 更新触发 Agent 任务 / 失败 Diff 补丁（M4）
-- 原生菜单/系统文件框控制（降级方案，architecture/architecture.md §3-A）
-
----
-
-## 2 分层架构（M1 视角）
-
-```
-┌─────────────────────────────────────────┐
-│  脚本库（本地 JSON 文件，按应用版本打标）   │
-├─────────────────────────────────────────┤
-│  CLI / 入口：加载脚本 → 调执行器          │
-├─────────────────────────────────────────┤
-│  Executor：步骤解释器 + 断言引擎          │
-├─────────────────────────────────────────┤
-│  CDP Adapter：Playwright connectOverCDP   │
-│    - connect / listTargets / selectTarget│
-│    - click / fill / select / wait / eval  │
-├─────────────────────────────────────────┤
-│  目标：Electron 客户端（--remote-debugging-port=9222）│
-└─────────────────────────────────────────┘
-```
-
-> M1 以 **CLI + 库** 形态交付（不强制 MCP/UI）。MCP Server 在 M3 接入，但其 Tool 语义已在 §6 预留，M1 的执行器/适配器可直接复用。
-
----
-
-## 3 目录结构（TypeScript）
-
-```
-electron-auto-test/
-├── package.json
-├── tsconfig.json
-├── src/
-│   ├── types/
-│   │   └── step.ts            # 统一步骤模型（§4）
-│   ├── cdp/
-│   │   ├── adapter.ts         # Playwright connectOverCDP 封装
-│   │   └── targets.ts         # 枚举/选择 window/webview
-│   ├── executor/
-│   │   ├── executor.ts        # 步骤解释器主循环
-│   │   ├── actions.ts         # click/fill/select/wait 实现
-│   │   └── assert.ts          # 断言引擎
-│   ├── script/
-│   │   ├── io.ts              # 导入/导出 JSON
-│   │   └── edit.ts            # 增删改步骤（简易编辑）
-│   ├── cli.ts                 # 入口：run <script.json> [--app <path>] [--port 9222]
-│   └── index.ts               # 库导出（供 M3 MCP 复用）
-├── scripts/                   # 示例脚本库（JSON）
-│   └── demo-login.json
-└── docs/
-    ├── requirements/requirements.md
-    ├── architecture/architecture.md
-    └── design/design.md
-```
-
----
-
-## 4 统一步骤模型（核心）
-
-所有模式（录制、Agent 轨迹、导入导出、MCP Tool、执行器）共用此 JSON 结构。
-
-```typescript
-// src/types/step.ts
-export type StepType =
-  | 'click' | 'fill' | 'select' | 'wait'
-  | 'assert' | 'hover' | 'eval' | 'snapshot';
-
-export type Locator = {
-  // 优先级：role/text/name/testid > css > xpath
-  role?: string;
-  name?: string;        // accessibility name
-  text?: string;        // 可见文本（模糊/精确）
-  textExact?: boolean;
-  testId?: string;      // data-testid
-  css?: string;
-  xpath?: string;
-};
-
-export type Step = {
-  id: string;                       // 唯一，便于编辑/Diff
-  type: StepType;
-  target?: string;                  // window/webview 标识；缺省=主目标
-  locator?: Locator;                // click/fill/select/hover/assert 用
-  params?: {
-    value?: string;                 // fill 的文本 / select 的 option
-    optionText?: string;            // select
-    durationMs?: number;            // wait
-    key?: string;                   // wait 文本/键
-    code?: string;                  // eval 的 JS
-    assertion?: Assertion;          // assert 用
-  };
-  expect?: Assertion;               // 步骤级可选期望
-  source: 'manual' | 'agent' | 'repaired' | 'recorded';
-  meta?: {
-    window?: string;
-    timestamp?: string;
-    note?: string;
-  };
-};
-
-export type Assertion = {
-  kind: 'exists' | 'visible' | 'textContains' | 'titleIs' | 'urlMatches' | 'expr';
-  locator?: Locator;               // exists/visible/textContains 用
-  value?: string;                  // textContains/titleIs/urlMatches/expr 用
-};
-
-export type Script = {
-  schema: 'electron-auto-test/step/v1';
-  app: { name: string; version?: string };
-  steps: Step[];
-  createdAt?: string;
-  note?: string;
-};
-```
-
-**设计要点**
-- `target` 必带意识：architecture/architecture.md 风险清单 #2 强调"多窗口/webview → 步骤必须带 target"。M1 允许缺省（默认主目标），但结构预留。
-- `source` 字段贯穿录制↔Agent↔修复（UC-07/08/10），为 M3/M4 留痕。
-- 定位优先语义化（role/name/text/testid），脆了再降级 css/xpath（呼应 UC-05 异常）。
-
----
-
-## 5 CDP 适配层设计
-
-基于 **Playwright `connectOverCDP`**（architecture/architecture.md §3-A 主选）。
-
-```typescript
-// src/cdp/adapter.ts（接口摘要）
-export interface CdpAdapter {
-  connect(opts: { port?: number; appPath?: string; launchArgs?: string[] }): Promise<void>;
-  disconnect(): Promise<void>;
-  listTargets(): TargetInfo[];          // window/webview 列表
-  selectTarget(id: string): void;       // 设主目标
-  click(loc: Locator): Promise<void>;
-  fill(loc: Locator, value: string): Promise<void>;
-  select(loc: Locator, option: string): Promise<void>;
-  hover(loc: Locator): Promise<void>;
-  wait(opts: { text?: string; durationMs?: number }): Promise<void>;
-  eval(code: string): Promise<unknown>;
-  snapshot(): Promise<SerializedNode[]>; // 可交互元素清单（UC-02 雏形）
-  query(loc: Locator): Promise<ElementHandle | null>;
-}
-```
-
-**连接策略**
-- 若给定 `appPath`：以 `--remote-debugging-port=9222` 启动应用后连接。
-- 若给定 `port`：直接 `chromium.connectOverCDP('http://localhost:' + port)`。
-- 端口默认 9222，可配置（architecture/architecture.md §3-A）。
-- 生产包禁用调试（风险 #1）：M1 仅支持可开调试端口的包/测试通道；启动时检测端口连通性并报明确错误（UC-01 异常）。
-
-**target 选择**：`listTargets()` 返回 CDP 目标，按类型过滤 `page`/`webview`，首个作为主目标；`selectTarget` 切换（多窗口场景）。
-
----
-
-## 6 执行器与 MCP Tool 语义对齐
-
-M1 执行器内部循环即后续 MCP Tool 的语义来源（architecture/architecture.md §3-C）：
-
-| 执行器能力 | 对应未来 MCP Tool |
+| Tool | 行为 |
 |---|---|
-| `executor.run(script)` | `actions.execute_steps` |
-| `cdp.snapshot()` | `page.snapshot` |
-| `script.io.import/export` | `script.import` / `script.export` |
-| `UiShell.loadScript` / 桥 RPC `loadScript` | **`script.open`**（把 Script JSON 推进**当前工作台会话**；工作台「导入」按钮仍保留） |
-| `script.edit.*` | `script.update_step` |
-| `cdp.connect/listTargets` | `app.connect` / `app.list_targets` |
-| `assert.run` | `assert.run` |
+| `page.snapshot` | 可交互节点。可选 `targetId`，默认当前目标。 |
+| `page.screenshot` | 返回 png base64；可选 highlight / 落盘。不改 Script schema。 |
+| `script.import` / `script.export` | 校验解析 / 序列化。 |
+| `script.open` | `loadScript` 推进当前工作台会话。 |
+| `actions.execute_steps` | 内核 `runCli`。步骤上已有 `target` 会被执行器遵守。可带 `fromStepId`。 |
 
-> M1 不实现 MCP Server 进程，但将上述方法在库函数中对齐语义，M4 封装为 Tool，避免重写。第一期 MCP 必须含 **`script.open`**：Agent 在对话里生成脚本后，把同一份 JSON 推进当前 UI 会话（内核已有 `loadScript` + 桥 RPC）。这**不是**替代 `script.import`（文件解析）也不是替代工作台「导入」按钮——三条路径并存。不要把可视化理解成「只能 Import」。
+### 5.3 可选单步探针（与脚本步骤同一套原子）
 
----
+`page.click` / `page.fill` / `page.wait` / `page.waitUntil`、`assert.run`、`record.start` / `record.stop` / `record.get_steps`。
 
-## 7 脚本导入/导出格式
+Agent 默认不要替人按录制。人要自己在窗口里点时，告诉他去已连接的真实软件里操作。
 
-- 文件：`*.json`，结构见 §4 `Script`。
-- 导入：`script/io.ts` 校验 `schema` 字段，缺字段给明确错误。
-- 导出：执行器/录制产出步骤数组 → 包裹为 `Script` 写入。
-- 简易编辑：`script/edit.ts` 提供 `insertStep/removeStep/reorderStep/updateStep`，供 CLI 子命令或后续 UI 调用。
-- 脚本库：`scripts/` 目录按应用/版本组织，M2 起接入版本标签（architecture/architecture.md §3-H）。
+**本期未封装（不是插件，是工程剩余）**：`script.update_step`（改步仍走工作台或导出后再 `script.open`）。**以后的插件，不要写进本设计当 v1 Tool**：`agent.suggest_steps`、视觉断言专用 Tool、脚本版本库。
 
 ---
 
-## 8 M1 验收标准
+## 6 录制、回放、等待
 
-1. 给定一可开调试端口的 Electron 应用，CLI `run demo-login.json --app <path>` 能连上并跑通登录主路径（click/fill/assert）。
-2. 步骤 JSON 与 §4 模型一致；`script.export` 产出的 JSON 可被 `script.import` 原样加载并回放。
-3. 断言失败时能输出：失败步骤 id、当前快照、明确错误信息（为 M2 录制/Diff 留接口）。
-4. 多 target 场景下，带 `target` 字段的步骤能正确作用于指定 window/webview。
-5. 连接失败（端口占用/生产包禁用）返回明确错误码，不静默崩溃。
+**录制**：`startRecording` 向 **全部已枚举 CDP target**（主 page + 每个 webview）注入监听，并听 `Target.targetCreated`，中途新开的层也会注入。顶栏「当前窗口」下拉在录制中隐藏：人不必先选层。事件带所在 `target`，停止后写入步骤。空 fill 丢弃；同一 locator 连续输入只留最终文本。可交互祖先走到 button/link/input 等，不把 `presentation` / 屏幕阅读器长文案当 `name`。
 
----
+**回放**：主窗口走 Playwright **真实指针**（`clickOnPage` / `fillOnPage` 的 `page.mouse`），不是 DOM `element.click()`。原因：许多 Electron 壳只认鼠标，合成 click 会「步骤成功、界面不动」。webview 走 CDP 坐标点击。
 
-## 9 后续阶段接口预留（不实现，仅标注）
+**waitUntil**：按 `timeoutMs` 轮询 `runAssertion`，默认间隔 200ms。没有 assertion 时退化为死等时长。产品路径里「等到弹层出现某句独特的话」用 `kind: textContains`，不要用刚填进输入框的原文，也不要只调 `page.wait` 干等。
 
-| 阶段 | 复用点 |
-|---|---|
-| M2 版本监听 | 触发 `executor.run(script)`；监听用 chokidar/watchdog（architecture/architecture.md §3-E） |
-| M3 MCP/Skill | `index.ts` 库函数封装为 Tool；录制产步骤 → `script.export` |
-| M4 Agent 任务 | `executor` 输出轨迹 → `Script`；失败快照 → Diff（UC-10/11） |
+**textContains**：见 §4。有 locator 则只搜该节点；无则搜交互 haystack。
 
 ---
 
-## 10 风险对照（architecture/architecture.md §5）
+## 7 工作台 UI（对照实现，交互细则以 visual-mask-ui-spec 为准）
 
-| 风险 | M1 应对 |
-|---|---|
-| 正式包关闭 remote debugging | M1 仅支持调试可达的包；错误明确提示需测试通道/启动参数 |
-| 多窗口/webview | 步骤带 `target`；适配器 `listTargets/selectTarget` |
-| 定位脆 | 优先语义化 locator；失败时提示降级 css/xpath |
-| 过度承诺 AI 覆盖 | M1 不碰 Agent 覆盖断言，仅做结构快照（UC-02 雏形） |
+工作台产品名 **测试步骤中台**。`document.title` 也是这六个字。顶栏可见「已连接 / 未连接」；完整靶机窗口 title 只放 tooltip。
+
+- **没有整页文档滚动**：`html/body/#app` 都是 `overflow: hidden`。CFG 再高也只在栏内 **平移/缩放**，不要冒出页面滚动条。
+- **点阵在 CFG 画布上**（`[data-cfg-dots]`），不铺顶栏。页面壳只留跟指针的雾块。
+- **浮动层贴节点包围盒**：详情 `[data-detail-anchor=node]`、打包簇 `[data-pack-anchor=bbox]`，按节点盒相对画布重算，不钉画布左上、不占半幅抽屉。
+- **详情**：确定与删除同一行等宽。关闭是右上角四分之一椭圆 X（`[data-inspector-close]`，`border-radius: 0 8px 0 100%`），没有「取消」按钮。弹层内 `[data-inspector-scroll]` 可滚；画布本身不用 `overflow: auto`。
+- 点节点默认看该步截图（`shots`）；点「编辑」才打开详情。Git 版本面板默认不挂载（`enableVersionPanel` 才出现）。
+
+UI 主链路验收仍走 `test/ui-core-e2e.test.ts` 的 `app.boot()` + `[data-action]`，禁止只用内部 API 冒充用户路径。
+
+---
+
+## 8 内核目录（当前）
+
+```
+src/
+  types/step.ts          步骤模型与 CONTROL_KINDS / STEP_TYPES
+  cdp/adapter.ts         connectOverCDP、录制注入、playback
+  cdp/targets.ts         枚举 target；clickOnPage / fillOnPage 真指针
+  executor/              runScript / waitUntil 轮询 / 断言
+  recorder/              事件 → Step
+  script/io.ts           导入导出与 schema 校验
+  script/version-store.ts 可选数据层（UI 默认不挂；产品化见需求插件节）
+  ui/                    测试步骤中台（serve + 桥 + shell + cfg-view）
+  mcp/                   stdio 入口、tool-catalog、dispatch、session
+  cli.ts / cli-main.ts   命令行跑脚本（工作台与 MCP 仍复用 runCli）
+  index.ts               库导出，避免从内部路径掏 connect/snapshot
+```
+
+---
+
+## 9 与后续阶段的边界
+
+M5（Agent 根据页面生成覆盖步骤、按已有脚本改写）和 M6（安装包版本更新后自动触发一次任务）仍是产品方向，见计划与需求用例，不在本文展开接口。不要把它们和「脚本版本控制插件」「模型视觉断言插件」混成一件事：前者是调度与生成，后者是中台里的可插拔增强。

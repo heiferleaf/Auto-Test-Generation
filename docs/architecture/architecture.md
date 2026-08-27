@@ -291,7 +291,7 @@ Tool 是对**已有内核**的 1:1 封装（`src/index.ts` 统一 export），�
 
 **嵌套页面**：先 `app.list_targets`，再 `page.snapshot({ targetId })`，把该 id 写进脚本步骤的 `target` 字段。`targetId` 是 Tool 入参，**不是** Script schema 新字段；步骤里已有的 `target` 执行器照旧遵守。
 
-**本期未封装**：`script.update_step`（改步仍走工作台或导出后再 `script.open`）、`agent.suggest_steps` / `agent.repair_steps`（P1）、视觉断言专用 Tool、脚本版本库。
+**本期未封装**：`script.update_step`（改步仍走工作台或导出后再 `script.open`）。`agent.suggest_steps` / 视觉断言专用 Tool / 脚本版本库见 `docs/requirements/requirements.md`「以后的插件 / 非本轮」，不要当成当前 MCP 缺口清单里的下一刀功能。
 
 **snapshot 文本（通用，无 App CSS）**：选择器含 `[role]`，嵌套 `listitem` / `article` 会作为独立节点进快照；每个节点 `text` 截到 200 字。`textContains` 把所有节点的 `text`/`name`/`role` 拼成 haystack（见 `src/executor/assert.ts`），因此子 listitem 上的文字即使不在父 list 的 200 字里，也可能被扫到。换靶机先跑 Skill `target-preflight`；扫不到时加宽选择器/截断，不要写某一款聊天 UI 的 class。
 
@@ -352,8 +352,8 @@ Tool 是对**已有内核**的 1:1 封装（`src/index.ts` 统一 export），�
 |---|---|---|
 |**M1** ✅|CDP 连接 + 步骤执行器 + 断言 + 脚本导入导出 + 简易编辑|脚本能否稳定控目标 App|
 |**M2** ✅|可视化能力层 + 真实靶机接入（CodeBuddy/WorkBuddy）|对真机能否做看得见、跨 webview 的集成测试|
-|**M3**|可视化 UI 编辑壳（高内聚组件）：脚本导入/编辑/录制/导出 + 对目标软件触发并响应|脚本能否在组件内闭环管理并被目标软件执行|
-|**M4**|MCP 第一刀：stdio 包装内核 + 契约测试（Skill / update_step / Agent 工具未做）|脚本能力能否经 MCP 对外暴露|
+|**M3** ✅|测试步骤中台：CFG、录制回放、导入导出、运行全部、节点旁详情、步骤 `target`|脚本能否在中台闭环并被目标软件执行|
+|**M4** ✅ 第一刀|仓库根 stdio MCP（`npm run mcp`）包装同一内核 + Skill 工作流。未做 `script.update_step` / 多标签 runId / 手动选连接 UI。视觉断言与脚本版本库见需求「以后的插件」|脚本能力能否经 MCP 对外暴露|
 |**M5**|Agent 生成全覆盖步骤 + 参考脚本改写（为版本更新后改脚本准备）|脚本能否由 Agent 生成/演化|
 |**M6**|版本更新检测 + 更新触发 Agent 任务|版本更新后能否自动驱动脚本维护|
 
