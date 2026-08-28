@@ -62,6 +62,14 @@
       font-size: 22px; font-weight: 650; letter-spacing: .04em; line-height: 36px; color: var(--text);
     }
     .ui-shell-wordmark[data-wordmark-live="true"] .ui-shell-wordmark-label { color: transparent; }
+    /* 开场粒子进场：全屏画布挂 body（壳根会被 render() 重建），无控件所以不吃点击 */
+    .ui-shell-intro-canvas {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      pointer-events: none; z-index: 60;
+    }
+    /* 进场期间让位给大字：用 opacity 而不是 display —— 保留布局，落点坐标才量得到 */
+    body[data-intro-active] .ui-shell-wordmark { opacity: 0 }
+    .ui-shell-wordmark { transition: opacity 200ms ease; }
     .ui-shell-conn { color: var(--muted); font-size: 13px; }
     .ui-shell-header .badge { color: var(--muted); font-size: 12px; }
     .ui-shell-header .rec-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--rec-idle); }
