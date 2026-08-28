@@ -10,6 +10,7 @@ import { dirname } from 'node:path';
 import { PlaywrightCdpAdapter, CdpError } from './cdp/adapter';
 import { runCli } from './cli';
 import { Recorder } from './recorder/recorder';
+import { formatCoverage } from './recorder/coverage';
 import type { Script } from './types/step';
 
 type Mode = 'replay' | 'record';
@@ -116,6 +117,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     mkdirSync(dirname(args.out), { recursive: true });
     writeFileSync(args.out, json);
     console.log(`✅ 录制完成，共 ${finalScript.steps.length} 步，已导出: ${args.out}`);
+    // 漏了要响：录制结束时报覆盖率结论（未注入的窗口、被丢弃的交互都在这里点名）。
+    const cov = adapter.lastRecordingCoverage();
+    if (cov) console.log(formatCoverage(cov));
     return 0;
   } catch (err) {
     if (err instanceof CdpError) {

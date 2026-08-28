@@ -15,6 +15,7 @@ import type {
   StepRunStatus, StepProgressEvent,
 } from '../types/step';
 import { Recorder, type InteractionEvent, sameFillLocator, shouldKeepRecordingEvent } from '../recorder/recorder';
+import { formatCoverage } from '../recorder/coverage';
 import { ScriptEditor, isAtomicGroup } from '../editor/editor';
 import { parseShotsMap, shotToBase64, shotToDataUrl } from '../script/io';
 import { SCRIPT_SCHEMA } from '../types/step';
@@ -775,6 +776,21 @@ export class UiShell {
       }
     }
     this.render(); // 停止后全量刷新，保证一致
+    // 漏了要响：录制结束时报覆盖率结论（未注入的窗口、被丢弃的交互在这里点名）。
+    // 只进诊断日志、不弹窗——录制过程中不打断用户，也不新增 UI 元素。
+    void this.reportRecordingCoverage();
+  }
+
+  /** 把上一次录制的覆盖率结论打到诊断日志；内核不支持对账时静默跳过。 */
+  private async reportRecordingCoverage(): Promise<void> {
+    try {
+      const get = this.kernel.lastRecordingCoverage;
+      if (typeof get !== 'function') return;
+      const cov = await get.call(this.kernel);
+      if (cov) console.warn('[UiShell] 录制对账：\n' + formatCoverage(cov));
+    } catch {
+      // 对账失败不得影响录制结果：少一条结论可以，因为对账把步骤弄丢不行。
+    }
   }
 
   // ---- 编辑（不可变，委托 ScriptEditor）----

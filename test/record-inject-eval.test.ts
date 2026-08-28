@@ -60,14 +60,19 @@ describe('录制注入脚本必须能作为完整脚本求值', () => {
     expect(buf.some((e) => e.type === 'click' && e.locator?.name === 'Send')).toBe(true);
   });
 
-  it('textupdate（EditContext）记成 fill', () => {
+  it('textupdate（EditContext 实例派发）记成 fill', () => {
     new Function(RECORD_INJECT)();
     const ed = document.createElement('div');
     ed.setAttribute('contenteditable', 'true');
     ed.setAttribute('aria-label', 'Chat');
-    ed.textContent = 'final';
+    // textupdate 由 EditContext 对象派发、不冒泡到 document：必须绑在实例上，
+    // 绑在 document 上（旧写法）接不到，于是 EditContext 编辑器的输入一条都录不进来。
+    const ec = new EventTarget() as EventTarget & { text: string };
+    ec.text = 'final';
+    (ed as unknown as { editContext?: unknown }).editContext = ec;
     document.body.appendChild(ed);
-    ed.dispatchEvent(new Event('textupdate', { bubbles: true }));
+    ed.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    ec.dispatchEvent(new Event('textupdate'));
     const buf = new Function(`return (${RECORD_DRAIN})`)() as Array<{ type: string; params?: { value?: string } }>;
     expect(buf.some((e) => e.type === 'fill' && e.params?.value?.includes('final'))).toBe(true);
   });

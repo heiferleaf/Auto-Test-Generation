@@ -11,7 +11,8 @@ import { runCli } from '../cli';
 export type { Locator } from '../types/step';
 import type { InteractionEvent } from '../recorder/recorder';
 import { mergeRecordingEvent, emitRecordingEvent } from '../recorder/recorder';
-import { RECORD_INJECT, RECORD_DRAIN, PICK_INJECT, PICK_DRAIN, PICK_STOP, REC_ACTIVE_ON, REC_ACTIVE_OFF, highlightPaintSource, HIGHLIGHT_CLEAR, sanitizeLocator } from '../recorder/inject';
+import { RECORD_INJECT, RECORD_DRAIN, REC_STATS_DRAIN, PICK_INJECT, PICK_DRAIN, PICK_STOP, REC_ACTIVE_ON, REC_ACTIVE_OFF, highlightPaintSource, HIGHLIGHT_CLEAR, sanitizeLocator } from '../recorder/inject';
+import { buildCoverage, normalizeStats, type RecordingCoverage, type TargetCoverage } from '../recorder/coverage';
 import {
   enumerateTargets,
   findTarget,
@@ -91,6 +92,13 @@ export interface Recordable {
   startRecording(): void;
   /** 停止监听并异步收集期间捕获的交互事件（抽象 InteractionEvent，与具体事件源解耦）。 */
   stopRecording(): Promise<InteractionEvent[]>;
+  /** 立刻对账一次：把各 target 的注入层统计与「哪些 target 已注入」合成覆盖率结论。可选：旧实现无此能力。 */
+  collectRecordingCoverage?(): Promise<RecordingCoverage>;
+  /**
+   * 上一次 stopRecording 时的覆盖率结论（未录制/未收集为 null）。
+   * 允许同步或 Promise：本地内核直接返回，WS 桥内核要跨进程取（与其它内核方法同一处差异）。
+   */
+  lastRecordingCoverage?(): RecordingCoverage | null | Promise<RecordingCoverage | null>;
 }
 
 /**
@@ -169,6 +177,8 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   private recordBrowserWs?: WebSocket;
   /** 本轮录制已注入监听器的 target id 集合，避免重复注入。 */
   private injectedTargets = new Set<string>();
+  /** 上一次 stopRecording 时的覆盖率结论（供 CLI/UI 在录制结束时报漏点）。 */
+  private lastCoverage: RecordingCoverage | null = null;
 
   async connect(opts?: ConnectOptions): Promise<void> {
     // WS 边界：opts 可能是 null；已连接时 playback/runCli 会再调 connect() 且不带 port，
@@ -475,6 +485,9 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
 
   /** M3 录制：停止监听并异步取回所有 target 累积的 InteractionEvent[]（按 target 标注）。 */
   async stopRecording(): Promise<InteractionEvent[]> {
+    // 对账必须先于 stopTargetWatch：后者会清掉本轮的注入记账，
+    // 而「哪些 target 注入过」正是覆盖率结论的关键一半（没注入的窗口成片丢失）。
+    this.lastCoverage = await this.collectRecordingCoverage();
     this.recording = false;
     this.stopTargetWatch();
     if (this.recordingTimer !== null) {
@@ -498,6 +511,31 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     }
     this.recorded = out;
     return out;
+  }
+
+  /**
+   * 录制覆盖率对账：逐个 target 拉注入层统计（REC_STATS_DRAIN），与宿主的注入记账对齐。
+   * 只在录制结束时（或宿主主动调用）跑，不在录制过程中打断用户。
+   * 单个 target 拉统计失败不得影响其它 target：它的 stats 记为 null，结论里归到 noStats。
+   */
+  async collectRecordingCoverage(): Promise<RecordingCoverage> {
+    const list: TargetCoverage[] = [];
+    for (const t of this.targets) {
+      const raw = await t.target.evaluate<unknown>(REC_STATS_DRAIN).catch(() => null);
+      list.push({
+        id: t.info.id,
+        title: t.info.title,
+        type: t.info.type,
+        injected: this.injectedTargets.has(t.info.id),
+        stats: raw ? normalizeStats(raw) : null,
+      });
+    }
+    return buildCoverage(list);
+  }
+
+  /** 取上一次 stopRecording 的覆盖率结论；没录制过为 null（调用方据此跳过播报）。 */
+  lastRecordingCoverage(): RecordingCoverage | null {
+    return this.lastCoverage;
   }
 
   // ---- 点选（spec §2.3）----

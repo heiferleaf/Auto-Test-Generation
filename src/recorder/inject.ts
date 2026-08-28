@@ -150,21 +150,49 @@ const ATG_LOCATOR_HELPERS = `(() => {
     return false;
   };
   window.__atgLocatorHelpers = true;
+  // 可访问名的「向下取」：label 挂在子元素而不是自身是通病（菜单项、图标按钮都常见）。
+  // 只向上找会取到祖先的名字，于是同一菜单下多个条目录出来重名，看着像「只捕到一次」。
+  // 顺序按 WAI-ARIA accname：自身 aria-label/name > 子树（直接子元素）可见文本 > 自身 title。
+  // 只取值、不改 locator 指向的元素，避免把 locator 变深。
+  window.__atgNameFromBelow = (node) => {
+    if (!node || node.nodeType !== 1) return undefined;
+    const clean = (s) => {
+      if (!s) return undefined;
+      const t = String(s).split(/\\r?\\n/)[0].trim().replace(/\\s*\\((?:Ctrl|Control|Shift|Alt|Cmd|Meta)[^)]*\\)\\s*$/i, '').trim();
+      if (!t || window.__atgIsHelpName(t)) return undefined;
+      return t;
+    };
+    const own = clean(node.getAttribute('aria-label') || node.getAttribute('name') || node.getAttribute('data-testid'));
+    if (own) return own;
+    const kids = node.children || [];
+    for (let i = 0; i < kids.length; i++) {
+      const k = kids[i];
+      if (k.getAttribute('aria-hidden') === 'true') continue;
+      let t = '';
+      try { t = (k.innerText || k.textContent || '').trim(); } catch (_) { t = (k.textContent || '').trim(); }
+      // 确定性：多个子元素时取第一个非空可见文本。
+      const kid = clean(t) || clean(k.getAttribute('aria-label') || k.getAttribute('title'));
+      if (kid) return kid.slice(0, 40);
+    }
+    return clean(node.getAttribute('title'));
+  };
   window.__atgLocOf = (el) => {
     const node = window.__atgResolve(el);
     if (!node) return {};
-    let named;
-    let cur = node, depth = 0;
-    while (cur && cur.nodeType === 1 && depth < 8) {
-      if (cur.getAttribute('aria-hidden') === 'true' || cur.hasAttribute('inert')) {
-        cur = cur.parentElement; depth++; continue;
+    let named = window.__atgNameFromBelow(node);
+    if (!named) {
+      let cur = node, depth = 0;
+      while (cur && cur.nodeType === 1 && depth < 8) {
+        if (cur.getAttribute('aria-hidden') === 'true' || cur.hasAttribute('inert')) {
+          cur = cur.parentElement; depth++; continue;
+        }
+        const cand = cur.getAttribute('aria-label') || cur.getAttribute('name') || cur.getAttribute('data-testid');
+        if (cand && !window.__atgIsHelpName(cand.split(/\\r?\\n/)[0].trim())) {
+          named = cand.split(/\\r?\\n/)[0].trim().replace(/\\s*\\((?:Ctrl|Control|Shift|Alt|Cmd|Meta)[^)]*\\)\\s*$/i, '').trim() || cand.split(/\\r?\\n/)[0].trim();
+          break;
+        }
+        cur = cur.parentElement; depth++;
       }
-      const cand = cur.getAttribute('aria-label') || cur.getAttribute('name') || cur.getAttribute('data-testid');
-      if (cand && !window.__atgIsHelpName(cand.split(/\\r?\\n/)[0].trim())) {
-        named = cand.split(/\\r?\\n/)[0].trim().replace(/\\s*\\((?:Ctrl|Control|Shift|Alt|Cmd|Meta)[^)]*\\)\\s*$/i, '').trim() || cand.split(/\\r?\\n/)[0].trim();
-        break;
-      }
-      cur = cur.parentElement; depth++;
     }
     const roleAttr = node.getAttribute('role') || undefined;
     const roleLc = (roleAttr || '').toLowerCase();
@@ -193,11 +221,48 @@ export const RECORD_INJECT = ATG_LOCATOR_HELPERS + `;(() => {
     return (node && node.nodeType === 1) ? node : null;
   };
   const fillValue = (node) => {
+    // EditContext（W3C 标准草案，Chromium 新编辑架构）：文本在 element.editContext.text，
+    // DOM 的 innerText/textContent 恒空。任何 Electron 应用只要底层 Chromium 升级都会走到
+    // 这条路上，所以按标准 API 取、优先级高于 DOM 文本，而不是给某个壳加特例。
+    try {
+      const ec = node.editContext;
+      if (ec && typeof ec.text === 'string' && ec.text.trim()) return ec.text.trim();
+    } catch (_) {}
     const tag = (node.tagName || '').toUpperCase();
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return node.value ?? '';
     if (node.isContentEditable) return (node.innerText || node.textContent || '').trim();
     return node.value ?? (node.innerText || node.textContent || '').trim();
   };
+  // 「漏了要响」的底座：页面内统计。真正的危害不是有漏的，而是漏了没声——
+  // 用户录完才发现步骤没新增，Agent 录制路径更是根本没人盯列表。
+  // 只统计不提示（不在录制过程中打断用户），由宿主侧在录制结束时报覆盖率结论。
+  const stats = () => {
+    if (!window.__atgStats || typeof window.__atgStats !== 'object') {
+      window.__atgStats = { intents: 0, emitted: 0, dropped: 0, recovered: 0, reasons: {} };
+    }
+    return window.__atgStats;
+  };
+  const drop = (reason) => {
+    const s = stats();
+    s.dropped += 1;
+    s.reasons[reason] = (s.reasons[reason] || 0) + 1;
+  };
+  // EditContext 的 textupdate / textformatupdate 由 EditContext 对象派发、不冒泡到 document，
+  // 绑在 document 上接不到；必须绑在实例上。焦点不变时 focusin 不会再触发，
+  // 所以另外在轮询与 fill 事件里补绑（见 __atgPollFill / __atgOnEvent）。
+  const bindEditContext = (el) => {
+    try {
+      if (!el || el.nodeType !== 1 || el.__atgEcBound) return false;
+      const ec = el.editContext;
+      if (!ec || typeof ec.addEventListener !== 'function') return false;
+      el.__atgEcBound = true;
+      const h = () => { try { window.__atgEmitFill(el); } catch (_) {} };
+      ec.addEventListener('textupdate', h);
+      ec.addEventListener('textformatupdate', h);
+      return true;
+    } catch (_) { return false; }
+  };
+  window.__atgBindEditContext = bindEditContext;
   if (!window.__atgFillSeen) window.__atgFillSeen = typeof WeakMap === 'function' ? new WeakMap() : null;
   let pendingFill = window.__atgPendingFill || null;
   let idleTimer = window.__atgIdleTimer || null;
@@ -212,10 +277,12 @@ export const RECORD_INJECT = ATG_LOCATOR_HELPERS + `;(() => {
     const buf = window.${REC_BUF};
     const last = buf[buf.length - 1];
     if (last && last.type === 'fill' && last.locator && sameLocator(last.locator, loc)) {
+      // 同一输入框的连续输入就地改值：不是新步骤，不重复计 emitted。
       last.params = { value: val };
       return;
     }
     buf.push({ type: 'fill', locator: loc, params: { value: val } });
+    stats().emitted += 1;
   };
   window.__atgFlushFill = flushFill;
   const emitFill = (el) => {
@@ -246,7 +313,7 @@ export const RECORD_INJECT = ATG_LOCATOR_HELPERS + `;(() => {
         const inner = ev.composedPath()[0];
         if (inner instanceof Element) el = inner;
       }
-      if (!(el instanceof Element)) return;
+      if (!(el instanceof Element)) { drop('notElement'); return; }
       if (ev.type === 'submit') {
         const submitter = (ev.submitter instanceof Element) ? ev.submitter : el;
         let node = window.__atgResolve(submitter);
@@ -254,33 +321,66 @@ export const RECORD_INJECT = ATG_LOCATOR_HELPERS + `;(() => {
           const inner = el.querySelector('button, input[type=submit], [role="button"]');
           node = inner ? (window.__atgResolve(inner) || inner) : null;
         }
-        if (!node) return;
+        if (!node) { drop('noNode'); return; }
         const loc = locOf(node);
         const role = (loc.role || '').toLowerCase();
-        if (role === 'presentation' || role === 'none') return;
+        if (role === 'presentation' || role === 'none') { drop('presentation'); return; }
         window.${REC_BUF}.push({ type: 'click', locator: loc });
+        stats().emitted += 1;
         return;
       }
       const isFill = ev.type === 'input' || ev.type === 'change' || ev.type === 'compositionend' || ev.type === 'beforeinput' || ev.type === 'textupdate';
       if (isFill) {
+        // 元素刚变成可填（或刚挂上 EditContext）时补绑，焦点不变也能接住后续输入。
+        const fillNode = fillableOf(el);
+        if (fillNode) bindEditContext(fillNode);
         emitFill(el);
         return;
       }
+      // 意图锚点：mousedown 时 DOM 还没被壳改写，此刻命中的元素才是用户真正的目标。
+      // 只记意图、不产出步骤——产出留给 click，这样解析层怎么失败都不影响对账。
+      if (ev.type === 'mousedown') {
+        try {
+          const inode = window.__atgResolve(el);
+          if (inode) {
+            window.__atgIntent = { t: Date.now(), node: inode, loc: locOf(inode) };
+            stats().intents += 1;
+          }
+        } catch (_) {}
+        return;
+      }
       flushFill();
-      const node = window.__atgResolve(el);
-      if (!node) return;
-      const loc = locOf(node);
+      let node = window.__atgResolve(el);
+      let loc = null;
+      const intent = window.__atgIntent;
+      if (intent && (Date.now() - intent.t) < 1000) {
+        const gone = !intent.node || intent.node.isConnected === false;
+        // 解析失败有两种：返回 null，或坍缩到意图节点的某个祖先。
+        // 后者正是「mousedown 阶段插遮罩 → click 被改写到共同祖先」的表现。
+        if (!gone && (!node || (intent.node !== node && node.contains(intent.node)))) {
+          node = intent.node;
+          loc = intent.loc;
+          stats().recovered += 1;
+        }
+      }
+      // 一条意图只服务一次，避免后续 click 复用陈旧意图。
+      window.__atgIntent = null;
+      if (!node) { drop('noNode'); return; }
+      if (!loc) loc = locOf(node);
       const role = (loc.role || '').toLowerCase();
-      if (role === 'presentation' || role === 'none') return;
-      if (role === 'generic' && !loc.name && !loc.testId) return;
+      if (role === 'presentation' || role === 'none') { drop('presentation'); return; }
+      if (role === 'generic' && !loc.name && !loc.testId) { drop('generic'); return; }
       window.${REC_BUF}.push({ type: ev.type, locator: loc });
+      stats().emitted += 1;
     } catch (_) {}
   };
   window.__atgPollFill = () => {
     try {
-      if (!window.__recActive) return;
       const ae = document.activeElement;
       if (!(ae instanceof Element) || !isFillable(ae)) return;
+      // 兜底补绑 EditContext：焦点从未变化（focusin 不再触发）的编辑器也能接住输入。
+      bindEditContext(ae);
+      if (!window.__recActive) return;
       const raw = fillValue(ae);
       const seen = window.__atgFillSeen;
       if (seen) {
@@ -295,7 +395,9 @@ export const RECORD_INJECT = ATG_LOCATOR_HELPERS + `;(() => {
   };
   if (window.${REC_INSTALL_FLAG}) return;
   window.${REC_INSTALL_FLAG} = true;
-  const TYPES = ['click','input','change','submit','compositionend','beforeinput','textupdate'];
+  // mousedown 作为意图锚点（缺陷 2）；textupdate 不在此列——它由 EditContext 对象派发、
+  // 不冒泡到 document，绑在这里接不到，只能在 EditContext 实例上绑。
+  const TYPES = ['mousedown','click','input','change','submit','compositionend','beforeinput'];
   const bound = typeof WeakSet === 'function' ? new WeakSet() : null;
   const onEv = (ev) => { try { window.__atgOnEvent(ev); } catch (_) {} };
   const bindRoot = (root) => {
@@ -352,10 +454,7 @@ export const RECORD_INJECT = ATG_LOCATOR_HELPERS + `;(() => {
         const raw = fillValue(el);
         if (window.__atgFillSeen.get(el) === undefined) window.__atgFillSeen.set(el, raw);
       }
-      const ec = el.editContext;
-      if (!ec || el.__atgEcBound) return;
-      el.__atgEcBound = true;
-      ec.addEventListener('textupdate', () => { try { window.__atgEmitFill(el); } catch (_) {} });
+      bindEditContext(el);
     } catch (_) {}
   }, true);
   if (!window.__atgFillTimer) {
@@ -367,6 +466,13 @@ export const RECORD_INJECT = ATG_LOCATOR_HELPERS + `;(() => {
 
 /** 读取并清空缓冲区的脚本。 */
 export const RECORD_DRAIN = `(() => { try { if (typeof window.__atgFlushFill === 'function') window.__atgFlushFill(); } catch (_) {} const b = window.${REC_BUF} || []; window.${REC_BUF} = []; return b.filter((e) => { if (e.type === 'fill') { const v = e.params && e.params.value; if (!v || v === '__ATG_EMPTY_FILL__') return false; } const role = (e.locator && e.locator.role || '').toLowerCase(); if ((e.type === 'click' || e.type === 'hover') && (role === 'presentation' || role === 'none')) return false; return true; }); })()`;
+
+/**
+ * 取回注入层统计（对账用）。统计**不进 Script JSON** —— Script JSON 是平台唯一不变式，
+ * 覆盖率只作为录制结束时的结论文本。未注入过脚本时返回 null，宿主据此区分
+ * 「注入了但一条都没捕到」与「根本没注入」（后者是成片丢失，必须在结论里点名）。
+ */
+export const REC_STATS_DRAIN = `(() => { try { if (typeof window.__atgFlushFill === 'function') window.__atgFlushFill(); } catch (_) {} const s = window.__atgStats; if (!s || typeof s !== 'object') return null; const reasons = {}; const r = s.reasons || {}; for (const k in r) { if (Object.prototype.hasOwnProperty.call(r, k)) reasons[k] = Number(r[k]) || 0; } return { intents: Number(s.intents) || 0, emitted: Number(s.emitted) || 0, dropped: Number(s.dropped) || 0, recovered: Number(s.recovered) || 0, reasons }; })()`;
 
 // ───────────────────────── 嵌入式点选录制（spec §2.3）─────────────────────────
 // 点选子模式：waitUntil/assert/选择组条件共用。注入一次性 click 监听，命中后把完整
@@ -393,7 +499,7 @@ export const PICK_DRAIN = `(() => { const r = window.${PICK_RESULT} || null; win
 export const PICK_STOP = `(() => { window.${PICK_FLAG} = false; window.${PICK_RESULT} = null; })()`;
 
 /** 开始录制后才轮询当前可填节点；未录制时打字不得灌进 __recBuf。每次开录重置 fill 基线，避免把已有文档当一次填充。 */
-export const REC_ACTIVE_ON = `(() => { window.__recActive = true; window.__atgFillSeen = typeof WeakMap === 'function' ? new WeakMap() : null; return true; })()`;
+export const REC_ACTIVE_ON = `(() => { window.__recActive = true; window.__atgFillSeen = typeof WeakMap === 'function' ? new WeakMap() : null; window.__atgStats = { intents: 0, emitted: 0, dropped: 0, recovered: 0, reasons: {} }; window.__atgIntent = null; return true; })()`;
 export const REC_ACTIVE_OFF = `(() => { window.__recActive = false; return true; })()`;
 
 /** 拍摄前在靶机 DOM 上画定位框，随后截图，高亮成为 PNG 像素。舞台缩放不再需要坐标映射。 */
