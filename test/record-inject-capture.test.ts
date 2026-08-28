@@ -256,6 +256,40 @@ describe('录制注入：菜单项 name 向下取（缺陷 3）', () => {
     expect(hit[0].locator?.name).toBe('新建文件');
   });
 
+  it('可填充节点不向下取文本：名字不跟着内容变，同一框连续输入才能合并成一步', () => {
+    const ed = document.createElement('div');
+    ed.setAttribute('contenteditable', 'true');
+    ed.setAttribute('role', 'textbox');
+    const line = document.createElement('div');
+    line.textContent = 'const a = 1;';
+    ed.appendChild(line);
+    document.body.appendChild(ed);
+
+    ed.dispatchEvent(new Event('input', { bubbles: true }));
+    line.textContent = 'const a = 2;';
+    ed.dispatchEvent(new Event('input', { bubbles: true }));
+
+    // 名字若取成内容，两次输入的 locator 就不同，宿主侧 sameFillLocator 合并不了，
+    // 一个框敲一行字会散成一堆 fill 步骤。
+    const got = fills(drain());
+    expect(got).toHaveLength(1);
+    expect(got[0].params?.value).toBe('const a = 2;');
+    expect(got[0].locator?.name).toBeUndefined();
+  });
+
+  it('可填充节点自身的 aria-label 仍然作数（不因跳过向下取而丢名字）', () => {
+    const ta = document.createElement('textarea');
+    ta.setAttribute('aria-label', '备注');
+    const line = document.createElement('div');
+    line.textContent = '不该被当成名字';
+    ta.appendChild(line);
+    document.body.appendChild(ta);
+    ta.value = '内容';
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+
+    expect(fills(drain())[0].locator?.name).toBe('备注');
+  });
+
   it('点在菜单项的子元素（label 挂的地方）上，name 同样取菜单项自己的名字，且 locator 不会变深', () => {
     const { label } = menu();
     label.dispatchEvent(new MouseEvent('click', { bubbles: true }));

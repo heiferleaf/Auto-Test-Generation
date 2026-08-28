@@ -164,17 +164,23 @@ const ATG_LOCATOR_HELPERS = `(() => {
     };
     const own = clean(node.getAttribute('aria-label') || node.getAttribute('name') || node.getAttribute('data-testid'));
     if (own) return own;
-    const kids = node.children || [];
-    for (let i = 0; i < kids.length; i++) {
-      const k = kids[i];
-      if (k.getAttribute('aria-hidden') === 'true') continue;
-      let t = '';
-      try { t = (k.innerText || k.textContent || '').trim(); } catch (_) { t = (k.textContent || '').trim(); }
-      // 确定性：多个子元素时取第一个非空可见文本。
-      const kid = clean(t) || clean(k.getAttribute('aria-label') || k.getAttribute('title'));
-      if (kid) return kid.slice(0, 40);
+    const ownTitle = clean(node.getAttribute('title'));
+    // 可填充节点不向下取文本：输入框里的文本是数据不是名字，跟着内容取名会让
+    // 同一框的连续输入拿不到同一个 locator，宿主侧的连续 fill 合并因此失效。
+    // 菜单项/图标按钮等不可填充节点仍要向下取，那才是 label 挂错位置的主战场。
+    if (!window.__atgFillable(node)) {
+      const kids = node.children || [];
+      for (let i = 0; i < kids.length; i++) {
+        const k = kids[i];
+        if (k.getAttribute('aria-hidden') === 'true') continue;
+        let t = '';
+        try { t = (k.innerText || k.textContent || '').trim(); } catch (_) { t = (k.textContent || '').trim(); }
+        // 确定性：多个子元素时取第一个非空可见文本。
+        const kid = clean(t) || clean(k.getAttribute('aria-label') || k.getAttribute('title'));
+        if (kid) return kid.slice(0, 40);
+      }
     }
-    return clean(node.getAttribute('title'));
+    return ownTitle;
   };
   window.__atgLocOf = (el) => {
     const node = window.__atgResolve(el);
