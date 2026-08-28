@@ -280,3 +280,22 @@ MCP 不是第二套执行器，只是远程调用与工作台相同的连接、�
 ## Agent 建议 / 修复步骤（曾写在计划 P1）
 
 `agent.suggest_steps` / `agent.repair_steps`：根据快照或失败现场给出步骤补丁。不是当前 MCP 已注册 Tool，也不是当前 Skill 工作流。M5 产品阶段仍要「Agent 生成/改写脚本」，那是计划里的生成能力，落地时再决定是否做成独立 Tool；在做成插件或 M5 交付之前，模型继续自己写 Script JSON，经 `script.open` 推进中台。
+
+## 已确认缺陷：textContains 扫不到纯文本节点（2026-08-28 发现）
+
+**现象**：`waitUntil` + `textContains` 断言超时失败，报「waitUntil 超时 5000ms, textContains」，但目标文字其实已经渲染在页面上了。
+
+**根因**：`src/cdp/webview-session.ts` 的 `SNAPSHOT_COLLECT` 只收集可交互元素（
+`a,button,input,select,textarea,[role],[data-testid],[contenteditable]`）。而
+`src/executor/assert.ts` 的 `textContains` handler 把 haystack 完全建立在
+`adapter.snapshot()` 之上，因此纯 `<p>` / `<div>` / `<span>`（无 role、非控件）永远进不了
+haystack，断言恒为 false。
+
+**影响面**：不是网页拓展引入的回归，主分支 Electron 靶机上同样存在。Skill 铁律 #1 要求「断言
+操作产生的新结果」，而最常见的「新结果」就是一段纯文本提示，所以这条链路在真实场景下是断的。
+
+**修复方向**：`textContains` 不能只依赖可交互 snapshot。snapshot 未命中时，需经 adapter 层
+（而非在 assert.ts 里直接拼 CDP 表达式）兜底一次全 DOM 文本查询。同时 `waitUntil` 超时信息
+要带上「最后一次为何不匹配」的上下文，否则同类问题无法定位。
+
+**现状**：修复在 worktree `feat/browser-target` 中进行，尚未合并。

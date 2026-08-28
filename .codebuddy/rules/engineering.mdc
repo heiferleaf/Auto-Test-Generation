@@ -55,3 +55,5 @@ set VSCODE_LIVE=1 && npm test -- test/integration-vscode.test.ts
 - `Select-String` 管道会因 `-First N` 提前关闭而把 vitest 进程一并结束（exit code -1）。跑全量套件时不要套 `Select-String` 管道，直接写文件读尾。
 - PowerShell 不支持 `&&` 链命令；用 `;` 分隔。`git commit -m "..."` 含括号/换行会被 PS 解析失败，改用 `git commit -F <文件>`。
 - fnm 每次起 shell 报 `Can't create the symlink ... 拒绝访问 (os error 5)` 是 profile 权限问题，是噪音不是错误。若影响 `npx`，直接把 Node 安装目录 prepend 到 `$env:PATH` 绕过 fnm shim。
+- **项目路径含中文（`d:\project\自动化测试`），vitest/vite 在深层子目录会误报 `SyntaxError: Invalid or unexpected token`，但文件其实是好的**（实测：同一份文件 esbuild 转换成功、与主树逐字节相同、排除后全绿）。判据是**换工具链验证同一份文件**：`node -e "require('esbuild').build({entryPoints:[p],write:false,format:'esm'})"` 能过即文件没坏。别去"修"没坏的文件，用 `--exclude` 绕过或换浅层路径跑。worktree 在 `.codebuddy/worktree/` 下必踩这条。
+- worktree **没有独立 node_modules**，共享主树。跑测试用 `node "d:/project/自动化测试/node_modules/vitest/vitest.mjs" run --root .`；跑 tsc 用 `node "d:/project/自动化测试/node_modules/typescript/lib/tsc.js" -p tsconfig.json --noEmit`（直接调 `bin/tsc` 会被 PowerShell 当成文档拒绝执行）。
