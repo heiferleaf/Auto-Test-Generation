@@ -173,6 +173,21 @@ script.export { "script": <Script 对象> }   →  { json: "..." }
 
 ---
 
+## 能测什么：看内核，不看名单
+
+平台靠 Chromium 的调试端口（CDP）控制被测进程。**判断依据是内核，不是软件名单**：
+
+| 能测 | 不能测 |
+|---|---|
+| 任何 Electron 软件 | 纯原生软件（MFC / Qt Widgets / Cocoa / WPF / WinForms） |
+| Chrome / Edge 等带调试端口的 Chromium 浏览器（含其中的网页） | Java Swing |
+| 带 `--remote-debugging-port` 能起 DevTools 的程序 | 没有调试端口的浏览器里开的网页（除非你让它带参数启动） |
+
+`scripts/targets.json` 里预置的 `vscode` / `codebuddy` / `workbuddy` 只是**省事用的快捷登记**，不是能力上限。
+要测的软件不在目录里，用 `app.connect` 的 `appPath` 直接给可执行文件路径即可——**这是通用路径，不是退而求其次**。
+
+---
+
 ## 引导用户（向导身份）
 
 用户往往不知道这个平台能干什么、需要他提供什么。下面这些**主动说，不要等用户问**，

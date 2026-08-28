@@ -31,9 +31,11 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: 'launch-target',
     description:
-      '按当前平台拉起被测 Electron（vscode/codebuddy/workbuddy），返回实际调试端口。不要假设 9222。exe 装在非默认位置时改用 app.connect 的 appPath。',
+      '按当前平台拉起 scripts/targets.json 里登记的被测软件，返回实际调试端口。不要假设 9222。'
+      + 'name 取 targets.json 的登记名（当前预置 vscode / codebuddy / workbuddy，可自行增补任意 Electron 软件）；'
+      + '要测的软件不在目录里、或装在非默认位置时，改用 app.connect 的 appPath 直接给可执行文件路径。',
     inputSchema: obj({
-      name: { type: 'string', description: 'targets.json 中的 name：vscode / codebuddy / workbuddy' },
+      name: { type: 'string', description: 'targets.json 中的 name（当前预置：vscode / codebuddy / workbuddy）' },
       port: { type: 'number', description: '覆盖启动脚本端口；省略则用该靶机目录默认值' },
     }),
   },
@@ -59,10 +61,13 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'app.connect',
-    description: 'CDP connectOverCDP。port 用 launch-target 的返回值；省略则走内核探测，不要口播 9222。',
+    description:
+      'CDP connectOverCDP，连上带调试端口的 Chromium 内核进程（Electron 软件或 Chrome）。'
+      + 'port 用 launch-target 的返回值；省略则走内核探测，不要口播 9222。'
+      + 'appPath 给可执行文件完整路径时由本平台拉起它并自动加 --remote-debugging-port（跨平台首选）。',
     inputSchema: obj({
       port: { type: 'number' },
-      appPath: { type: 'string' },
+      appPath: { type: 'string', description: '被测软件可执行文件完整路径（非目录）；macOS 下是 .app/Contents/MacOS 里的二进制' },
     }),
   },
   {

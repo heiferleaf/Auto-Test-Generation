@@ -27,7 +27,14 @@ const PLATFORM = platform();
 
 /** 端口探测上限：从首选口往上试这么多个，避开幽灵口。 */
 const PORT_TRIES = 12;
-const READY_TIMEOUT_MS = 20_000;
+/**
+ * 等 DevTools 就绪的超时。
+ * 冷启动实测：macOS 虚拟机上 CodeBuddy 从拉起到 /json 可用约需 30-60 秒
+ * （Electron 主进程 + GPU 进程 + 渲染进程逐个起来，虚拟机上更慢）。
+ * 20 秒在 Windows 物理机够用、在 macOS 虚拟机上会误判为失败，故放宽到 90 秒。
+ * 可用 ATG_READY_TIMEOUT_MS 覆盖。
+ */
+const READY_TIMEOUT_MS = Number(process.env.ATG_READY_TIMEOUT_MS) || 90_000;
 
 function argValue(flag) {
   const i = process.argv.indexOf(flag);
@@ -320,8 +327,11 @@ async function main() {
   child.unref();
 
   if (!(await waitForCdp(port))) {
-    log(`软件可能已启动，但 DevTools 未在 ${port} 上就绪（超时 ${READY_TIMEOUT_MS}ms）`);
-    log('若软件原本就在运行，它不会接受新的调试端口参数——请先完全退出再试。');
+    log(`软件已拉起，但 DevTools 未在 ${port} 上就绪（等了 ${READY_TIMEOUT_MS}ms）`);
+    log('两种常见原因：');
+    log('  1. 软件原本就在运行——它不会接受新的调试端口参数，请先完全退出再试');
+    log('     （macOS 是 Cmd+Q，关窗口不算退出）');
+    log('  2. 冷启动比预期慢（虚拟机上 Electron 可能要 30-60 秒），可设 ATG_READY_TIMEOUT_MS 放宽');
     process.exit(1);
   }
 
