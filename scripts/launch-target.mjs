@@ -323,28 +323,38 @@ async function main() {
 
   log(`拉起 ${exe} --remote-debugging-port=${port}`);
 
-  // 隔离 user-data-dir：不隔离的话，已运行的实例会接管新进程，调试端口就不生效了。
+  // 刻意不传 --user-data-dir：隔离配置目录确实能绕过 Electron 单实例锁，
+  // 但代价是用户拿到一个全新的空环境——欢迎页、没登录、没项目、没插件，
+  // 既没法描述步骤也没法录制。旧版 .cmd 用 start 拉起、不带这个参数，
+  // 打开的就是用户自己那个软件。要的就是这个行为。
   const args = [`--remote-debugging-port=${port}`];
   if (name === 'vscode') args.push('--disable-workspace-trust');
-  const userData = join(
-    process.env.TEMP ?? process.env.TMPDIR ?? '/tmp',
-    `atg-${name ?? 'app'}-cdp-${port}`,
-  );
-  args.push(`--user-data-dir=${userData}`);
 
+  // 这里绝不能加 windowsHide：它在 Windows 上等价于 CREATE_NO_WINDOW，
+  // 会让被测软件的窗口"创建出来却不显示"——页面照常渲染、CDP 也能枚举到 target，
+  // 但桌面上什么都没有，任务管理器里只剩后台进程。用户看不到界面，
+  // 就没法描述步骤、没法在上面操作和录制。这里要的正是把窗口显示出来。
   const child = spawn(exe, args, {
     detached: true,
     stdio: 'ignore',
-    windowsHide: true,
   });
   child.on('error', (err) => {
     log(`拉起失败：${err.message}`);
     process.exit(1);
   });
+  // 子进程提前退出 = 被已运行的实例接管（Electron 单实例锁），新进程不会再监听端口。
+  // 这种情况再等满 READY_TIMEOUT_MS 也不会有 DevTools，早点说清楚比让用户干等好。
+  let handedOff = false;
+  child.on('exit', () => { handedOff = true; });
   // 解绑父子关系：父进程（MCP / 终端）退出不应带走被测软件。
   child.unref();
 
   if (!(await waitForCdp(port))) {
+    if (handedOff) {
+      log(`软件已经在运行，它接管了这次启动（Electron 单实例锁），端口 ${port} 不会有 DevTools。`);
+      log('请先完全退出软件再重试：macOS 是 Cmd+Q；Windows 注意系统托盘图标，关窗口不算退出。');
+      process.exit(1);
+    }
     log(`软件已拉起，但 DevTools 未在 ${port} 上就绪（等了 ${READY_TIMEOUT_MS}ms）`);
     log('两种常见原因：');
     log('  1. 软件原本就在运行——它不会接受新的调试端口参数，请先完全退出再试');
