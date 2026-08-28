@@ -57,14 +57,29 @@ const PLAYWRIGHT_TYPE_HINTS: Readonly<Record<string, string>> = {
  * 而导入期干脆不校验，于是 script.import 返回成功、等到 actions.execute_steps 才炸 ——
  * Agent 拿到的是假绿灯，白跑一整轮。
  */
+/**
+ * 渲染 `type` 的实际值。直接 `String(v)` 对空串、`{}`、`[]` 会得到空文本或 `[object Object]`，
+ * 报错里"实际:"后面一片空白 —— 和它要解决的假绿灯是同一类问题：Agent 看不出自己写错了什么。
+ */
+function renderTypeValue(v: unknown): string {
+  if (typeof v === 'string') return v.trim() === '' ? '<空字符串>' : v.trim();
+  if (v === null) return 'null';
+  if (v === undefined) return 'undefined';
+  if (Array.isArray(v)) return '<数组>';
+  if (typeof v === 'object') return '<对象>';
+  return String(v);
+}
+
 export function stepTypeErrorMessage(path: string, actual: unknown): string {
-  if (actual === undefined || actual === null) {
-    return `${path}.type 缺失（实际: ${actual === null ? 'null' : 'undefined'}）；合法值: ${STEP_TYPE_LIST}`;
+  const shown = renderTypeValue(actual);
+  const trimmed = typeof actual === 'string' ? actual.trim() : null;
+  // 空串按"缺失"报：Agent 写了 `"type": ""` 时，"不是已知步骤类型（实际: ）"看不出它到底填了什么。
+  if (trimmed === '' || actual === undefined || actual === null) {
+    return `${path}.type 缺失（实际: ${shown}）；合法值: ${STEP_TYPE_LIST}`;
   }
-  const raw = String(actual).trim();
-  const hint = PLAYWRIGHT_TYPE_HINTS[raw.toLowerCase()];
-  const head = `${path}.type 不是已知步骤类型（实际: ${raw}）；合法值: ${STEP_TYPE_LIST}。`;
-  return hint ? `${head}\n本平台没有 ${raw} 步骤；${hint}。` : head;
+  const hint = PLAYWRIGHT_TYPE_HINTS[trimmed?.toLowerCase() ?? ''];
+  const head = `${path}.type 不是已知步骤类型（实际: ${shown}）；合法值: ${STEP_TYPE_LIST}。`;
+  return hint ? `${head}\n本平台没有 ${shown} 步骤；${hint}。` : head;
 }
 
 /**

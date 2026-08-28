@@ -152,6 +152,40 @@ describe('导入期与执行期共用同一套措辞', () => {
   });
 });
 
+describe('报错必须让 Agent 看得懂自己写错了什么', () => {
+  // 直接 String(v) 会把空串渲染成空白、把 {} 渲染成 [object Object]，
+  // "实际:" 后面一片空白等于没报 —— 与本次要修的假绿灯是同一类失效。
+  it('type 为空串：按缺失报，且明确写出是空字符串', () => {
+    const msg = importErr([{ id: 'x', type: '', source: 'agent' }]);
+    expect(msg).toContain('缺失');
+    expect(msg).toContain('空字符串');
+    expect(msg).not.toMatch(/实际:\s*；/);
+  });
+
+  it('type 为对象/数组/数字：渲染成可读文本，不留空也不出 [object Object]', () => {
+    for (const bad of [{}, [], 123, true] as unknown[]) {
+      const msg = importErr([{ id: 'x', type: bad, source: 'agent' }]);
+      expect(msg, `type=${JSON.stringify(bad)} 渲染不出来`).not.toMatch(/实际:\s*[；。]/);
+      expect(msg).not.toContain('[object Object]');
+    }
+  });
+
+  it('映射提示只给 Playwright 里真有的方法名，不张冠李戴', () => {
+    const msg = importErr([step('press')]);
+    // press 的提示必须指向 eval 或 fill，不能被通用文案顶替成 click。
+    expect(msg).toMatch(/本平台没有 press 步骤；.*(eval|fill)/);
+    expect(importErr([step('screenshot')])).toContain('snapshot');
+    expect(importErr([step('goto')])).toContain('eval');
+  });
+
+  it('不在映射表里的乱值：至少给全量合法值，不编造提示', () => {
+    const msg = importErr([step('frobnicate')]);
+    expect(msg).toContain('frobnicate');
+    expect(msg).toContain(LEGAL_LIST);
+    expect(msg).not.toContain('本平台没有 frobnicate 步骤；');
+  });
+});
+
 describe('端到端：MCP 层不再是假绿灯', () => {
   it('script.import 收到含 press 的脚本返回 ok:false，且错误可直接给 Agent 看', async () => {
     const res = await dispatchTool('script.import', { json: scriptJson([step('press')]) }, makeDeps());
