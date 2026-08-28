@@ -11,7 +11,11 @@ import { runCli } from '../cli';
 export type { Locator } from '../types/step';
 import type { InteractionEvent } from '../recorder/recorder';
 import { mergeRecordingEvent, emitRecordingEvent } from '../recorder/recorder';
-import { RECORD_INJECT, RECORD_DRAIN, REC_STATS_DRAIN, PICK_INJECT, PICK_DRAIN, PICK_STOP, REC_ACTIVE_ON, REC_ACTIVE_OFF, highlightPaintSource, HIGHLIGHT_CLEAR, sanitizeLocator } from '../recorder/inject';
+import {
+  RECORD_INJECT, RECORD_DRAIN, REC_STATS_DRAIN, PICK_INJECT, PICK_DRAIN, PICK_STOP,
+  REC_ACTIVE_ON, REC_ACTIVE_OFF, highlightPaintSource, HIGHLIGHT_CLEAR, sanitizeLocator,
+  normalizeHighlightResult, type HighlightPaintResult,
+} from '../recorder/inject';
 import { buildCoverage, normalizeStats, type RecordingCoverage, type TargetCoverage } from '../recorder/coverage';
 import {
   enumerateTargets,
@@ -31,6 +35,20 @@ import { resolveHostJudge } from '../vision/host';
 export type { TargetInfo, TargetType } from './targets.js';
 
 export const DEFAULT_CDP_PORT = 9222;
+
+/** 错误转短消息（只用于诊断输出，不改变控制流）。 */
+function errMsg(err: unknown): string {
+  return err instanceof Error ? (err.message || err.name) : String(err);
+}
+
+/**
+ * 高亮层与截图层是否不一致：webview 目标（无 Playwright page）能把框画进它的内层 context，
+ * 但 Playwright 拍不到这一层，screenshot 会回退主窗口 —— 框在图上看不到。
+ * 抽成纯函数，好让「层不匹配」这条规则被单测钉住，而不是埋在 catch 里。
+ */
+export function highlightLayerMismatch(entry: { page?: unknown } | undefined): boolean {
+  return !!entry && !entry.page;
+}
 
 /** 快照节点：可交互元素清单（UC-02 雏形）。 */
 export type SerializedNode = {
@@ -81,6 +99,8 @@ export type ScreenshotOptions = {
 export interface VisualCapable {
   screenshot(opts?: ScreenshotOptions): Promise<Buffer>;
   locateVisual(loc: Locator): Promise<VisualRect>;
+  /** 上一次 screenshot 的高亮绘制结果（画没画上、为什么没画上）。可选：旧实现无此能力。 */
+  lastHighlightStatus?(): HighlightPaintResult | null;
 }
 
 /**
@@ -179,6 +199,8 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   private injectedTargets = new Set<string>();
   /** 上一次 stopRecording 时的覆盖率结论（供 CLI/UI 在录制结束时报漏点）。 */
   private lastCoverage: RecordingCoverage | null = null;
+  /** 上一次 screenshot 的高亮绘制结果（画没画上、为什么没画上）。 */
+  private lastHighlight: HighlightPaintResult | null = null;
 
   async connect(opts?: ConnectOptions): Promise<void> {
     // WS 边界：opts 可能是 null；已连接时 playback/runCli 会再调 connect() 且不带 port，
@@ -727,17 +749,38 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     // 故不能用默认参数，而要在函数体内兜底（opts 可能为 null/undefined）。
     const o = opts ?? {};
     let buf: Buffer;
-    const paintTarget = o.target
-      ? (findTarget(this.targets, o.target)?.target ?? this.currentTarget())
-      : this.currentTarget();
+    const entry = o.target ? findTarget(this.targets, o.target) : undefined;
+    const paintTarget = entry?.target ?? this.currentTarget();
+    // 层不匹配：框画得进 webview 的内层 context，但 Playwright 拍不到这一层（scopeFor 会抛
+    // CDP_SCREENSHOT_WEBVIEW_UNSUPPORTED 并回退主窗口）—— 框在图上看不到，用户只觉得「没高亮」。
+    // 原来这个回退被 catch 静默吞掉。现在层不匹配就干脆不画框，并把原因交给宿主侧。
+    const layerMismatch = !!o.highlight && highlightLayerMismatch(entry);
+    let painted = false;
     if (o.highlight) {
-      await paintTarget.evaluate(highlightPaintSource(o.highlight)).catch(() => false);
+      if (layerMismatch) {
+        this.noteHighlight({
+          ok: false,
+          reason: 'layer-mismatch',
+          detail: `高亮目标 ${o.target} 是 webview：框能画进去，但截图只能拍主窗口`,
+        });
+      } else {
+        painted = await this.paintHighlight(paintTarget, o.highlight);
+      }
     }
     try {
     let scope: Page;
     try {
       scope = this.scopeFor(o.target) as Page;
-    } catch {
+    } catch (err) {
+      // 回退不是免费的：截图粒度已经和请求的 target 不一致，必须留痕，不再静默。
+      if (o.target) {
+        const why = errMsg(err);
+        console.warn(`[screenshot] 目标 ${o.target} 无法按请求粒度截图，已回退主窗口：${why}`);
+        // 框画在指定 target 层、图却拍了主窗口：等于没画。（target 不存在时画的是主窗口，两层一致，不误报。）
+        if (painted && entry) {
+          this.noteHighlight({ ok: false, reason: 'layer-mismatch', detail: `截图层已回退主窗口：${why}` });
+        }
+      }
       scope = this.page();
     }
     if (o.element) {
@@ -763,10 +806,40 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     }
     return buf;
     } finally {
-      if (o.highlight) {
+      if (painted) {
         await paintTarget.evaluate(HIGHLIGHT_CLEAR).catch(() => undefined);
       }
     }
+  }
+
+  /**
+   * 画高亮框并记住结果。原来这里是 `.catch(() => false)`：evaluate 的异常与「没找到元素」
+   * 被吞成同一个 false，宿主侧既不知道画没画上，也不知道为什么。
+   */
+  private async paintHighlight(paintTarget: TargetEntry['target'], loc: Locator): Promise<boolean> {
+    let res: HighlightPaintResult;
+    try {
+      res = normalizeHighlightResult(await paintTarget.evaluate<unknown>(highlightPaintSource(loc)));
+    } catch (err) {
+      res = { ok: false, reason: 'evaluate-failed', detail: errMsg(err) };
+    }
+    this.noteHighlight(res);
+    return res.ok;
+  }
+
+  /** 记住高亮结果；没画上时走 stderr 留痕（「有图无框」和「整页截图」在视觉上完全一样，不能无感消失）。 */
+  private noteHighlight(res: HighlightPaintResult): void {
+    this.lastHighlight = res;
+    if (!res.ok) {
+      console.warn(
+        `[screenshot] 高亮未画上：${res.reason}${res.detail ? ' — ' + res.detail : ''}`,
+      );
+    }
+  }
+
+  /** 上一次 screenshot 的高亮绘制结果；没画过为 null（调用方据此跳过提示）。 */
+  lastHighlightStatus(): HighlightPaintResult | null {
+    return this.lastHighlight;
   }
 
   /** 视觉定位：取元素 bounding box + 视口内判定（M2 §3.2，作用于 Playwright Page）。 */

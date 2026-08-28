@@ -508,40 +508,216 @@ export const PICK_STOP = `(() => { window.${PICK_FLAG} = false; window.${PICK_RE
 export const REC_ACTIVE_ON = `(() => { window.__recActive = true; window.__atgFillSeen = typeof WeakMap === 'function' ? new WeakMap() : null; window.__atgStats = { intents: 0, emitted: 0, dropped: 0, recovered: 0, reasons: {} }; window.__atgIntent = null; return true; })()`;
 export const REC_ACTIVE_OFF = `(() => { window.__recActive = false; return true; })()`;
 
+/** 高亮绘制结果：画没画上、为什么没画上，宿主侧必须拿得到（原来只回一个裸 false）。 */
+export type HighlightPaintResult = {
+  ok: boolean;
+  /** 命中路径：role+name / role / name / text / css / testId / xpath。 */
+  via?: string;
+  /** 失败原因：no-locator / no-match / ambiguous / detached。宿主侧另有 layer-mismatch / evaluate-failed。 */
+  reason?: string;
+  /** 命中多个候选，已按「面积最小、层级最深」择优。 */
+  multiple?: boolean;
+  detail?: string;
+};
+
+/** 候选选择器：宿主侧算好、注入页内直接按序尝试，避免两处各自演化出一套查找逻辑。 */
+export type LocatorSelector = { selector: string; useXpath: boolean; via: string };
+
+function cssEscapeSelector(s: string): string {
+  return s.replace(/["\\]/g, '\\$&');
+}
+
+/**
+ * Locator → 候选选择器。顺序即高亮查找优先级：语义（role+name / role）→ css → testId → xpath。
+ *
+ * 纯 name / text 没有可靠的选择器形式（包含匹配会命中祖先），交给注入脚本里的排序兜底。
+ *
+ * 执行路径仍以 targets.ts 的 locatorToSelector 为唯一权威——不动它，避免扰动执行行为；
+ * 本列表覆盖它能发出的全部形式，从而保证「执行选得中 ⇒ 高亮画得出」。
+ * 这正是用户反馈的「执行没问题但就是没高亮」的成因：旧 findEl 不认 role、不支持 xpath。
+ */
+export function locatorSelectors(loc: Locator | null | undefined): LocatorSelector[] {
+  const l = loc ?? {};
+  const out: LocatorSelector[] = [];
+  const exact = l.textExact ?? false;
+  const nameSel = (n: string) =>
+    (exact ? `[aria-label="${cssEscapeSelector(n)}"]` : `[aria-label*="${cssEscapeSelector(n)}"]`);
+  const role = l.role && !isNonActionableRole(l.role) ? l.role : undefined;
+  if (role && l.name) {
+    out.push({ selector: `[role="${cssEscapeSelector(role)}"]${nameSel(l.name)}`, useXpath: false, via: 'role+name' });
+  }
+  if (l.css) out.push({ selector: l.css, useXpath: false, via: 'css' });
+  if (l.testId) out.push({ selector: `[data-testid="${cssEscapeSelector(l.testId)}"]`, useXpath: false, via: 'testId' });
+  if (l.xpath) out.push({ selector: l.xpath, useXpath: true, via: 'xpath' });
+  // 光有 role 最不具体（同一屏往往有同 role 的多个元素），放最后，且命中多个时会择优。
+  if (role) out.push({ selector: `[role="${cssEscapeSelector(role)}"]`, useXpath: false, via: 'role' });
+  return out;
+}
+
+/**
+ * CDP / WS 边界兜底：evaluate 回来的可能是 null、旧会话的裸 false、或字段不全的对象。
+ * 统一成 HighlightPaintResult，让宿主侧不必区分「没画上」和「回不来」。
+ */
+export function normalizeHighlightResult(raw: unknown): HighlightPaintResult {
+  if (raw && typeof raw === 'object') {
+    const r = raw as Partial<HighlightPaintResult>;
+    if (r.ok === true) {
+      const out: HighlightPaintResult = { ok: true };
+      if (r.via) out.via = r.via;
+      if (r.multiple) out.multiple = true;
+      return out;
+    }
+    if (typeof r.reason === 'string') {
+      const out: HighlightPaintResult = { ok: false, reason: r.reason };
+      if (r.detail) out.detail = r.detail;
+      return out;
+    }
+  }
+  // 旧注入会话只回一个裸 false：没画上，且原因不明 —— 也要报，不能当成成功。
+  return {
+    ok: false,
+    reason: 'unknown',
+    detail: raw === false ? '注入脚本返回 false（未升级的旧会话，查不到失败原因）' : undefined,
+  };
+}
+
 /** 拍摄前在靶机 DOM 上画定位框，随后截图，高亮成为 PNG 像素。舞台缩放不再需要坐标映射。 */
-export const HIGHLIGHT_CLEAR = `(() => { const n = document.getElementById('__atgHl'); if (n) n.remove(); return true; })()`;
+export const HIGHLIGHT_CLEAR = `(() => {
+  const n = document.getElementById('__atgHl'); if (n) n.remove();
+  try {
+    const scopes = [document];
+    document.querySelectorAll('*').forEach((h) => { if (h.shadowRoot) scopes.push(h.shadowRoot); });
+    scopes.forEach((s) => s.querySelectorAll('[data-atg-hl-hit]').forEach((e) => e.removeAttribute('data-atg-hl-hit')));
+  } catch (err) {}
+  return true;
+})()`;
 
 export function highlightPaintSource(loc: Locator | undefined | null): string {
   const l = loc ?? {};
+  const cands = locatorSelectors(l);
   return `(() => {
     const loc = ${JSON.stringify(l)};
-    const findEl = () => {
-      if (loc.css) {
-        try { const e = document.querySelector(loc.css); if (e) return e; } catch (err) {}
+    const cands = ${JSON.stringify(cands)};
+    // 漏了要响：任何一路落空都要带 reason 回宿主侧，原来只 return false。
+    const fail = (reason, detail) => {
+      const r = { ok: false, reason: reason };
+      if (detail) r.detail = String(detail).slice(0, 200);
+      window.__atgHighlight = r;
+      return r;
+    };
+    // 查询范围含 open shadow root：许多壳把 UI 装在里面，只查 document 会静默落空。
+    const scopes = () => {
+      const out = [document];
+      const walk = (root, depth) => {
+        if (depth > 4) return;
+        let all = [];
+        try { all = Array.prototype.slice.call(root.querySelectorAll('*')); } catch (err) { return; }
+        for (const n of all) if (n.shadowRoot) { out.push(n.shadowRoot); walk(n.shadowRoot, depth + 1); }
+      };
+      walk(document, 0);
+      return out;
+    };
+    const shown = (e) => {
+      if (!e || e.nodeType !== 1) return false;
+      if (e.getAttribute('aria-hidden') === 'true' || e.hasAttribute('hidden')) return false;
+      const st = e.style || {};
+      return st.display !== 'none' && st.visibility !== 'hidden';
+    };
+    // 取不到矩形的元素画不出框（不可渲染 / 已脱离文档），不参与择优。
+    const areaOf = (e) => {
+      try { const r = e.getBoundingClientRect(); return (r.width || 0) * (r.height || 0); } catch (err) { return -1; }
+    };
+    const depthOf = (e) => { let d = 0, c = e; while ((c = c.parentElement)) d++; return d; };
+    // 命中多个时：面积最小优先（高亮框不该盖住半个屏幕），面积相同取层级最深。
+    const best = (list) => {
+      let pick = null, pickArea = -1, pickDepth = -1;
+      for (const e of list) {
+        const a = areaOf(e), d = depthOf(e);
+        if (pick === null || a < pickArea || (a === pickArea && d > pickDepth)) { pick = e; pickArea = a; pickDepth = d; }
       }
-      if (loc.testId) {
-        try { const e = document.querySelector('[data-testid="' + String(loc.testId).replace(/"/g, '') + '"]'); if (e) return e; } catch (err) {}
-      }
-      const needle = loc.name || loc.text;
-      if (needle) {
+      return pick;
+    };
+    const usable = (list) => list.filter((e) => shown(e) && areaOf(e) >= 0);
+    const roleOf = (e) => {
+      const r = (e.getAttribute('role') || '').toLowerCase();
+      if (r) return r;
+      const t = (e.tagName || '').toUpperCase();
+      if (t === 'BUTTON') return 'button';
+      if (t === 'A') return 'link';
+      if (t === 'INPUT' || t === 'TEXTAREA') return 'textbox';
+      if (t === 'SELECT') return 'combobox';
+      return '';
+    };
+    // name / text 兜底：精确优先，包含匹配兜底；命中多个按面积与层级择优。
+    const nameFallback = (roots) => {
+      const want = loc.name || loc.text;
+      if (!want) return fail('no-match');
+      const pool = [];
+      roots.forEach((root) => {
         try {
-          const labeled = document.querySelector('[aria-label="' + String(needle).replace(/"/g, '') + '"]');
-          if (labeled) return labeled;
+          root.querySelectorAll('button,a,input,textarea,select,[role],[aria-label],[contenteditable="true"],[contenteditable=""]')
+            .forEach((n) => pool.push(n));
         } catch (err) {}
-        const all = document.querySelectorAll('button,a,input,textarea,select,[role],[aria-label],[contenteditable="true"],[contenteditable=""]');
-        for (let i = 0; i < all.length; i++) {
-          const e = all[i];
-          const n = (e.getAttribute('aria-label') || e.textContent || '').trim();
-          if (n && n.indexOf(needle) !== -1) return e;
+      });
+      const roleWant = (loc.role || '').toLowerCase();
+      const inRole = (roleWant && roleWant !== 'presentation' && roleWant !== 'none')
+        ? usable(pool).filter((e) => roleOf(e) === roleWant)
+        : usable(pool);
+      const acc = (e) => (e.getAttribute('aria-label') || e.textContent || '').trim();
+      // 返回 { el, via, multiple } 命中，或 { reason } 失败。
+      const pick = (list) => {
+        if (!list.length) return null;
+        const via = loc.name ? 'name' : 'text';
+        if (list.length === 1) return { el: list[0], via: via };
+        const top = best(list);
+        // 互不包含的多个精确匹配：真不知道该高亮谁，宁可报 ambiguous 也不乱画一个。
+        const nested = list.every((e) => e === top || top.contains(e) || e.contains(top));
+        if (!nested) return { reason: 'ambiguous', detail: list.length + ' 个元素都精确匹配 ' + want };
+        return { el: top, via: via, multiple: true };
+      };
+      const hit = pick(inRole.filter((e) => acc(e) === want))
+        || pick(inRole.filter((e) => { const s = acc(e); return s && s.indexOf(want) !== -1; }));
+      if (hit && hit.el) return hit;
+      if (hit && hit.reason) return fail(hit.reason, hit.detail);
+      return fail('no-match');
+    };
+    const findEl = () => {
+      if (!cands.length && !loc.name && !loc.text) return fail('no-locator');
+      const roots = scopes();
+      for (const c of cands) {
+        const hits = [];
+        for (const root of roots) {
+          try {
+            if (c.useXpath) {
+              const n = document.evaluate(c.selector, root, null, 9, null).singleNodeValue;
+              if (n) hits.push(n);
+            } else if (typeof root.querySelectorAll === 'function') {
+              root.querySelectorAll(c.selector).forEach((n) => hits.push(n));
+            }
+          } catch (err) {}
         }
+        const list = usable(hits);
+        if (list.length) return { el: best(list), via: c.via, multiple: list.length > 1 };
       }
-      return null;
+      return nameFallback(roots);
     };
     const old = document.getElementById('__atgHl');
     if (old) old.remove();
-    const el = findEl();
-    if (!el) return false;
-    const r = el.getBoundingClientRect();
+    try {
+      const scopesNow = scopes();
+      scopesNow.forEach((s) => s.querySelectorAll('[data-atg-hl-hit]').forEach((e) => e.removeAttribute('data-atg-hl-hit')));
+    } catch (err) {}
+    const found = findEl();
+    if (!found.el) return found.reason ? found : fail('no-match');
+    const el = found.el;
+    if (typeof el.isConnected === 'boolean' && !el.isConnected) return fail('detached');
+    let r;
+    try { r = el.getBoundingClientRect(); } catch (err) { return fail('detached'); }
+    // 命中的元素盖章：宿主侧（与测试）可据此核对「高亮的到底是不是执行会点的那个」。
+    try { el.setAttribute('data-atg-hl-hit', '1'); } catch (err) {}
+    const done = { ok: true, via: found.via };
+    if (found.multiple) done.multiple = true;
+    window.__atgHighlight = done;
     const d = document.createElement('div');
     d.id = '__atgHl';
     d.setAttribute('data-atg-highlight', 'true');
@@ -557,6 +733,6 @@ export function highlightPaintSource(loc: Locator | undefined | null): string {
     d.style.pointerEvents = 'none';
     d.style.zIndex = '2147483646';
     document.documentElement.appendChild(d);
-    return true;
+    return done;
   })()`;
 }
