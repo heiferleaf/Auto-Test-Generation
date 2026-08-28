@@ -12,5 +12,17 @@ AGENTS.md
 # 集成测试真机运行生成的报告（验证产物，不入库；预期契约在 fixtures/）。
 test/reports/
 
+# ── 视觉判定密钥 ──────────────────────────────────────────────
+# 用户级配置的默认位置在 ~/.electron-auto-test/（仓库外，本不会被提交），
+# 但如果有人把它放到项目内，下面几条兜底拦住。
+# 另：*.local.json 是"本机覆盖配置"的通用约定，一并忽略。
+vision.json
+.vision.json
+vision.local.json
+*.local.json
+.electron-auto-test/
+.env
+.env.local
+
 # docs 已迁入仓库内真实目录（原 symlink 已移除），纳入版本控制。
 # 若未来恢复为外部笔记 symlink，再重新忽略。

@@ -5,10 +5,14 @@
 import type { CdpAdapter } from '../cdp/adapter';
 import type { Step, Locator, StepType } from '../types/step';
 import { runAssertion } from './assert';
+import type { AssertionContext } from '../vision/judge';
 
+// 第三参 ctx 可选：waitUntil 等动作内部会轮询断言，需要把宿主注入透传下去。
+// 放在末尾是为了不破坏现有 handler（注册表单参/双参写法照旧）。
 export type ActionHandler = (
   adapter: CdpAdapter,
   step: Step & { type: Exclude<StepType, 'assert'> },
+  ctx?: AssertionContext | null,
 ) => Promise<void>;
 
 const noLoc = (loc: Locator | undefined): Locator => {
@@ -41,7 +45,7 @@ export const actionHandlers: Record<Exclude<StepType, 'assert'>, ActionHandler> 
   },
   // waitUntil：等待某断言条件成立（轮询至 timeoutMs）。本期以 wait 语义兜底，
   // 真实"轮询断言"由后续断言引擎接入（避免 actions 反向依赖 executor）。
-  waitUntil: async (adapter, step) => {
+  waitUntil: async (adapter, step, ctx) => {
     const assertion = step.params?.assertion;
     const timeout = step.params?.timeoutMs ?? 10_000;
     if (!assertion) {
@@ -50,7 +54,7 @@ export const actionHandlers: Record<Exclude<StepType, 'assert'>, ActionHandler> 
     }
     const deadline = Date.now() + timeout;
     for (;;) {
-      const result = await runAssertion(adapter, assertion);
+      const result = await runAssertion(adapter, assertion, ctx ?? null);
       if (result.passed) return;
       if (Date.now() >= deadline) {
         throw new Error(`waitUntil 超时（${timeout}ms）: ${assertion.kind}`);
@@ -69,10 +73,11 @@ export const actionHandlers: Record<Exclude<StepType, 'assert'>, ActionHandler> 
 export async function invokeAction(
   adapter: CdpAdapter,
   step: Step & { type: Exclude<StepType, 'assert'> },
+  ctx?: AssertionContext | null,
 ): Promise<void> {
   const handler = actionHandlers[step.type];
   if (!handler) {
     throw new Error(`未知步骤类型: ${step.type}`);
   }
-  await handler(adapter, step);
+  await handler(adapter, step, ctx ?? null);
 }

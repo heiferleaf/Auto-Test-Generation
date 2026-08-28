@@ -372,9 +372,13 @@
     .ui-shell-assert-hint { color: var(--muted); font-size: 11px; line-height: 1.4; }
     .ui-shell-edit-title { font-size: 13px; font-weight: 500; color: var(--text); }
     .ui-shell-edit-field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
-    .ui-shell-edit-field input, .ui-shell-edit-field select {
+    .ui-shell-edit-field input, .ui-shell-edit-field select, .ui-shell-edit-field textarea {
       background: var(--input); border: 1px solid var(--line); color: var(--text);
       border-radius: 6px; padding: 7px 9px; font-size: 13px;
+    }
+    /* 提示词是多行输入：给足高度且允许竖向拉伸，长提示词不必在单行里横向滚。 */
+    .ui-shell-edit-field textarea {
+      min-height: 72px; resize: vertical; line-height: 1.5; font-family: inherit;
     }
     .ui-shell-encap { background: var(--bg-encap); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; color: var(--text-accent); font-size: 13px; }
     .ui-shell-locator-path { color: var(--muted); font-size: 12px; }

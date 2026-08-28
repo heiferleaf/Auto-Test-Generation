@@ -107,16 +107,69 @@ function describeStep(step: Step): string {
 /** 断言序号计数器（生成稳定唯一 id）。 */
 let assertSeq = 0;
 
-/** 断言 kind 全集（单一真相源）：新增断言类型只改这里，标签与选择菜单同步。OCP：扩展而非修改核心逻辑。 */
-export const ASSERTION_KINDS: { kind: AssertionKind; label: string; needsValue: boolean }[] = [
-  { kind: 'exists', label: '出现新元素', needsValue: false },
-  { kind: 'visible', label: '元素可见', needsValue: false },
-  { kind: 'textContains', label: '值包含内容', needsValue: true },
-  { kind: 'titleIs', label: '值等于特定值', needsValue: true },
-  { kind: 'urlMatches', label: 'URL 匹配', needsValue: true },
+/**
+ * 断言 kind 的行为描述（单一真相源）：新增断言类型只改这里，
+ * 标签、选择菜单、详情区显隐全部跟随。OCP：扩展而非在调用处堆 if-else。
+ *
+ * - needsValue：要不要填「期望值」；`multiline` 时用 textarea（提示词是一段话）。
+ * - promptOnly：值字段的标签与占位（visionPrompt 填的是提示词，不是"期望值"）。
+ * - showsPick：要不要显示「在软件中点选」；判整张截图的不点选。
+ */
+export type AssertionKindSpec = {
+  kind: AssertionKind;
+  label: string;
+  needsValue: boolean;
+  /** 值字段用多行输入（长文本/提示词）。 */
+  multiline?: boolean;
+  /** 值字段的标签，缺省为「期望值」。 */
+  valueLabel?: string;
+  /** 值字段的占位提示。 */
+  valuePlaceholder?: string;
+  /** 显示「在软件中点选」；缺省 true（多数断言有目标元素）。 */
+  showsPick?: boolean;
+  /** 类型下方的说明文案。 */
+  help?: string;
+};
+
+export const ASSERTION_KINDS: AssertionKindSpec[] = [
+  { kind: 'exists', label: '出现新元素', needsValue: false, help: 'exists：在 DOM 里即可，被隐藏也算存在' },
+  { kind: 'visible', label: '元素可见', needsValue: false, help: 'visible：在屏幕上可见、未被隐藏' },
+  {
+    kind: 'textContains', label: '值包含内容', needsValue: true,
+    help: '有点选则只搜该节点文本；无点选则搜整页（如点击后弹出）',
+  },
+  { kind: 'titleIs', label: '值等于特定值', needsValue: true, showsPick: false },
+  { kind: 'urlMatches', label: 'URL 匹配', needsValue: true, showsPick: false },
   { kind: 'elementVisibleInViewport', label: '元素在视口内可见', needsValue: false },
-  { kind: 'screenshotMatches', label: '截图匹配', needsValue: false },
-  { kind: 'expr', label: '表达式成立', needsValue: true },
+  { kind: 'screenshotMatches', label: '截图匹配', needsValue: false, showsPick: false },
+  { kind: 'expr', label: '表达式成立', needsValue: true, showsPick: false },
+  {
+    kind: 'visionPrompt',
+    label: '视觉判定（截图 + 提示词）',
+    needsValue: true,
+    // 提示词通常是一句话甚至多句，单行 input 装不下且没法换行分段。
+    multiline: true,
+    valueLabel: '提示词',
+    valuePlaceholder: '例：截图里是否出现了红色的错误提示？',
+    // 判定对象是整张截图，不是某个元素，点选没有意义。
+    showsPick: false,
+    help: 'visionPrompt：截图后交给视觉模型按提示词判定；未配置 apikey 会判失败（不会静默跳过）',
+  },
+];
+
+/** 取某 kind 的行为描述；未知 kind 退回「需要值、可点选」的保守默认。 */
+function assertionSpec(kind: AssertionKind): AssertionKindSpec {
+  return ASSERTION_KINDS.find((k) => k.kind === kind)
+    ?? { kind, label: kind, needsValue: false };
+}
+
+/**
+ * 详情区「类型」下拉里出现的 kind（人可编辑的子集）。
+ * titleIs/urlMatches/expr/screenshotMatches 留给 Agent/MCP：
+ * 它们要么要写代码、要么要准备基线图，塞进人工菜单只会让人选错。
+ */
+const UI_EDITABLE_KINDS: AssertionKind[] = [
+  'visible', 'exists', 'textContains', 'visionPrompt',
 ];
 
 /** 断言 kind → 用户友好标签（M3 补全：把内核断言语义翻译为产品语言）。 */
@@ -162,29 +215,32 @@ function pngBase64(buf: unknown): string {
 /**
  * 详情区暴露给用户的断言类型子集（spec §2.3：断言元素可见/存在文本）。
  * 完整 AssertionKind 含 titleIs/urlMatches/expr/screenshotMatches 等，留给 Agent/MCP 用；
- * UI 只给最常用人可编辑的三类，避免把不适用的人工选项塞给用户。
+ * UI 只给人可编辑的常用几类，避免把不适用的人工选项塞给用户。
+ *
+ * visionPrompt 在此列：它是给人用的（填一句提示词即可），不像 expr 那样要写代码。
+ * 由 ASSERTION_KINDS 过滤而来，新增类型只要标了 ui:true 就自动进菜单。
  */
-const ASSERTION_UI_KINDS: { value: AssertionKind; label: string }[] = [
-  { value: 'visible', label: '元素可见(visible)' },
-  { value: 'exists', label: '元素存在(exists)' },
-  { value: 'textContains', label: '包含文本(textContains)' },
-];
+const ASSERTION_UI_KINDS: { value: AssertionKind; label: string }[] = ASSERTION_KINDS
+  .filter((k) => UI_EDITABLE_KINDS.includes(k.kind))
+  .map((k) => ({ value: k.kind, label: `${k.label}(${k.kind})` }));
 
-/** 该断言类型需要用户填写期望值（textContains 的文本）；visible/exists 只需 locator。 */
+/** 该断言类型需要用户填写值（textContains 的文本 / visionPrompt 的提示词）。 */
 function assertionNeedsValue(kind: AssertionKind): boolean {
-  return kind === 'textContains' || kind === 'titleIs' || kind === 'urlMatches' || kind === 'expr';
+  return assertionSpec(kind).needsValue;
 }
 
-/** exists/visible 必须点选；textContains 可选（有 locator 只搜该节点）。 */
+/** 是否显示「在软件中点选」：判整张截图/整页文本的不点选。 */
 function assertionShowsPick(kind: AssertionKind): boolean {
-  return kind === 'exists' || kind === 'visible' || kind === 'elementVisibleInViewport' || kind === 'textContains';
+  return assertionSpec(kind).showsPick !== false;
+}
+
+/** 值字段是否用多行输入（提示词是一段话，单行装不下）。 */
+function assertionValueMultiline(kind: AssertionKind): boolean {
+  return assertionSpec(kind).multiline === true;
 }
 
 function assertionKindHelp(kind: AssertionKind): string {
-  if (kind === 'exists') return 'exists：在 DOM 里即可，被隐藏也算存在';
-  if (kind === 'visible') return 'visible：在屏幕上可见、未被隐藏';
-  if (kind === 'textContains') return '有点选则只搜该节点文本；无点选则搜整页（如点击后弹出）';
-  return '';
+  return assertionSpec(kind).help ?? '';
 }
 
 /** locator 是否带了任一可查询字段（空对象 `{}` 经 JSON 往返后仍算「未选取」）。 */
@@ -876,7 +932,14 @@ export class UiShell {
         area.appendChild(this.wrapAssertSlot('pick', this.renderPickBlock(step, pickField, assertion, '在软件中点选')));
       }
       if (assertionNeedsValue(assertion.kind)) {
-        area.appendChild(this.wrapAssertSlot('value', this.editField(step, 'assertion.value', '期望值', assertion.value ?? '')));
+        const spec = assertionSpec(assertion.kind);
+        area.appendChild(this.wrapAssertSlot('value', this.editField(
+          step, 'assertion.value', spec.valueLabel ?? '期望值', assertion.value ?? '',
+          { multiline: assertionValueMultiline(assertion.kind), placeholder: spec.valuePlaceholder },
+        )));
+        if (assertion.kind === 'visionPrompt') {
+          area.appendChild(this.renderVisionKeyHint());
+        }
       }
       if (step.type === 'waitUntil') {
         area.appendChild(this.wrapAssertSlot(
@@ -904,7 +967,14 @@ export class UiShell {
         area.appendChild(this.wrapAssertSlot('pick', this.renderPickBlock(step, 'condition-locator', cond, '点选执行条件')));
       }
       if (assertionNeedsValue(cond.kind)) {
-        area.appendChild(this.wrapAssertSlot('value', this.editField(step, 'condition.value', '期望值', cond.value ?? '')));
+        const spec = assertionSpec(cond.kind);
+        area.appendChild(this.wrapAssertSlot('value', this.editField(
+          step, 'condition.value', spec.valueLabel ?? '期望值', cond.value ?? '',
+          { multiline: assertionValueMultiline(cond.kind), placeholder: spec.valuePlaceholder },
+        )));
+        if (cond.kind === 'visionPrompt') {
+          area.appendChild(this.renderVisionKeyHint());
+        }
       }
     }
 
@@ -944,7 +1014,9 @@ export class UiShell {
     const area = this.mount.querySelector('[data-edit-area]');
     if (!step || !area) return;
     const patch: Partial<Step> = {};
-    area.querySelectorAll<HTMLInputElement>('[data-edit-field]').forEach((inp) => {
+    // 用 HTMLInputElement | HTMLTextAreaElement：提示词是多行 textarea，
+    // 与单行 input 都靠 .value 读取，走同一套回写逻辑。
+    area.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('[data-edit-field]').forEach((inp) => {
       const path = inp.getAttribute('data-edit-field')!;
       const v = inp.value;
       // 多个 locator/params/control 字段须累加到同一 patch 对象，不能各自覆盖（否则后者丢失前者）。
@@ -985,6 +1057,24 @@ export class UiShell {
         if (btn) btn.textContent = '确定';
       }, 1600);
     }
+  }
+
+  /**
+   * 视觉判定的 apikey 配置引导。
+   *
+   * 为什么要有它：visionPrompt 没配 apikey 时执行器会判失败（不静默跳过），
+   * 用户如果不知道去哪配，只会看到一个"断言失败"，无从下手。
+   * 这里**只给配置途径，不收集也不展示密钥**：密钥存宿主进程的环境变量/用户级配置，
+   * 绝不进 Script JSON（脚本是要导出分享的产物）。
+   */
+  private renderVisionKeyHint(): HTMLElement {
+    const box = document.createElement('div');
+    box.className = 'ui-shell-assert-hint ui-shell-vision-key-hint';
+    box.setAttribute('data-vision-key-hint', 'true');
+    box.textContent =
+      '需要视觉模型密钥：宿主进程设置环境变量 VISION_API_KEY（可配 VISION_API_BASE / VISION_MODEL），' +
+      '或写入 ~/.electron-auto-test/vision.json。密钥不会存进脚本。';
+    return box;
   }
 
   private wrapAssertSlot(name: string, child: HTMLElement): HTMLElement {
@@ -1036,14 +1126,28 @@ export class UiShell {
   }
 
   /** 生成一个可编辑输入行（label + input），input 带 data-edit-field 供保存时读取。 */
-  private editField(step: Step, path: string, label: string, value: string): HTMLElement {
+  /**
+   * 生成文本输入行。
+   * @param multiline 用 textarea（提示词这类长文本）；保存侧靠 data-edit-field 读取，
+   *   与单行 input 完全同构，不需要额外的保存分支。
+   */
+  private editField(
+    step: Step,
+    path: string,
+    label: string,
+    value: string,
+    opts: { multiline?: boolean; placeholder?: string } = {},
+  ): HTMLElement {
     const row = document.createElement('label');
     row.className = 'ui-shell-edit-field';
     const span = document.createElement('span');
     span.textContent = label;
-    const input = document.createElement('input');
-    input.type = 'text';
+    const input = opts.multiline
+      ? document.createElement('textarea')
+      : document.createElement('input');
+    if (!opts.multiline) (input as HTMLInputElement).type = 'text';
     input.value = value;
+    if (opts.placeholder) input.setAttribute('placeholder', opts.placeholder);
     input.setAttribute('data-edit-field', path);
     row.appendChild(span);
     row.appendChild(input);
