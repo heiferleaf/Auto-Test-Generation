@@ -36,6 +36,23 @@
         "darwin": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" },
         "linux": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" }
       }
+    },
+    {
+      "$comment": [
+        "Chrome：本平台不止能测 Electron，也能测任意网页。",
+        "CDP 是浏览器通用协议，Chrome 的 --remote-debugging-port 与 Electron 完全同源，",
+        "connectOverCDP 连两者走的是同一条路，故复用同一套启动器与适配器。",
+        "装在非默认位置时，用 app.connect 的 appPath 直接给 chrome.exe 的完整路径。"
+      ],
+      "name": "chrome",
+      "label": "Google Chrome",
+      "port": 9255,
+      "liveEnv": "WEBPAGE_LIVE",
+      "platforms": {
+        "win32": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" },
+        "darwin": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" },
+        "linux": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" }
+      }
     }
   ]
 }

@@ -93,6 +93,10 @@ export class WsKernel implements UiKernel {
   eval(code: string): Promise<unknown> { return this.call('eval', code); }
   snapshot(): Promise<SerializedNode[]> { return this.call('snapshot'); }
   query(loc: Locator): Promise<unknown> { return this.call('query', loc); }
+  // 不传 undefined 参数（JSON 会序列化成 null，让桥端的 selector 默认值失效）。
+  pageText(selector?: string): Promise<string | null> {
+    return this.call<string | null>('pageText', ...(selector === undefined ? [] : [selector]));
+  }
 
   // ---- VisualCapable ----
   screenshot(opts?: unknown): Promise<Buffer> {

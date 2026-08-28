@@ -46,18 +46,54 @@ const nodeMatches = (
 
 const asString = (v: unknown, fallback = ''): string => (v == null ? fallback : String(v));
 
+/** 把 locator 降级成能对整页文本做子树限定的 CSS 选择器；无法降级返回 undefined。 */
+const subtreeSelectorOf = (loc: Locator | undefined): string | undefined => {
+  if (!loc) return undefined;
+  // 只有 css 是确定的选择器；role/name/text 之类的语义 locator 无法可靠映射到 CSS，
+  // 硬猜会把"只搜该节点"变成"搜错节点"，故一律不降级——宁可走整页，也不猜错范围。
+  return loc.css || undefined;
+};
+
+/**
+ * textContains 的判定：先搜 snapshot，未命中再回落到整页文本。
+ *
+ * 为什么必须回落：snapshot 的 SELECTOR 只收 a/button/input/[role]... 等可交互元素，
+ * 而"操作产生的新结果"最常见的载体是纯 <p>/<div>/<span> 状态提示——它们进不了 snapshot。
+ * 于是出现"页面上有字、断言却一直超时"。这与「断言必须验证操作产生的新结果」直接冲突。
+ *
+ * 判定顺序刻意是"先用 snapshot 判，判不中才兜底"，而不是"snapshot 空才兜底"：
+ * 页面上通常既有控件又有纯文本节点，snapshot 非空但恰好不含目标文字才是常态——
+ * 若按"snapshot 空才兜底"，纯文本提示永远落不到兜底分支，缺陷照旧。
+ *
+ * locator 仍然起限定作用：带 locator 时，只有 locator 能表达为 CSS 选择器才去取该子树，
+ * role/name 这类无法可靠映射的语义 locator 不降级——宁可不兜底，也不把"只搜该节点"
+ * 架空成"整页随便哪处有就算过"。
+ */
+const textContainsPassed = async (adapter: CdpAdapter, assertion: Assertion): Promise<boolean> => {
+  const a = assertion ?? {};
+  const want = a.value ?? '';
+  const nodes = await adapter.snapshot();
+  const loc = a.locator;
+  const hasLoc = !!(loc && (loc.role || loc.name || loc.text || loc.testId || loc.css || loc.xpath));
+  const pool = hasLoc ? nodes.filter((n) => nodeMatches(n, loc!)) : nodes;
+  const fromNodes = pool
+    .map((n) => [n.text, n.name, n.role].filter(Boolean).join(' '))
+    .join('\n');
+  if (fromNodes.includes(want)) return true;
+
+  const selector = hasLoc ? subtreeSelectorOf(loc) : undefined;
+  // locator 存在但无法映射成 CSS（如 role/name）时不兜底：
+  // 否则"只搜该 button"会被架空成"整页随便哪处有就算过"。
+  if (hasLoc && !selector) return false;
+
+  const text = await adapter.pageText(selector).catch(() => null);
+  return text != null && text.includes(want);
+};
+
 /** 断言 kind → 判定策略的注册表。扩展新断言只需在此追加一项。 */
 export const assertionHandlers: Record<AssertionKind, AssertionHandler> = {
   textContains: async (adapter, assertion) => {
-    const a = assertion ?? {};
-    const nodes = await adapter.snapshot();
-    const loc = a.locator;
-    const hasLoc = !!(loc && (loc.role || loc.name || loc.text || loc.testId || loc.css || loc.xpath));
-    const pool = hasLoc ? nodes.filter((n) => nodeMatches(n, loc!)) : nodes;
-    const haystack = pool
-      .map((n) => [n.text, n.name, n.role].filter(Boolean).join(' '))
-      .join('\n');
-    return { passed: haystack.includes(a.value ?? '') };
+    return { passed: await textContainsPassed(adapter, assertion ?? {}) };
   },
 
   exists: async (adapter, assertion) => {

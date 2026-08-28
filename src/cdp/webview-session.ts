@@ -63,6 +63,59 @@ export const SNAPSHOT_COLLECT = `(() => {
   return out;
 })()`;
 
+/**
+ * 取"用户实际看得见"的文本，优先 innerText、回落 textContent。
+ *
+ * 为什么优先 innerText：它反映渲染后的排版文本，天然略过 display:none 的内容，
+ * 更贴近"页面上出现了某段字"的语义。
+ * 为什么还要 textContent 兜底：innerText 依赖布局，在尚未完成布局的文档（如刚创建的
+ * document、display:contents 容器）上会返回空或抛错；且 root 为 null 时访问会抛，
+ * 会让整条断言链崩掉而不是安静地取不到。取不到就返回空串，由上层按"未命中"处理。
+ */
+const READABLE_TEXT_BODY = `
+    let out = '';
+    try { out = (root.innerText || '').trim(); } catch (_) { out = ''; }
+    if (!out) { try { out = (root.textContent || '').trim(); } catch (_) { out = ''; } }
+    return out;`;
+
+/**
+ * 整页可读文本：含所有文本节点，不只是 SNAPSHOT_COLLECT 收的交互元素。
+ *
+ * 为什么需要：snapshot 的 SELECTOR 只挑 a/button/input/[role]... 这类"可操作"元素，
+ * 而界面上的状态提示（"保存成功"、"共 3 条"）多半躺在无 role 的 div/p/span 里。
+ * 断言"操作后出现了某段文字"若只搜 snapshot，就永远看不见那段字。
+ */
+export const PAGE_TEXT_COLLECT = `(() => {
+  const root = document.body;
+  if (!root) return '';${READABLE_TEXT_BODY}
+})()`;
+
+/** 按 CSS 选择器取子树可读文本（locator 限定时用，语义同 PAGE_TEXT_COLLECT）。 */
+export const subtreeTextExpr = (selector: string): string =>
+  `(() => {
+    const root = document.querySelector(${JSON.stringify(selector)});
+    if (!root) return '';${READABLE_TEXT_BODY}
+  })()`;
+
+/**
+ * pageText 的默认实现：三个 CdpTarget 实现的取值方式完全一样（各自 evaluate 到自己的
+ * 作用域），差别只在 evaluate 走哪条路，已由各自的 evaluate 封装掉。
+ * 故在此共用一份，避免三处复制。取不到一律返回 null 交上层降级，不抛——
+ * webview 内层 context 未就绪时会 WEBVIEW_NO_CONTEXT，那是"暂时取不到"而非故障。
+ */
+const readPageText = async (
+  target: { evaluate<T = unknown>(expr: string, ctxId?: number): Promise<T> },
+  selector?: string,
+): Promise<string | null> => {
+  const expr = selector ? subtreeTextExpr(selector) : PAGE_TEXT_COLLECT;
+  try {
+    const t = await target.evaluate<unknown>(expr);
+    return t == null ? null : String(t);
+  } catch {
+    return null;
+  }
+};
+
 /** 统一目标操作接口（ISP）：page 与 webview 各自实现，避免 fat adapter。 */
 export interface CdpTarget {
   readonly id: string;
@@ -71,6 +124,11 @@ export interface CdpTarget {
   /** 在目标作用域内求值；webview 默认转发到内层 UI context。 */
   evaluate<T = unknown>(expr: string, ctxId?: number): Promise<T>;
   snapshot(): Promise<SerializedNode[]>;
+  /**
+   * 整页可读文本（含非交互元素）。断言层搜文本时的兜底视野。
+   * selector 给出时只取该子树；目标不支持时返回 null 让上层降级。
+   */
+  pageText(selector?: string): Promise<string | null>;
   fill(locatorExpr: string, value: string): Promise<void>;
   /** 断开底层会话（webview 关 ws，page 关浏览器上下文由 Playwright 管）。 */
   dispose?(): void;
@@ -215,6 +273,10 @@ export class WebviewCdpTarget implements CdpTarget {
     return this.evaluate<SerializedNode[]>(SNAPSHOT_COLLECT).catch(() => []);
   }
 
+  async pageText(selector?: string): Promise<string | null> {
+    return readPageText(this, selector);
+  }
+
   async fill(locatorExpr: string, value: string): Promise<void> {
     // 先定位元素类型：input/textarea 用设值+事件；contenteditable 用 Input.insertText。
     const tag = await this.evaluate<string>(
@@ -299,6 +361,10 @@ export class PlaywrightPageTarget implements CdpTarget {
     return this.evaluate<SerializedNode[]>(SNAPSHOT_COLLECT);
   }
 
+  async pageText(selector?: string): Promise<string | null> {
+    return readPageText(this, selector);
+  }
+
   async fill(locatorExpr: string, value: string): Promise<void> {
     await this.page.evaluate(
       ({ locatorExpr, value }) => {
@@ -347,6 +413,10 @@ export class PlaywrightFrameTarget implements CdpTarget {
 
   async snapshot(): Promise<SerializedNode[]> {
     return this.evaluate<SerializedNode[]>(SNAPSHOT_COLLECT);
+  }
+
+  async pageText(selector?: string): Promise<string | null> {
+    return readPageText(this, selector);
   }
 
   async fill(locatorExpr: string, value: string): Promise<void> {

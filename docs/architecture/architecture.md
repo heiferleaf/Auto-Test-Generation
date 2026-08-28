@@ -30,9 +30,13 @@ text
 ├─────────────────────────────────────────┤
 │  CDP 适配层：Playwright / connectOverCDP │
 ├─────────────────────────────────────────┤
-│  目标：Electron 客户端（Chromium 渲染）   │
+│  目标：Electron 客户端 | 任意网页         │  ← CDP 是浏览器通用协议，两者同源
 └─────────────────────────────────────────┘
 ```
+
+> **为什么网页也是合法靶机**：CDP 不是 Electron 专有协议。适配层用 `connectOverCDP` 连调试端口，
+> 连 Electron 与连 Chrome 是完全同一条代码路径，故「支持网页」不是新功能，而是既有能力自然覆盖的范围。
+> 边界与已知限制见 `docs/design/design.md` §8.5。
 
 ### 2.1 可视化蒙版 UI 壳（M3.3）
 
@@ -367,3 +371,8 @@ Tool 是对**已有内核**的 1:1 封装（`src/index.ts` 统一 export），�
 2. 多窗口/webview → 步骤必须带 target。
  Agent 覆盖「业务逻辑」不等于覆盖「全部可点击节点」→ 用结构覆盖率指标，避免过度承诺。
 3. Agent 任务触发依赖宿主（CLI/API）能力与配额，需在方案里写清集成方式。
+4. ~~网页靶机上的断言盲区~~（**已修**，由网页拓展评估暴露的主分支缺陷）：`textContains` 原本只搜
+ snapshot 节点，而 snapshot 只收交互元素与带 `role` 的元素 → 无 `role` 的 `div`/`p`/`span`
+ 里的状态文字断言不到，表现为「页面上有字但断言超时」。Electron 路径同样受影响。
+ 现已给 `CdpAdapter` 加 `pageText()` 语义方法，snapshot 未命中时兜底查整页文本，
+ 且 locator 限定不被架空。详见 `docs/design/design.md` §8.5。

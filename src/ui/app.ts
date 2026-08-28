@@ -32,6 +32,7 @@ class DemoKernel implements UiKernel {
   async wait(_o: any) {}
   async eval(_c: string) { return undefined; }
   async snapshot() { return []; }
+  async pageText() { return null; }
   async query() { return undefined; }
   async screenshot() { return Buffer.from('demo'); }
   async locateVisual(_l: Locator) {

@@ -124,6 +124,17 @@ export interface CdpAdapter {
   eval(code: string): Promise<unknown>;
   snapshot(): Promise<SerializedNode[]>;
   query(loc: Locator): Promise<unknown>;
+  /**
+   * 整页可读文本（含非交互元素，如无 role 的 div/p/span 里的状态提示）。
+   *
+   * 为什么单独开一个语义方法而不是让断言层自己 eval：snapshot() 的 SELECTOR 只收可交互
+   * 元素，而"操作后出现的新结果"最常见的载体恰恰是不可交互的纯文本节点。文本查询属于
+   * 适配层的职责（怎么取值、走哪个 context），断言层只该消费语义结果。
+   *
+   * selector 给出时只取该子树；底层取不到（如 webview context 未就绪）返回 null，
+   * 由调用方决定降级，不抛。
+   */
+  pageText(selector?: string): Promise<string | null>;
 }
 
 /** 带错误码的适配层异常，便于上层区分处理（design.md §8-5）。 */
@@ -373,6 +384,13 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
 
   async snapshot(): Promise<SerializedNode[]> {
     return this.currentTarget().snapshot();
+  }
+
+  /** 整页/子树可读文本。转发给当前 CdpTarget，取不到返回 null（不抛）。 */
+  async pageText(selector?: string): Promise<string | null> {
+    const target = this.currentTarget();
+    if (typeof target.pageText !== 'function') return null;
+    return target.pageText(selector);
   }
 
   /** 返回首个匹配的 ElementHandle，未命中返回 null。 */

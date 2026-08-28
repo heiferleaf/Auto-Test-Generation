@@ -45,7 +45,7 @@ export type AssertionKind =
 
 export type Assertion = {
   kind: AssertionKind;
-  locator?: Locator;   // exists/visible 必填；textContains 可选（缺省=整页文本，执行器搜 snapshot）
+  locator?: Locator;   // exists/visible 必填；textContains 可选（缺省=整页文本；搜快照控件，未命中回落到整页）
   value?: string;      // textContains/titleIs/urlMatches/expr 用
   /** 检测前等待毫秒数（供 Agent 推理/异步渲染留时间，如"等待 N 秒后检测元素值"）。 */
   waitMs?: number;

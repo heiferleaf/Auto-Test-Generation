@@ -115,7 +115,8 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: 'page.waitUntil',
     description:
-      '轮询直到断言成立。支持 kind=textContains（搜 snapshot 文本，含嵌套节点）。可带 targetId。',
+      '轮询直到断言成立。支持 kind=textContains（搜快照控件文本，未命中时自动回落到整页文本，' +
+      '故无 role 的 div/p/span 里的提示语也断言得到；带 locator 时只在该范围内找）。可带 targetId。',
     inputSchema: obj({
       kind: { type: 'string', description: '如 textContains / exists / visible' },
       value: { type: 'string' },

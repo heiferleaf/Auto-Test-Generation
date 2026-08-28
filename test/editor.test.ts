@@ -59,6 +59,7 @@ describe('触发编排（M3 组件对外：Recorder 产物 → 对目标软件�
       selectTarget() {},
       async click() {}, async fill() {}, async select() {}, async hover() {}, async wait() {},
       async eval() { return null; }, async snapshot() { return []; }, async query() { return null; },
+      async pageText() { return null; },
     } as CdpAdapter;
   }
 

@@ -160,6 +160,57 @@ src/
 
 ---
 
+## 8.5 网页靶机（不止 Electron）
+
+本平台靠 **CDP** 控制被测对象，而 CDP 是浏览器通用协议，不是 Electron 专有。因此**任意网页**也是合法靶机，且不需要新内核：`chromium.connectOverCDP('http://127.0.0.1:<port>')` 连 Electron 与连 Chrome 走完全同一条路。
+
+### 怎么用
+
+两条路，都不改代码：
+
+| 方式 | 做法 |
+|---|---|
+| 连用户自己启动的浏览器 | 用户带 `--remote-debugging-port=<port>` 启动 Chrome，再用 `app.connect { port }` 连上。靶机清单里有预置条目 `chrome`（默认口 9255），也可 `scripts/launch-target.mjs --name chrome --port <端口>` 代劳。 |
+| 直接给路径 | `app.connect { port, appPath: "<chrome.exe 完整路径>" }`，装在非默认位置时走这条。 |
+
+平台自己起浏览器的场景（不给路径、由平台拉起并打开 URL）**尚未实现**，见 §9 的待决策项。
+
+### 为什么不需要新适配器
+
+`enumerateTargets` 对 webview 是「有则建、无则跳」，网页上没有 webview 就只枚举 page，不会报错；`mainTarget` 三级回退在只有一个普通网页时行为正确。录制注入脚本（`src/recorder/inject.ts`）全篇只用 DOM / ARIA，不碰 `ipcRenderer` / `contextBridge` / `nodeIntegration`，在网页上可直接工作——故截图、录制、点选三条能力一并可用。
+
+### 已验证的能力（见 `test/integration-webpage.test.ts`）
+
+连接与枚举、`snapshot` 列控件、`fill` 填对输入框、`click` + `waitUntil(textContains)` 验证操作带来的新结果（含纯 `div` 里的无 role 文本）、`selectTarget` 逐层快照、未知 target id 报 `CDP_TARGET_NOT_FOUND` 不静默。
+
+其中「`fill` 填对输入框」有一条**对照用例**刻意证明风险真实存在：给一个页面上不存在的 name，语义候选全落空后，`fillOnPage` 的兜底会按 (empty, width) 挑中更宽但语义错误的输入框。所以「必须给语义 locator」是硬要求，不能指望兜底。
+
+### 已修的真缺陷：`textContains` 只能看见 snapshot 里的节点
+
+**症状**：页面上明明有那段字，`textContains` 却一直轮询到超时。
+
+**根因**：`textContains` 的判定池原本只有 `adapter.snapshot()` 的节点，而 `SNAPSHOT_COLLECT`（`src/cdp/webview-session.ts`）只挑 `a,button,input,select,textarea,[role],[data-testid],[contenteditable]`——**只收可交互元素**。而"操作产生的新结果"最常见的载体恰恰是不可交互的纯 `<p>`/`<div>`/`<span>` 状态提示。
+
+这不是网页拓展引入的，而是主分支就有的缺陷：平台的 Skill 铁律要求「断言必须验证操作产生的新结果」，而最常见的"新结果"就是一段纯文本提示，所以 Electron 靶机上同样会踩（只是被测壳的控件多带 role，暴露得晚）。
+
+**修法**：不改 `SNAPSHOT_COLLECT`（它是"可操作控件清单"语义，扩大它会让 snapshot 变臃肿并影响录制/点选），而是给断言补一层视野——`CdpAdapter` 新增语义方法 `pageText(selector?)`（各 `CdpTarget` 实现，取 `document.body.innerText` 或指定子树），`textContains` 在 snapshot 未命中时兜底查一次。
+
+职责边界：文本查询属于适配层（怎么取值、走哪个 execution context），断言层只消费语义结果，不自己拼 CDP 表达式。`assertionHandlers` 仍是 OCP 注册表，新增逻辑以独立函数 `textContainsPassed` 承载，没有引入分支判断。
+
+**三条边界**（各有用例钉死，见 `test/assert.test.ts` 与 `test/integration-webpage.test.ts`）：
+
+1. 兜底判据是"snapshot 没搜到目标文字"，不是"snapshot 为空"。页面上通常既有控件又有纯文本节点，snapshot 非空但不含目标文字才是常态——按"空才兜底"写，缺陷照旧。
+2. `locator` 的限定不被架空：只有能表达为 CSS 选择器的 locator 才降级到子树查询；`role`/`name` 这类无法可靠映射的语义 locator 不降级，宁可不兜底也不把"只搜该节点"变成"整页随便哪处有就算过"。
+3. 兜底只**补视野**、不放宽判定：页面取不到文本（`pageText` 返回 `null`）时判负，不判通过。
+
+**顺带**：`waitUntil` 超时信息现在带"最后一次为何不匹配"（期望值 + 页面上当前的实际文本 / 标题 / URL / 节点是否存在）。只报"超时 5000ms"没法区分「目标还没渲染，该调大超时」和「判定来源不对，找错地方」两种完全不同的故障。
+
+---
+
 ## 9 与后续阶段的边界
 
 M5（Agent 根据页面生成覆盖步骤、按已有脚本改写）和 M6（安装包版本更新后自动触发一次任务）仍是产品方向，见计划与需求用例，不在本文展开接口。不要把它们和「脚本版本控制插件」「模型视觉断言插件」混成一件事：前者是调度与生成，后者是中台里的可插拔增强。
+
+### 待决策（网页拓展相关的 C 类决策点）
+
+1. **是否让平台自己起浏览器并打开 URL**：需新增 `browser.launch` / `browser.open` 之类的 MCP Tool，或给 `app.connect` 扩一个 `url` 参数。两者都是 schema / 协议变更。注意 `chromium.launchServer()` 不监听 HTTP，`/json` 会 `ECONNREFUSED`——实测可行做法是 `chromium.launch({ args: ['--remote-debugging-port=<port>'] })`。目前是 Tier A：用户自己开好页面，平台连上去测。
