@@ -1,7 +1,7 @@
-# 总体实施计划
+﻿# 总体实施计划
 
-> 配套：`requirements/requirements.md`、`architecture/architecture.md`、`design/design.md`、`AGENTS.md`
-> 纪律基线：任何实现前先有测试方案/测试代码；实现后以通过测试为迭代目标（详见 `AGENTS.md` §5）。
+> 配套：`requirements/requirements.md`、`architecture/architecture.md`、`design/design.md`、`.codebuddy/rules/engineering.mdc`
+> 纪律基线：任何实现前先有测试方案/测试代码；实现后以通过测试为迭代目标（详见 `engineering.mdc`）。
 > 以后的插件（截图+提示词断言、脚本版本控制、Agent 建议步骤）**不在本计划排期**，见需求文档「以后的插件 / 非本轮」。
 
 ---
@@ -10,16 +10,16 @@
 
 1. **测试先行**：每阶段/每任务动手前，先确定测试方案或在 `test/` 落地测试骨架。
 2. **通过测试才算完成**：实现以让测试通过为第一目标，未通过不得合并。
-3. **Worktree 隔离**：每个实现任务在 `.cursor/worktree/<name>` 独立工作树进行（`AGENTS.md` §3）。主树只做合并后的可编译基线。
-4. **双角色校验**：每个任务完成须过 **test**、**code-review**、**runtime-runnability** 三个角色（`AGENTS.md` §4）。
+3. **Worktree 隔离**：每个实现任务在 `.codebuddy/worktree/<name>` 独立工作树进行（`engineering.mdc`）。主树只做合并后的可编译基线。
+4. **双角色校验**：每个任务完成须过 **test**、**code-review**、**runtime-runnability** 三个角色（`engineering.mdc`）。
 5. **并行用 Agent team**：可并行子任务用多 Agent / Agent team，各自 worktree + 各自校验。
-6. **知识沉淀**：重复任务总结进 `.cursor/skills/`；短约束在 `.cursor/rules/`；完整纪律在 `AGENTS.md`。
+6. **知识沉淀**：重复任务总结进 `.codebuddy/skills/`；短约束在 `.codebuddy/rules/`；完整纪律在 `.codebuddy/rules/engineering.mdc`。
 
 ---
 
 ## 阶段总览
 
-对标 `architecture/architecture.md` §4。不新开与 `AGENTS.md` 冲突的里程碑名。MCP 第一刀已经在仓库根落地，不再写成「要等 M4 才开始」。
+对标 `architecture/architecture.md` §4。不新开与 `engineering.mdc` 冲突的里程碑名。MCP 第一刀已经在仓库根落地，不再写成「要等 M4 才开始」。
 
 | 阶段 | 状态 | 范围 | 验收 |
 |---|---|---|---|
@@ -42,8 +42,8 @@ M2 当年写过的「多模态大模型视觉断言」没有作为本轮能力�
 | 录制 | 注入 **全部** CDP target；动态 webview 补注入；实时推步；连续 fill 坍缩 | `startRecording`；LIVE 门控 `test/integration-*.test.ts` |
 | 回放 | Playwright 真实指针；步骤带 `target`；运行全部进度经 WS `step-progress` | `clickOnPage` / `fillOnPage`；`test/ui-shell-run-all.test.ts` |
 | 脚本 IO | v1/v2 schema、可选根字段 `shots`、工作台导入按钮 + 内核 `loadScript` | `src/script/io.ts` |
-| MCP stdio | 仓库根 `npm run mcp`；`.cursor/mcp.json` 的 cwd 为 `${workspaceFolder}` | `src/mcp/`；契约测试 `test/mcp-*.test.ts`（与内核同合并） |
-| Skill 工作流 | 决策树 + 从零写 JSON / 观察 / 已有脚本 / 扫功能 / 人录制；产物是 Script 不是 click 链 | `.cursor/skills/electron-cdp-test/SKILL.md` |
+| MCP stdio | 仓库根 `npm run mcp`；`.codebuddy/mcp.json` 的 cwd 为 `${workspaceFolder}` | `src/mcp/`；契约测试 `test/mcp-*.test.ts`（与内核同合并） |
+| Skill 工作流 | 决策树 + 从零写 JSON / 观察 / 已有脚本 / 扫功能 / 人录制；产物是 Script 不是 click 链 | `.codebuddy/skills/electron-cdp-test/SKILL.md` |
 
 合并记录（主体）：`feat/cfg-step-model`、`feat/ws-push-channel`、`feat/run-all`、`feat/cfg-view`、`feat/pick-record` 合入 `9d6a4ae`（中台内核、MCP、Skill）。
 
@@ -53,7 +53,7 @@ M2 当年写过的「多模态大模型视觉断言」没有作为本轮能力�
 
 M1 测试骨架仍在：`test/model.test.ts`、`test/cdp.test.ts`、`test/executor.test.ts`、`test/assert.test.ts`、`test/cli.test.ts`。CLI `npm run run` 仍可直接跑 JSON。
 
-M2 真机接入：`scripts/launch-codebuddy.cmd` / `launch-workbuddy.cmd` / `launch-vscode.cmd`，调试口以脚本返回值为准（CodeBuddy 9222 / WorkBuddy 9233 / VS Code 9244，幽灵口会 +1）。集成测试无 `*_LIVE=1` 时必须 skip。
+M2 真机接入：跨平台启动器 `scripts/launch-target.mjs`（Node 实现，已替代原 Windows 专用 `launch-*.cmd`），按 `scripts/targets.json` 的 win32/darwin/linux 平台分支找 exe，调试口以脚本返回值为准（CodeBuddy 9222 / WorkBuddy 9233 / VS Code 9244，幽灵口会 +1）。集成测试无 `*_LIVE=1` 时必须 skip。
 
 ---
 
@@ -85,9 +85,9 @@ M2 真机接入：`scripts/launch-codebuddy.cmd` / `launch-workbuddy.cmd` / `lau
 已交付：
 
 - stdio Server：`src/mcp/main.ts`，Cursor 默认传输。
-- 仓库根启动：`npm run mcp`；`.cursor/mcp.json` 的 `cwd` 必须是 `${workspaceFolder}`，禁止写 worktree 路径。
+- 仓库根启动：`npm run mcp`；`.codebuddy/mcp.json` 的 `cwd` 必须是 `${workspaceFolder}`，禁止写 worktree 路径。
 - Tool 1:1 包装内核。会话：`launch-target`、`workbench.start/stop`、`target.stop`、`app.connect/disconnect/list_targets`。观察+跑：`page.snapshot/screenshot`、`script.open/import/export`、`actions.execute_steps`。探针：`page.click/fill/wait/waitUntil`、`assert.run`、`record.*`。
-- Skill：`.cursor/skills/electron-cdp-test`（Anthropic webapp-testing 风格：决策树、命名工作流、Don't/Do）。
+- Skill：`.codebuddy/skills/electron-cdp-test`（Anthropic webapp-testing 风格：决策树、命名工作流、Don't/Do）。
 
 未做、仍算 **本计划工程剩余**（不是插件）：
 

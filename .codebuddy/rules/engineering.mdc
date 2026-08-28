@@ -1,0 +1,57 @@
+---
+description: Auto-Test-Generation 工程纪律：项目定位、worktree、测试先行、三角色校验、靶机端口、MCP stdio 约束
+alwaysApply: true
+---
+
+# 工程纪律
+
+## 项目定位
+
+面向 **Electron 桌面客户端** 的测试自动化平台：底层 CDP 控制应用，对外以 **Skill + MCP** 提供能力，支持 **Agent 驱动** 与 **脚本回放** 双模式互通。产物始终是 Script JSON。
+
+配置单一真相源在 `.codebuddy/`：纪律在本文件；技能在 `skills/`；MCP 配置在 `mcp.json`；工作树在 `worktree/`。
+
+核心文档：需求 `docs/requirements/requirements.md`；架构 `docs/architecture/architecture.md`；设计 `docs/design/design.md`；UI 规格 `docs/design/visual-mask-ui-spec.md`；计划 `docs/plan/plan.md`。
+
+## 开发流程
+
+- 实现任务在 `.codebuddy/worktree/<name>` 的 git worktree 里做，不要在 `master` 主树长期开发。合并后不要自动删 worktree。
+- 先写测试方案或 `test/` 骨架，再写实现。完成标准是 `npm test` 与 `npm run typecheck` 通过。测试命令固定为这两条，用参数/环境变量筛选，不要另起 npm script。
+- 有代码改动就必须跑三个角色，对应 skill：`test-first-dev`、`code-review-standard`、`runtime-runnability-review`。
+- 用户可见功能必须对照 `docs/design/visual-mask-ui-spec.md` 做产品符合度审查；UI 主链路走 `test/ui-core-e2e.test.ts`，禁止只用内部 API 直调冒充用户路径。
+- 跨 WS/JSON/CDP 边界必须用 `x = x ?? {}` 兜底，不能依赖函数默认参数（`undefined` 经 JSON 会变成 `null`）。
+- 性能优化必须先有测试守住功能，再动实现；接口/功能/schema 不变，降阶才算优化，同阶常数优化需有证据。
+- 注释写行为与原因，不要只写需求/设计编号。
+- **需求确认以"执行时序对齐"为准，不是功能清单对齐。** 从需求到代码走 `spec-driven-impl` 链路：需求冻结→时序对齐→差距分析(A 缺陷/B 计划/C 决策点)→决策点确认→测试先行→三方一致→边界兜底。schema/协议变更属 C 类决策点，必须显式问用户，不要默默改。
+
+## 技术栈
+
+TypeScript + CDP/Playwright（`connectOverCDP`）+ 自研 stdio MCP + vitest + npm。禁止未达成共识就换主栈。
+
+## 靶机与端口
+
+真机靶机 CodeBuddy / WorkBuddy / VS Code。启动器统一为 **`scripts/launch-target.mjs`**（Node，跨平台；`scripts/launch-*.cmd` 已于 2026-08-28 删除）。
+靶机清单 `scripts/targets.json` 按 win32 / darwin / linux 给平台分支，`exe: "auto-detect"` 表示由启动脚本到各平台默认安装位置探测；装在非默认位置时走 `app.connect` 的 `appPath`。
+默认调试端口：CodeBuddy 9222 / WorkBuddy 9233 / VS Code 9244（幽灵口会 +1，以脚本 stdout 打印的为准）。
+
+手动拉起：`node scripts/launch-target.mjs --name <靶机名> --port <端口>`（加 `--exe <路径>` 可绕过探测，加 `--dry-run` 只看不启）。
+
+真机集成测试用环境变量门控，无变量时必须 skip：
+
+```bash
+set CODEBUDDY_LIVE=1 && npm test -- test/integration-codebuddy.test.ts
+set WORKBUDDY_LIVE=1 && npm test -- test/integration-workbuddy.test.ts
+set VSCODE_LIVE=1 && npm test -- test/integration-vscode.test.ts
+```
+
+## MCP
+
+- **MCP 已落地**（M4 第一刀，`npm run mcp` → `src/mcp/main.ts`）。改动 MCP 前先确认 Tool 语义仍与 `docs/design/design.md` §5 对齐。
+- **MCP stdio 的 stdout 只走 JSON-RPC**，任何启动方式都不得往 stdout 打横幅/日志（npm 不加 `--silent` 会注入 4 行横幅，导致客户端连上却显示 0 tool）。诊断一律打 stderr。
+
+## Windows / 编码环境坑（本机 PowerShell + fnm 实测）
+
+- 终端中文乱码（`?`）是控制台代码页 GBK 与 Node UTF-8 输出不匹配，属**显示问题**，不改变测试结论。诊断时把输出 `Out-File -Encoding utf8` 写文件再 `Get-Content` 读，不要靠肉眼看乱码判断成败。
+- `Select-String` 管道会因 `-First N` 提前关闭而把 vitest 进程一并结束（exit code -1）。跑全量套件时不要套 `Select-String` 管道，直接写文件读尾。
+- PowerShell 不支持 `&&` 链命令；用 `;` 分隔。`git commit -m "..."` 含括号/换行会被 PS 解析失败，改用 `git commit -F <文件>`。
+- fnm 每次起 shell 报 `Can't create the symlink ... 拒绝访问 (os error 5)` 是 profile 权限问题，是噪音不是错误。若影响 `npx`，直接把 Node 安装目录 prepend 到 `$env:PATH` 绕过 fnm shim。

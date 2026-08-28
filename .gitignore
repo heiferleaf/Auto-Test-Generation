@@ -2,7 +2,12 @@ node_modules/
 dist/
 .codebuddy/worktree/
 .cursor/worktree/
+.cursor/
 *.log
+
+# AGENTS.md / CLAUDE.md 等是宿主 Agent 工具的约定入口，不入库。
+# 项目共识基线在 .codebuddy/rules/engineering.mdc（alwaysApply）。
+AGENTS.md
 
 # 集成测试真机运行生成的报告（验证产物，不入库；预期契约在 fixtures/）。
 test/reports/

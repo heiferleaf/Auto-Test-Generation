@@ -1,78 +1,72 @@
 ---
 name: runtime-runnability-review
-description: 代码可运行性审查角色——独立于实现与 code-review，专抓"编译/单测全绿但真实运行路径会崩"的盲区。只要有代码修改就必须运行。
-type: review
+description: 本项目可运行性审查角色。只要有代码修改就必须使用。专抓编译/单测全绿但真实路径会崩的盲区，以及跨 WS/JSON/CDP 的 undefined→null 问题。性能优化必须先有测试守住功能。
 ---
 
-# 代码可运行性审查（Runtime-Runnability Review）
+# 可运行性审查
 
-## 角色定位
+独立于实现者与 code-review。只要改了代码就必须跑。
 
-独立于**实现者**与 **code-review** 的第三校验角色。承担**三重职责**：
+## 为什么需要
 
-1. **可运行性**：只回答一个问题——**"这段代码在真实/近真实环境下，真的能跑通一次吗？"**
-2. **代码质量**：在可运行性确认通过后，补做代码质量审查（命名/重复/可读性/明显坏味道），不重复 code-review 的架构级判定。
-3. **运行效率与算法复杂度**：定位并优化效率瓶颈与算法时间复杂度（如 O(n²)→O(n)、冗余遍历、重复序列化、不必要的全量重渲染）。**性能优化必须先有测试守住功能不变，再动手优化。**
+M3 曾出现 `screenshot` 经 WebSocket 崩溃：`JSON.stringify` 把 `undefined` 变成 `null`，函数默认参数 `= {}` 对 `null` 不生效，随即 `null.target` 抛错。`tsc`、Mock 单测、走 `args:[]` 的 verify 都绿，只有浏览器 `WsKernel` 真传 `undefined` 才爆。
 
-## 何时必须运行（强制）
+## 清单（命中任一项 = 不通过）
 
-- 任何 worktree 内的实现提交前；
-- 任何涉及 **跨进程/跨网络调用、序列化、边界参数（null/undefined/空）、真实硬件、浏览器/Electron 调试端口** 的改动；
-- **只要改了代码，哪怕一行，也必须跑**——单测/Mock 通过不等于真实路径通过。
+1. 跨进程边界：被调函数体内用 `x = x ?? {}`，不要依赖默认参数。`opts.x` 访问前确认 `opts` 在 null/undefined 下安全。
+2. 对外方法显式传 `null` / `undefined` / `''` / `[]` 各跑一次。
+3. Mock 通过不等于真实路径通过。确认 `PlaywrightCdpAdapter` / `WsKernel` 在真机或近真机跑通一次。
+4. UI/脚本入口要有冒烟证据：`npm run ui` 后 `http://localhost:5173/?live=1` 截图流真实出图；或 `scripts/verify-ui-live.mjs`。返回值必须有效（截图 base64 不能过短）。
 
-## 为什么需要这个角色（血泪教训）
+## 性能与复杂度审查
 
-M3 可视化蒙版曾出现 `screenshot` 经 WebSocket 桥调用时崩溃：
+可运行性（不崩）通过后，再查实现代码的执行性能与算法复杂度。本节前提是**接口不变、功能不变、测试先绿**：性能优化必须在已有测试守住功能的前提下进行（与 `test-first-dev` 一致），禁止在无覆盖的路径上「顺手优化」——没有测试守的优化和没有测试守的重构一样，改完无法证明没改坏行为。
 
-- 根因：`JSON.stringify` 把 `undefined` 参数序列化为 `null` → 服务端函数的默认参数 `= {}` 失效 → `null.target` 直接抛 `Cannot read properties of null (reading 'target')`；
-- **`tsc` 不报错**；**`vitest` 单测（MockKernel 不走 WS）全绿**；**`verify` 脚本（走 `args:[]` 不触发 `null`）也通过**；
-- 仅在"浏览器 `WsKernel` 经真实 WS 传 `undefined`"时才暴露。
+### 前提与红线
 
-编译与单测对此类"真实执行路径盲区"天然不可见，必须由独立角色做端到端冒烟。
+- 优化前先确认该热点路径已有测试覆盖（单测或 UI 主链路 E2E）。没有就先补测试，再动实现。
+- 禁止为压性能改公共接口、改测试断言、改 `Step`/`Script` schema 或 WS 桥协议。这些是更高级别的契约，性能不构成破坏它们的理由。
+- 禁止为压性能去掉 `?? {}` 兜底或 `sanitizeArgs` 的 null→undefined 还原——跨 WS/JSON/CDP 边界的 null 陷阱正是本角色第一职责要防的崩点，性能优化不得反向 reintroduce。
+- 禁止为压性能引入可变共享状态破坏既有不可变约定（如 `version-store` 写操作返回新 store、`Step` 不被运行态污染）。可变共享换来的常数收益不抵状态串扰的排查成本。
 
-## 审查清单（命中任一项 = 不通过）
+### 时间复杂度
 
-1. **跨进程/跨语言边界**
-   - JSON-RPC / WebSocket / CDP 调用中，参数经 `JSON.stringify` 后 `undefined`→`null`、`Buffer`→`{type:'Buffer',data:[...]}` 等变形是否被正确处理。
-   - 服务端/被调函数**必须用 `x = x ?? {}` 在函数体内兜底**，不能依赖 `function f(opts = {})` 默认参数（默认参数对 `null` 不生效）。
-   - 所有 `opts.x` / `obj.x` 访问前，确认 `opts`/`obj` 在 `null` 与 `undefined` 下都安全。
+审查热点路径是否在改动中**退化**，特别警惕 O(n²) 被引入。当前已知热点（基于现有架构/代码，作为审查基线，不是优化任务清单）：
 
-2. **边界参数冒烟**
-   - 对每个对外方法，逐一验证 `null` / `undefined` / `''` / `[]` / 超大值是否真的被函数消纳。
-   - 不能只测"正常传值"，必须显式传 `null` 和 `undefined` 各跑一次。
+- `executor.runNode`（`src/executor/executor.ts`）：递归调度，总遍历量 = 全部叶子数 n；`while` 组按 `loopCount` 放大执行次数（这是语义本身，不算退化）。`childrenOf` 每次调用对 children 做一次 null 扫描，O(children)，整体 O(n)。审查点：改动是否在递归体内引入对全量 steps 的查找/遍历（如每步 `flattenSteps`、每步全量 `runIndex` 重建）。
+- `UiShell.flattenSteps`（`src/ui/shell.ts`）：递归展平所有步为线性数组，O(n)。**它是被反复调用的**——`findStep`、`runAll`、`resetRunStatus`、`backfillStatus`、`render` 失败定位都各自调一次。若某次改动在循环里对每步都调 `flattenSteps`/`findStep`，立刻退化成 O(n²)。审查点：循环体内是否出现 `flattenSteps()` 或 `findStep(id)` 调用；若是，改用预先建好的 `runIndex` Map（O(1) 查找）。
+- `CfgView` 渲染（`src/ui/cfg-view.ts`）：`renderNode` 对每个节点调 `nodeLabel`，`nodeLabel` 内 `findByStepId` 对整棵树做递归查找 O(n)。渲染 n 个节点 → **当前已是 O(n²)**。这是已知可优化点，登记为后续子阶段，**不属本次审查必须修**；审查点：改动是否再叠加新的全树查找使常数继续放大；若要修，必须先有 `test/cfg-view.test.ts` 守住图结构与文案，再引入 `stepId → Step` Map 把 `findByStepId` 降为 O(1)。
+- `UiShell.render`：当前 `root.innerHTML=''` 全量重建 + `flattenSteps` 多次调用，单次渲染 O(n²)（含上一条）。`setStatus`/`CfgView.setStatus` 已做原地更新 O(1) 避免每步重渲染——这是正确方向，审查点：改动是否把已用原地更新的路径改回全量 `render()`。
+- `bridge-server.assertRunnableScript`：递归校验 steps 及每层 children，O(n)。审查点：是否在递归体内引入重复 RPC 或全量克隆。
+- 运行态 `stepStatus` Map、`runIndex` Map：O(1) 查找，正确形态。审查点：改动是否把它们改成线性扫描或每次 `new Map` 重建。
 
-3. **真实路径 ≠ 测试路径**
-   - 单测用 Mock 实现时，**必须额外确认真实实现**（如 `PlaywrightCdpAdapter`、浏览器 `WsKernel`）在真实/近真实环境能跑通一次。
-   - 易盲区：MockKernel 跳过 WS 序列化、verify 脚本走 `args:[]`、单测不启动真机端口。
+**降阶才算优化**：O(n²)→O(n)/O(log n) 是优化；同阶常数优化（如少一次 map、少一次浅拷贝）必须有证据——基准计数或 perf 计数，不凭感觉判断「更快」。无证据的常数改动不纳入审查通过条件，也不构成合并阻断。
 
-4. **端到端冒烟证据**
-   - UI / Agent / 脚本入口必须在目标真实环境启动一次并确认主链路无异常：
-     - M3 UI：`npm run ui` 后开 `http://localhost:5173/?live=1`，确认截图流真实出图、无 Console 报错。
-     - 真机：`scripts/verify-ui-live.mjs` 走 connect→枚举→注入→录制→捕获→回放 闭环。
-   - 不能只信"有返回就算过"——要验证返回值是真实有效产物（如截图 base64 长度 > 阈值）。
+### 空间复杂度
 
-## 失败处理
+审查是否引入不必要的全量拷贝、深克隆或大对象常驻：
 
-- 不通过 → 打回实现者修复，修复后**重新跑本角色**直到真实路径冒烟通过。
-- 本角色与 code-review 互不替代：code-review 看"设计对不对"，本角色看"真实跑不跑得通 + 跑得够不够快"。
+- `runAll` 的 `stepStatus` Map：随叶子数 O(n) 常驻，合理。审查点：是否在运行结束后仍不释放、或每次进度回调都新建 Map。
+- 录制去重指纹集合：若新增去重，确认指纹集合是增量更新而非每事件全量重建。
+- `buildCfgGraph` 的 `edges` 数组：O(n)，合理。审查点：是否在递归中重复传递同一数组导致隐式拷贝。
+- 深克隆：`version-store` 不可变更新靠返回新 store，审查其是否对整棵 `Script` 做结构化克隆（应用浅拷贝 + 结构共享即可，深克隆会把 commit 退化成 O(n·历史长度)）。
+- 递归深度：`runNode`/`buildCfgGraph`/`flattenSteps`/`assertRunnableScript` 均按 `children` 嵌套深度递归。审查点：用户脚本嵌套极深时是否有栈溢出风险；当前未设深度上限，登记为已知限制，**不属本次必须修**。
 
-## 代码质量 / 运行效率审查（可运行性通过后追加）
+### 输出
 
-5. **明显坏味道**：重复代码块、超长函数、误导性命名、裸 `any` 滥用、魔法数字。
-6. **算法时间复杂度**：对步骤数/元素数相关的循环标注复杂度；发现无必要嵌套遍历则要求改为 hash 索引 / 单次遍历。
-7. **运行效率瓶颈**：重复 RPC/序列化、每帧全量重渲染、未复用连接/句柄、O(n) 查询在循环内反复执行。
-8. **优化前置证据**：凡提出"应优化"，须先确认已有对应测试守住功能；无测试则先补测试再评。
+审查报告给出：当前复杂度评估（哪条热点、几阶、是否退化）+ 退化点/可优化点（带文件与触发条件）+ 是否阻断合并。判定规则：
 
-## 性能优化纪律（先保功能，再提速度）
+- 引入 O(n²) 退化且无测试覆盖 → **阻断**（先补测试再决定是否回退）。
+- 引入 O(n²) 退化但有测试覆盖、且属临时登记的已知项 → 不阻断，但必须在报告里显式登记。
+- 同阶常数优化无证据 → 不阻断，不计入通过条件。
+- 为性能破坏接口/schema/不可变约定/边界兜底 → **阻断**。
 
-- **第一步必须先写/补测试**，断言优化前后功能行为完全一致（同输入同输出、同副作用）。
-- 测试通过后才动手优化；优化后**重跑该测试 + 可运行性冒烟**，确认既不变功能、又不引入真实路径崩溃。
-- 禁止为性能牺牲可运行性清单 1–4 的边界安全（如为省一次遍历去掉 `null ?? {}` 兜底）。
-- 优化须可量化：标注优化前后的复杂度或实测耗时对比（如 `O(n²)·|steps|² → O(n)`）。
+## 命令
 
-## 执行步骤（建议）
+```bash
+npm test
+npm run typecheck
+node scripts/verify-ui-live.mjs
+```
 
-1. 读改动 diff（`git diff <base>`），圈出跨边界/边界参数的调用点。
-2. 对每处，构造 `null`/`undefined` 实参，确认不崩。
-3. 启动真实/近真实环境做端到端冒烟（按上面"端到端冒烟证据"）。
-4. 输出结论：通过 / 不通过（列具体崩点 + 复现步骤）。
+结论：通过 / 不通过（崩点 + 复现步骤 + 涉及的真实路径）。不通过则打回，修复后再跑本角色。

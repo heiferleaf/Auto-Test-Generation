@@ -11,7 +11,7 @@
 
 1. **工作台（CFG 中台）**：本地网页。人在这里看/编控制流图、导入导出脚本、运行全部、在节点旁打开详情。开始录制之后，操作发生在 **真实软件窗口**，不发生在网页截图上。
 2. **stdio MCP**：`npm run mcp` 把同一套内核（连接、快照、录制、执行、把脚本推进当前会话）暴露给 Cursor Agent。MCP 是遥控，不是第二套执行器。
-3. **Skill**（`.cursor/skills/electron-cdp-test`）：教模型走「观察 → 把步骤写进 Script JSON → `script.open` + `actions.execute_steps`」，而不是连调 `page.click` 当产物。
+3. **Skill**（`.codebuddy/skills/electron-cdp-test`）：教模型走「观察 → 把步骤写进 Script JSON → `script.open` + `actions.execute_steps`」，让每一步都留在可回放、可编辑的脚本里，而不是把一串裸点击当产物（点完即弃，无法复跑与润色）。
 
 人录制与模型写 JSON 是同一条步骤模型、同一份工作台会话。嵌套页面（外层 `page` 与内层 `webview`）对人：点哪里就录哪一层，不用选手动选层。对模型：没有鼠标，必须先 `app.list_targets`，再对需要的层 `page.snapshot`，并把该层 `id` 写进步骤已有的 `target` 字段。不要为此改 schema。
 
@@ -80,7 +80,9 @@
 
 ## 5 MCP：会话、观察、回放
 
-入口：`package.json` 的 `npm run mcp` → `src/mcp/main.ts`。在 **仓库根** 跑。Cursor 配置必须是仓库里的 `.cursor/mcp.json`，`command` 为 `npm`、`args` 为 `["run", "mcp"]`、`cwd` 为 `${workspaceFolder}`。**不要**把 cwd 写成某台机器上的 Desktop 路径，也 **不要** 写成 `.cursor/worktree/...`。对方克隆后打开克隆根目录即可，`${workspaceFolder}` 会指向那份克隆。stdout 只给 JSON-RPC，诊断打 stderr。
+入口：`npm run mcp` → `src/mcp/main.ts`。在 **仓库根** 跑，不依赖 worktree。配置见仓库里的 `.codebuddy/mcp.json`，`cwd` 必须是 `${workspaceFolder}`，**不要**写成某台机器的绝对路径，也**不要**写成 `.codebuddy/worktree/...`。对方克隆后打开克隆根目录即可，`${workspaceFolder}` 会指向那份克隆。
+
+**启动命令必须抑制 npm 横幅**：`command` 用 `npm`、`args` 用 `["run", "--silent", "mcp"]`。若写成 `["run", "mcp"]`，npm 会往 stdout 注入 4 行横幅（`> electron-auto-test@0.1.0 mcp` 等），违反「stdout 只走 JSON-RPC」的约定，客户端会连上却显示 0 个 tool。诊断信息一律走 stderr。
 
 Tool 是对已有内核的 1:1 封装（`src/mcp/dispatch.ts` 调 `src/index.ts` 导出的能力），不重写 CDP。
 
@@ -88,7 +90,7 @@ Tool 是对已有内核的 1:1 封装（`src/mcp/dispatch.ts` 调 `src/index.ts`
 
 | Tool | 行为 |
 |---|---|
-| `launch-target` | 包装仓库根 `scripts/launch-*.cmd` + `scripts/targets.json`，返回 **实际** 调试端口。VS Code 目录默认 9244，遇幽灵口会 +1。不要口播「试试 9222」。 |
+| `launch-target` | 按当前平台跑 `scripts/launch-target.mjs` + 读 `scripts/targets.json` 的平台分支，返回 **实际** 调试端口。VS Code 目录默认 9244，遇幽灵口会 +1。不要口播「试试 9222」。软件装在非默认位置时改用 `app.connect` 的 `appPath`。 |
 | `target.stop` | 按该端口停被测进程。 |
 | `workbench.start` / `workbench.stop` | 等价 `npm run ui`，返回打印出来的 URL（占用时可能不是 5173）。已在听则复用；stop 不杀外部实例。 |
 | `app.connect` / `app.disconnect` / `app.list_targets` | CDP 连接、断开、列出外层 page 与嵌套 webview。`connect` 的 port 用 launch-target 的返回值。 |

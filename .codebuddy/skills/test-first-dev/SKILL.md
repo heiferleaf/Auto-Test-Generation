@@ -1,34 +1,44 @@
 ---
 name: test-first-dev
-description: 当你准备开始任何实现、功能开发或缺陷修复（尤其是本项目 Electron 自动化测试平台的代码改动）前，加载本技能以遵循「先写测试方案/测试代码、再实现、以通过测试为完成标准」的工作流。适用于需要新建模块、修改执行器/断言/步骤模型、或判断一个任务是否「算完成」的场景。
-type: skill
+description: 本项目测试先行角色。任何实现、功能开发或缺陷修复动手前/完成后使用。先写测试方案或 test/ 骨架，再实现；禁止为让实现通过而改测试逻辑。固定命令 npm test 与 npm run typecheck。
 ---
 
-# 测试先行开发技能
+# 测试先行
 
-适用于本项目所有实现任务，强制"先测试，后实现"。
+## 纪律
 
-## 何时使用
-- 任何实现/修复任务动手前。
-- 评估一个任务是否"完成"时。
+- 任何实现前先有测试方案（`docs/plan/plan.md`）或 `test/` 骨架。
+- 测试必须贴合真实行为，不要套空模板。
+- 禁止为让实现通过而改断言。只有语法错误或非常明显的测试逻辑错误才能改测试。
+- 未通过不得合并、不得声称完成。
 
-## 步骤
-1. **先定测试**：在 `docs/实施计划.md` 对应阶段补充测试方案，或直接在 `test/` 写测试骨架（可先失败）。
-2. **再写实现**：实现以满足测试为第一目标，反复迭代。
-3. **过测试才算完成**：`npm test` 全绿；未通过不得合并、不得声称完成。
-4. **双角色校验**：完成后交 test 角色（确认测试通过）与 code-review 角色（确认符合约定）。
+## 固定命令
 
-## 测试类型约定
-- 单测：`vitest`（步骤模型、断言引擎、脚本 IO、执行器 mock 驱动）。
-- 集成/端到端：Playwright Test 或自研执行器驱动 **示例 Electron App**（启动时加 `--remote-debugging-port=9222`）。
+```bash
+npm test
+npm test -- test/cdp.test.ts
+npm test -- -t "webview"
+npm run typecheck
+```
 
-## 示例（M1）
-- `test/model.test.ts`：步骤模型与脚本 IO 往返。
-- `test/cdp.test.ts`：mock CDP 行为 + 真实连接冒烟。
-- `test/executor.test.ts` / `test/assert.test.ts`：执行器与断言各分支。
-- `test/cli.test.ts`：全流程跑通与失败路径。
+真机默认 skip：
 
-## 注意
-- 测试代码与实现可在同一 worktree 同一 Agent 完成，但校验角色须独立。
-- 拒绝"只留自然语言日志"式实现；必须有可执行、可断言的测试。
-- **worktree 不自动删除**：实现合并回 master 后保留 worktree 与分支，等用户明确要求才清理（见 `worktree-dev` skill）。
+```bash
+set CODEBUDDY_LIVE=1 && npm test -- test/integration-codebuddy.test.ts
+set WORKBUDDY_LIVE=1 && npm test -- test/integration-workbuddy.test.ts
+set VSCODE_LIVE=1 && npm test -- test/integration-vscode.test.ts
+```
+
+`integration-vscode.test.ts` 尚未落地。先用 `scripts/launch-vscode.cmd` 开 9244，浏览器访问 `http://localhost:9244/json` 验证。
+
+## 工作流
+
+1. 接到任务 → 写/更新测试方案与骨架。
+2. 实现中跑 `npm test` 与 `typecheck`，把失败反馈给实现者。
+3. 完成 → 给出「通过（跑了哪些，是否含真机）」或「不通过（失败用例）」。
+
+## 类型约定
+
+- 单测：vitest（步骤模型、断言、脚本 IO、执行器 mock）。
+- UI 主链路：`npm test -- test/ui-core-e2e.test.ts`（jsdom 跑 `app.boot()` + 模拟 `[data-action]`）。
+- 集成：Playwright CDP 连真实 Electron（须先 launch 脚本开调试端口）。

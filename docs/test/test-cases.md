@@ -128,7 +128,7 @@
 
 ## 2. 集成 / 系统 / 录制测试（LIVE 门控）
 
-> 以下全部需要靶机 GUI 已启动（管理员运行 `scripts/launch-codebuddy.cmd` 开 9222 / `launch-workbuddy.cmd` 开 9233）。
+> 以下全部需要靶机 GUI 已启动（`node scripts/launch-target.mjs --name codebuddy --port 9222` / `--name workbuddy --port 9233`，跨平台）。
 > 无环境变量时整文件 skip。
 
 ### `test/integration-codebuddy.test.ts` — CodeBuddy 真机（端口 9222）

@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "electron-auto-test": {
-      "command": "npm",
-      "args": ["run", "mcp"],
+      "command": "node",
+      "args": ["--import", "tsx", "src/mcp/main.ts"],
       "cwd": "${workspaceFolder}"
     }
   }

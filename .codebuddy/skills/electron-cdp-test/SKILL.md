@@ -1,139 +1,213 @@
 ---
 name: electron-cdp-test
-description: >-
-  通过 MCP 给 Electron 桌面软件生成并回放测试脚本 JSON。调用 launch-target、
-  workbench.start/stop、app.connect、app.list_targets、page.snapshot、
-  page.screenshot、script.open、actions.execute_steps、target.stop。
-  产物是脚本文件，不是一串 page.click。用户要测 VS Code、CodeBuddy、WorkBuddy
-  或其他 Electron，要写或跑中台脚本、扫功能点、处理嵌套页面时使用。
+description: 用 MCP 控制真实的 Electron 桌面软件（VS Code / CodeBuddy / WorkBuddy 等），替它写自动化测试脚本并回放执行，同时引导用户使用网页工作台录制与查看脚本。当用户要测某个桌面软件的功能、要生成或运行测试步骤、要扫描界面上有哪些可操作控件时使用。
 ---
 
-# 测试步骤中台
+# 给 Electron 桌面软件写自动化测试
 
-**产物是 Script JSON**（对象或文件）。MCP 提供观察、会话、回放：先看页面，把 click/fill/waitUntil **写成步骤写进这份 JSON**，再 `script.open` + `actions.execute_steps`。
+你通过 MCP 操控一个**正在真实运行的桌面软件**：查看它界面上有什么、把操作步骤写成脚本、然后跑一遍验证功能是否正常。
 
-`page.click` / `page.fill` / `page.wait` / `page.waitUntil` 是可选的**单步探针**，和脚本步骤是同一套原子，不是第二条产品线。不要连调它们 20 次来代替写脚本。
+**你的产物是一份 Script JSON**——一个描述"点哪里、输入什么、等待什么结果"的结构化文件。
 
-软件或操作还不清楚时，先问：测哪一扇软件？覆盖哪一条操作（例如「发一条聊天」）？会删东西、发到真服务、花真钱 → 先问能不能做。然后进决策树。
+## 你的两个身份
 
-缺参或 `null` 当缺省（`args ?? {}`）。`targetId` 省略或 `null` = 当前页，不要把 `null` 当成 id。端口只用 `launch-target` 的返回值，或用户告诉你的号码。
+1. **执行者**：把用户想测的功能变成高质量的脚本并跑通（下面"三个概念"到"常见坑"讲的就是这个）
+2. **向导**：用户通常不知道这个平台能干什么、需要他提供什么。你要主动引导——
+   告诉他这是什么、确认软件能不能测、问他要可执行文件路径、告诉他还有个网页工作台可以自己录制。
 
-## 决策树
+**这两件事同等重要。** 只顾着生成脚本、不问用户要路径 / 不告诉用户有网页界面，是失职。
+
+👉 **开工前先读 `reference/interaction-playbook.md`**：它按用户可能的每种进入方式（让我生成 / 已有脚本让我打开 / 我想自己录 / 混合）给出了完整的提问剧本。
+
+---
+
+## 三个必须先懂的概念
+
+### 1. 软件内部有多个"页面层"，你要操作的控件可能不在主窗口
+
+Electron 软件常把不同区域（聊天区、侧边栏、设置面板）做成独立的嵌入层。你要点的按钮，很可能**不在主窗口，而在某个嵌入层里**。
+
+所以你不能一上来就找按钮。正确顺序是：**先看软件有哪些层 → 选定目标层 → 再看这一层上有什么控件**。
+
+这不是可选项，是必须的：只查主窗口会漏掉嵌入层里的控件，导致你写的步骤点了个空。
+
+### 2. 你看不见界面，只能靠"快照"来读
+
+作为 Agent 你没有鼠标、看不到画面。你获取界面信息的唯一方式是**快照**——它返回某一层上所有可交互元素的清单，每个元素带 `role`（是什么控件）、`name`（叫什么）、`text`（显示什么文字）。
+
+你据此判断"发送按钮"是哪个元素，再把它写进脚本。
+
+### 3. 测试要验证"操作带来的变化"
+
+测试的目的不是证明"点了几下没报错"，而是验证功能真的生效了。
+
+所以每个操作之后要跟一个断言，且断言的必须是**这个操作产生的新结果**。断言自己刚造成的状态等于没验证（详见下方"三条铁律"）。
+
+---
+
+## 完整流程
+
+### 第 1 步：确认能测，并把软件跑起来连上
+
+**先确认被测对象是 Electron 软件**（本平台靠 Chromium 调试端口工作，非 Chromium 内核的软件不适用）。
+判断方法和怎么问用户，见 `reference/user-guide.md` 第二节。
+
+然后连上，两条路：
+
+```jsonc
+// A. 预置靶机（scripts/targets.json 里有，目前仅 Windows 路径）
+{ "tool": "launch-target", "args": { "name": "vscode" } }   // 或 codebuddy / workbuddy
+→ 返回真实端口，记下来
+{ "tool": "app.connect", "args": { "port": <上一步返回的端口> } }
+
+// B. 用户给可执行文件位置（跨平台，macOS/Linux 走这条）
+{ "tool": "app.connect", "args": { "port": 9244, "appPath": "<用户给的可执行文件路径>" } }
+```
+
+**`appPath` 要的是可执行文件本身**，不是目录：
+Windows 给 `.exe`；macOS 给 `XXX.app/Contents/MacOS/里面的二进制`（`.app` 是文件夹，直接传启动不了）；Linux 给可执行文件路径或命令名。
+
+**端口必须用实际值**。软件启动时若端口被占用会自动换一个（幽灵口 +1），猜 `9222` 会连错。
+
+### 第 2 步：找到目标控件在哪一层、长什么样
 
 ```
-用户任务
-    ├─ 生成并跑一条操作
-    │     待测软件已带调试口在跑？
-    │         ├─ 否 → launch-target → 记下返回的 port → 从零写脚本并回放
-    │         └─ 是 → 问用户端口（禁止猜 9222）→ app.connect({ port }) → 从零写脚本并回放（跳过 launch-target）
-    │
-    ├─ 已有 JSON 打开就跑 → 工作流：已有脚本
-    ├─ 扫功能点 → 工作流：扫功能
-    └─ 人在窗口里录 → 人录制（你不要按录制）
+app.list_targets              // 列出软件里所有页面层，拿到每层的 id
+page.snapshot { "targetId": "<某层 id>" }   // 看这一层上有哪些可交互元素
 ```
 
-## 工作流：从零写脚本并回放
+**逐层快照，直到找到目标控件**。比如"发送"按钮常常在聊天区那个嵌入层，而不在主窗口；主窗口快照里没有它。
 
-何时：要覆盖一条操作，还没有脚本。
+从快照里认控件时，看 `role` 和 `name`：role 说明它是什么（button/textbox），name 是它叫什么（"发送"）。
 
-1. `launch-target` `{ "name": "vscode" }`（`codebuddy` / `workbuddy` 同形）  
-   用返回的 `port`。调不到本工具 → 问用户端口。禁止让用户跑 cmd、打开 `/json`。
-2. `workbench.start` `{}`  
-   记下返回的 `url`。
-3. `app.connect` `{ "port": <返回的 port> }`
-4. **观察**：`app.list_targets` → 对需要的层 `page.snapshot` `{ "targetId": "<id>" }`（必要时 `page.screenshot`）
-5. **写出 Script JSON**（`source`: `"agent"`，每步有 `id`）。嵌套页把该层 `id` 写进步骤的 `target` 字段，不要只 snapshot 外层就编 locator。
-6. `script.open` `{ "script": <Script> }` — 推进**当前**中台会话
-7. `actions.execute_steps` `{ "script": <同一份 Script> }`  
-   失败 → 只改 JSON 里失败那一步，再 `actions.execute_steps`（可带 `fromStepId`）
-8. 收尾：`app.disconnect` `{}` → `target.stop` `{}` → `workbench.stop` `{}`
+### 第 3 步：写出 Script JSON
 
-## 工作流：观察再写步骤
-
-何时：从零生成的第 4–5 步；扫功能时要认控件；某步 locator 不确定。先观察，再把步骤写进 JSON。
-
-1. **列出嵌套页**  
-   `app.list_targets` `{}`  
-   结果：`[{ id, type, title, isMain }]`。`type` 为 `page` 或 `webview`。聊天「发送」往往在 `webview`；只 snapshot 外层 `page` 会点空。
-2. **看控件**  
-   对选中的 id：`page.snapshot` `{ "targetId": "<id>" }`  
-   从节点的 `role` / `name` / `text` 认控件。没有目标 → 换下一个 id 再 snapshot。
-3. **写进 JSON**（同一 `id` 作为该步 `target`）  
-   步骤类型用 `fill` / `click` / `waitUntil`，locator 用 `role`+`name`，不要用 nth css。
-4. **可选探针**（不确定 locator 时用一次，确认后仍写回 JSON）  
-   `page.fill` / `page.click` / `page.waitUntil` 与脚本步骤同形；禁止用它们串成整条测试。
-5. **等到结果**写进 JSON 的 `waitUntil` 步：`kind` 用 `textContains`，`value` 必须是弹层/菜单上那句独特的话。禁止用刚填进输入框的原文。不要只调 `page.wait` 干等。
-
-人在软件里点不用选层，点击落到鼠标底下那一层。你没有鼠标：必须先 `app.list_targets`，再对那个 id 做 snapshot，并把 id 写进步骤 `target`。顶栏网页下拉不是给人录的。
-
-## 工作流：已有脚本
-
-何时：用户已有 Script JSON，要打开并跑。
-
-1. 未连接：走从零的 1–3 步（`launch-target` → `workbench.start` → `app.connect`）
-2. 校验：`script.import` `{ "json": "<字符串>" }` 或 `{ "path": "<文件>" }`  
-   中台要显示这份稿：`script.open` `{ "script": <Script 或 JSON 字符串> }`（导入按钮仍在中台，你也可以 `script.open`）
-3. `actions.execute_steps` `{ "script": <Script> }`  
-   失败只修 JSON 那一步再 execute
-
-## 工作流：扫功能
-
-何时：用户说扫一遍功能、扫控件、列能点的入口。
-
-`app.list_targets` → 各层 `page.snapshot` → 把值得覆盖的入口**写成脚本步骤**（或如实告诉用户看见了哪些控件）。点遍可见控件 ≠ 全部网络请求。覆盖到哪一层、哪几个入口，如实告诉用户。没有「扫完全部网络」这种工具。不要对每个入口调一次 `page.click` 当作扫描。
-
-## 人录制
-
-告诉用户：在**已经连上的真实软件窗口**里点，中台会录成步骤。你不要替他按「开始录制」。顶栏网页下拉不是给人录的。
-
-默认不走录制工具。只有用户明确要你控录制内核时才用：`record.start` `{}` →（人点完）`record.stop` `{}` → `record.get_steps` `{}`。需要中台显示时再 `script.open`。
-
-## Don't / Do
-
-| Don't | Do |
-|---|---|
-| 连调 `page.click` / `page.fill` 当测试产物 | 写出 Script JSON → `script.open` → `actions.execute_steps` |
-| 猜端口 9222 | 用 `launch-target` 返回的 `port`，否则问用户 |
-| 让用户跑 cmd / 打开 `/json` | 你自己调 `launch-target` / `workbench.start` |
-| 跳过 `app.list_targets` 只 snapshot 外层 | 先 list，再 snapshot；id 写进步骤 `target` |
-| `{ "css": ".monaco-button:nth-of-type(3)" }` | `{ "role": "button", "name": "发送" }` |
-| 填「你好」后 `waitUntil` 含文字「你好」 | 等到弹层上那句独特的话；`kind` 用 `textContains` |
-| 点中台网页上的预览 | 对已 `app.connect` 的真实窗口写步骤并 `execute_steps` |
-| 编按键、滚动、系统菜单、纯画布按钮 | 能力外先说明点不到，等用户确认再改路 |
-
-## 三步脚本示例
+把"点什么、填什么、等什么结果"写成结构化步骤。示例：
 
 ```json
 {
   "app": { "name": "VS Code" },
   "steps": [
-    {
-      "id": "s1",
-      "type": "fill",
-      "source": "agent",
-      "target": "<list_targets 的 id>",
+    { "id": "s1", "type": "fill", "source": "agent", "target": "<第2步拿到的层 id>",
       "locator": { "role": "textbox", "name": "消息" },
-      "params": { "value": "你好" }
-    },
-    {
-      "id": "s2",
-      "type": "click",
-      "source": "agent",
-      "target": "<同一 id>",
-      "locator": { "role": "button", "name": "发送" }
-    },
-    {
-      "id": "s3",
-      "type": "waitUntil",
-      "source": "agent",
-      "target": "<同一 id>",
-      "params": {
-        "timeoutMs": 5000,
-        "assertion": { "kind": "textContains", "value": "是否覆盖" }
-      }
-    }
+      "params": { "value": "你好" } },
+    { "id": "s2", "type": "click", "source": "agent", "target": "<同一 id>",
+      "locator": { "role": "button", "name": "发送" } },
+    { "id": "s3", "type": "waitUntil", "source": "agent", "target": "<同一 id>",
+      "params": { "timeoutMs": 5000,
+        "assertion": { "kind": "textContains", "value": "<发送后预期出现的独特文字>" } } }
   ]
 }
 ```
 
-步骤上的 `target` 字段执行器已遵守，不要改 Script schema。
+**每步都要写 `target`**（第 2 步拿到的层 id），否则软件不知道去哪一层找这个元素。
+**每步都要有 `id`**，用于定位失败步骤和从某步续跑。
+
+### 第 4 步：先落盘，再跑
+
+**顺序不能乱**：先存文件（保证不丢），再看网页，最后执行。
+
+**4a. 存盘（必做，路径先问用户）**
+
+```
+script.export { "script": <Script 对象> }   →  { json: "..." }
+```
+
+把 `json` 写到**用户指定的路径**。不要自己挑路径写到项目目录里。
+
+**4b. 二选一：谁来执行**
+
+| 目的 | 用什么 |
+|---|---|
+| 让人在网页工作台里看到脚本、逐步高亮截图、自己点运行 | `workbench.start` → `script.open` |
+| 你自己直接执行、拿结果 | `actions.execute_steps` |
+
+执行是**真操作**（会真的发消息、真的点提交）。**执行前必须征得用户确认**，并提醒他先保存软件里未保存的内容。
+
+失败时返回 `failedStepId`，改 JSON 里那一步再跑；可用 `fromStepId` 从某步继续，不必重头。
+
+### 第 5 步：收尾
+
+`app.disconnect` → `target.stop`（关掉被测软件）→ `workbench.stop`（关掉工作台）
+
+如果开了工作台给用户看，把 URL 给他并提醒：**脚本只存在网页内存里，刷新会丢，要留就点「导出」**。
+
+---
+
+## 写好脚本的三条铁律
+
+### 铁律 1：断言必须验证"新结果"，不能验证自己刚做的事
+
+这是最容易犯、也最致命的错——断言恒真，测试永远通过，但什么也没验证。
+
+| 无效 ❌ | 为什么无效 | 有效 ✅ |
+|---|---|---|
+| 填了"你好" → 断言"页面出现你好" | 字是你刚打进去的，必然存在 | 点发送后 → 断言"出现对方的回复" |
+| 点开菜单 → 断言"菜单项存在" | 菜单项本来就在 | 断言"子面板展开且含某选项" |
+
+**判断方法**：把这个断言单独放在操作之前，如果它也能通过——那它就是恒真的，无效。
+
+### 铁律 2：用"等条件"而不是"等时长"
+
+- `waitUntil`（等某个条件成立，超时算失败）——**主要手段**
+- `wait`（固定等 N 毫秒）——只在确实需要空等时用，它不验证任何东西
+
+### 铁律 3：用语义定位，不用位置定位
+
+```json
+{ "role": "button", "name": "发送" }               ✅ 改版也不容易断
+{ "css": ".btn:nth-of-type(3)" }                    ❌ 界面一调整就失效
+```
+
+---
+
+## 常见坑
+
+| 坑 | 后果 | 怎么避免 |
+|---|---|---|
+| 只快照主窗口，不查嵌入层 | 目标控件找不到，步骤点空 | 必须 `list_targets` 后逐层快照 |
+| 猜端口 9222 | 连错或连不上 | 只用 `launch-target` 返回值 |
+| 把单步探针当测试主体 | 点完即弃，无法复跑和编辑 | 探针只用来验证不确定的定位，最终写进 JSON |
+| 对控件逐个点击当"扫描" | 真触发会发消息/删数据/花钱，且扫不全 | 用快照枚举，需要时再写成步骤 |
+| 拿快照里的位置顺序当选择器 | 改版即断 | 用 role + name |
+
+---
+
+## 引导用户（向导身份）
+
+用户往往不知道这个平台能干什么、需要他提供什么。下面这些**主动说，不要等用户问**，
+完整话术见 `reference/user-guide.md`：
+
+| 时机 | 要说清什么 |
+|---|---|
+| 用户第一次提测试需求 | 这是什么：连上软件 → 读界面 → 写脚本 → 真跑验证。同时说清能力边界 |
+| 拿到软件名之后 | 确认它是 Electron 软件（问"按 F12 会弹开发者工具吗"，别问"是 Electron 吗"） |
+| 确认可测之后 | 问他要可执行文件位置；**macOS 要 `.app/Contents/MacOS/` 里的二进制，不是 `.app` 目录** |
+| 生成脚本之前 | **必须先问脚本存哪个路径** |
+| 生成脚本之后 | 告诉他有网页工作台可以看流图和高亮截图，也能自己录制 |
+| 用户想自己录 | 介绍录制流程，并强调"光有操作不叫测试，要补断言"、"刷新会丢，记得导出" |
+| 执行之前 | **必须确认**：脚本会真操作软件，提醒他先保存 |
+
+**三个路径一律问用户，永不猜测**：软件可执行文件在哪、脚本存哪、已有脚本在哪。
+
+---
+
+## 能力边界
+
+**做不到**：扫描网络请求与快捷键；操作系统原生控件（文件框、托盘、系统菜单）；滚动、按键序列、纯画布按钮；自动修复失败脚本（你自己改 JSON 重跑）。做不到时如实说明，别编。
+
+**未封装**：`script.update_step`（改步骤请走工作台，或导出改完再 `script.open`）。
+
+**网页工作台上没有的功能**：步骤列表面板（CFG 流图是唯一主视图）、"从此处运行"按钮、"单步运行"按钮、端口输入框与连接按钮（页面加载即自动连接，端口走 `?cdp=<端口>`）。
+"从某步续跑"的能力只通过 MCP 的 `fromStepId` 提供。用户问起时如实说明，别让他白找。
+
+---
+
+## 详细参考
+
+需要时再读，不必预先加载：
+
+- `reference/interaction-playbook.md` — **开工前先读**。用户可能怎么进来、每种方式每一步该问什么（含"脚本存哪"等必问项）
+- `reference/user-guide.md` — 怎么向用户介绍这个平台、怎么引导他提供 exe 路径（含 macOS 适配）、网页工作台与录制功能怎么讲
+- `reference/tool-reference.md` — 全部 19 个 Tool 的完整说明：每个解决什么问题、参数、返回值
+- `reference/script-json.md` — Script JSON 完整结构、控制流组（if/while）、断言类型、截图字段

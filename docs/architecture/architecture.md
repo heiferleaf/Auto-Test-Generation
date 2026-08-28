@@ -221,7 +221,7 @@ executor.runScript(adapter, script, onStep, fromStepId?)   ← 进度在 Node �
 
 **端口**：统一可配置，默认 9222；与 HTTP 代理无冲突（本地入站 vs 出站代理）。
 
-**多应用靶机（方案 C 通用性）**：CDP 适配层以 `webSocketDebuggerUrl` 为唯一入口，`WebviewCdpTarget` 不绑定任何具体应用。因此 CodeBuddy CN 与 WorkBuddy 等 Electron 应用共用同一套 Target 抽象，仅需各自一份靶机配置（端口 + 启动脚本），无需新增 Target 类。靶机清单集中维护于 `scripts/targets.json`，启动脚本（如 `scripts/launch-workbuddy.cmd`）负责以 `--remote-debugging-port` 拉起应用并自检 exe 存在。
+**多应用靶机（方案 C 通用性）**：CDP 适配层以 `webSocketDebuggerUrl` 为唯一入口，`WebviewCdpTarget` 不绑定任何具体应用。因此 CodeBuddy CN 与 WorkBuddy 等 Electron 应用共用同一套 Target 抽象，仅需各自一份靶机配置，无需新增 Target 类。靶机清单集中维护于 `scripts/targets.json`，按 win32 / darwin / linux 给平台分支（`exe` 为 `auto-detect` 时由启动脚本到各平台默认安装位置探测）。启动脚本统一是 `scripts/launch-target.mjs`（Node 实现，跨平台），负责以 `--remote-debugging-port` 拉起应用、隔离 `user-data-dir`、跳过幽灵口、自检 exe 存在，并在 stdout 打印 `[ok] CDP is live: http://localhost:<port>/json` 供 MCP 解析真实端口。
 
 ### B. Agent 与 Skill
 
@@ -233,27 +233,29 @@ executor.runScript(adapter, script, onStep, fromStepId?)   ← 进度在 Node �
 
 ### C. MCP Server
 
-**自研 stdio MCP**（`@modelcontextprotocol/sdk`），入口 `npm run mcp` → `src/mcp/main.ts`。在**仓库根**跑，不依赖 git worktree。Cursor 默认走 stdio；配置见仓库里的 `.cursor/mcp.json`。
+**自研 stdio MCP**（`@modelcontextprotocol/sdk`），入口 `npm run mcp` → `src/mcp/main.ts`。在**仓库根**跑，不依赖 git worktree。默认走 stdio；配置见仓库里的 `.codebuddy/mcp.json`。
 
 **本机怎么开**
 
-1. 用 Cursor 打开本仓库根目录（克隆下来的项目文件夹本身，不要打开 `.cursor/worktree/...`）。
+1. 用编辑器打开本仓库根目录（克隆下来的项目文件夹本身，不要打开 `.codebuddy/worktree/...`）。
 2. Node 18+，在仓库根执行 `npm install`。
-3. 仓库已带 `.cursor/mcp.json`（cwd 是当前打开的文件夹）：
+3. 仓库已带 `.codebuddy/mcp.json`（cwd 是当前打开的文件夹）。**`--silent` 不能省**：
 
 ```json
 {
   "mcpServers": {
     "electron-auto-test": {
       "command": "npm",
-      "args": ["run", "mcp"],
+      "args": ["run", "--silent", "mcp"],
       "cwd": "${workspaceFolder}"
     }
   }
 }
 ```
 
-4. Cursor 设置里打开 MCP，应看到 `electron-auto-test`。改完配置后重载窗口。Skill 在 `.cursor/skills/electron-cdp-test`，打开本仓库后会自动带上，不用再拷一份。
+省掉 `--silent` 时 npm 会往 stdout 打 4 行横幅，`npm run mcp` 的 stdout 从 2 行 JSON 变成 6 行（4 行横幅 + 2 行 JSON），客户端协议解析失败，表现为「连上但 0 个 tool」。根本原因见 §2.1 的 stdout 约定。
+
+4. 编辑器设置里打开 MCP，应看到 `electron-auto-test`。改完配置后重载窗口。Skill 在 `.codebuddy/skills/electron-cdp-test`，打开本仓库后会自动带上，不用再拷一份。
 
 也可以在仓库根直接跑 `npm run mcp` 做手动检查（stdio 服务，终端里不会像网页那样有界面）。
 
@@ -269,7 +271,7 @@ Tool 是对**已有内核**的 1:1 封装（`src/index.ts` 统一 export），�
 
 **会话（本机拉起，不要让用户自己敲 cmd）**
 
-- `launch-target`：包装仓库根下的 `scripts/launch-*.cmd` + `scripts/targets.json`，返回**实际**调试端口（VS Code 目录默认 9244，脚本遇幽灵口会 +1）。不要口播「试试 9222」。
+- `launch-target`：按 `process.platform` 取 `scripts/targets.json` 的平台分支（win32 / darwin / linux），spawn `node scripts/launch-target.mjs`，返回**实际**调试端口（VS Code 目录默认 9244，脚本遇幽灵口会 +1）。不要口播「试试 9222」。启动脚本统一为 Node 实现，不再有 Windows 专用的 `.cmd`；exe 装在非默认位置时走 `app.connect` 的 `appPath`。
 - `target.stop`：按该端口停被测进程。
 - `workbench.start` / `workbench.stop`：等价 `npm run ui`，返回打印出来的 URL（占用时可能不是 5173）。已在听则复用、stop 不杀外部实例。
 - `script.open`：把 Script JSON 推进**当前工作台会话**（桥 `loadScript` + WS RPC `load-script`）。`script.import`（文件解析）与工作台「导入」按钮仍保留。

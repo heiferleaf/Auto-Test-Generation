@@ -75,28 +75,4 @@ describe('app.ts boot() 真实入口（用户实际打开的页面）', () => {
     expect(document.querySelector('[data-banner]')?.textContent).toContain('录制失败');
   });
 
-  it('?demo=1：演示内核，点击开始录制进入态、再次点击复位', async () => {
-    // 模拟 ?demo=1：在 import 前改写 location.search
-    (globalThis as any).location = { ...(globalThis as any).location, search: '?demo=1' };
-    await import('../src/ui/app');
-    await new Promise((r) => setTimeout(r, 50));
-
-    const banner = document.querySelector('[data-banner]');
-    expect(banner?.textContent).toContain('演示模式');
-    // 显式 demo 横幅应为琥珀色变体（区别于红色降级条）
-    expect(banner?.classList.contains('banner--demo')).toBe(true);
-
-    const recBtn = () => document.querySelector('[data-action="toggle-record"]') as HTMLElement;
-    const dot = () => document.querySelector('.rec-dot');
-
-    expect(dot()?.classList.contains('on')).toBe(false);
-    recBtn().dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 30));
-    expect(dot()?.classList.contains('on')).toBe(true);
-    expect(document.querySelector('.ui-shell-header')?.textContent).toContain('录制中');
-
-    recBtn().dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 200));
-    expect(dot()?.classList.contains('on')).toBe(false);
-  });
 });

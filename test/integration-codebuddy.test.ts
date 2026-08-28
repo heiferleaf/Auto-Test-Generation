@@ -2,7 +2,7 @@
 // 严格遵守：本文件与"预期结果说明文件"先于实现存在（测试先行）。
 //
 // 运行方式：
-//   1) 先验证调试端口：双击 scripts/launch-codebuddy.cmd，
+//   1) 先验证调试端口：node scripts/launch-target.mjs --name codebuddy --port 9222
 //      浏览器打开 http://localhost:9222/json 看到目标列表即成功。
 //   2) 启用真机： set CODEBUDDY_LIVE=1 后 npx vitest run test/integration-codebuddy.test.ts
 //   默认（无 CODEBUDDY_LIVE）真机用例自动 skip，但测试结构与预期契约已落地。

@@ -31,7 +31,7 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: 'launch-target',
     description:
-      '用现有 scripts/launch-*.cmd 拉起被测 Electron（vscode/codebuddy/workbuddy），返回实际调试端口。不要假设 9222。',
+      '按当前平台拉起被测 Electron（vscode/codebuddy/workbuddy），返回实际调试端口。不要假设 9222。exe 装在非默认位置时改用 app.connect 的 appPath。',
     inputSchema: obj({
       name: { type: 'string', description: 'targets.json 中的 name：vscode / codebuddy / workbuddy' },
       port: { type: 'number', description: '覆盖启动脚本端口；省略则用该靶机目录默认值' },

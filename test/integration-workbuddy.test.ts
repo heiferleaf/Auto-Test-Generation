@@ -2,7 +2,7 @@
 // 测试先行：本文件与"预期结果说明文件"先于/独立于实现存在。
 //
 // 运行方式：
-//   1) 先启动 WorkBuddy 调试端口：双击 scripts/launch-workbuddy.cmd，
+//   1) 先启动 WorkBuddy 调试端口：node scripts/launch-target.mjs --name workbuddy --port 9233
 //      浏览器打开 http://localhost:9233/json 看到目标列表即成功。
 //   2) 启用真机： set WORKBUDDY_LIVE=1 后 npx vitest run test/integration-workbuddy.test.ts
 // 默认（无 WORKBUDDY_LIVE）真机用例自动 skip，但测试结构与预期契约已落地。

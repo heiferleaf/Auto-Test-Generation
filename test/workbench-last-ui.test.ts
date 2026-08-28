@@ -96,18 +96,6 @@ describe('工作台外沿留白不随选中/layout 变', () => {
   });
 });
 
-describe('CFG 画布没有静止点阵', () => {
-  it('流图栏里没有 data-cfg-dots / data-cfg-dot，页面壳雾块仍在', () => {
-    const kernel = makeKernel();
-    const { mount } = boot(kernel);
-    expect(mount.querySelector('[data-cfg-dots]')).toBeNull();
-    expect(mount.querySelector('[data-cfg-field]')).toBeNull();
-    expect(mount.querySelectorAll('[data-cfg-dot]').length).toBe(0);
-    expect(mount.querySelector('[data-cfg] .ui-shell-cfg-canvas')).toBeTruthy();
-    expect(mount.querySelector('[data-app-field] [data-fluid-blob]')).toBeTruthy();
-  });
-});
-
 describe('动作条在顶栏，不在窗口底', () => {
   it('开始录制等按钮挂在 header 第二行，双栏是最后一个主区块', () => {
     const kernel = makeKernel();

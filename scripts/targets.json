@@ -1,26 +1,41 @@
 {
+  "$comment": [
+    "靶机目录。exe 不再写死个人目录（C:\\Users\\<某人>\\... 换台机器就废），",
+    "改为按平台给候选：写 auto-detect 表示由 scripts/launch-target.mjs 按平台默认安装位置探测。",
+    "真机上软件装在非默认位置时，由 Agent 经 app.connect 的 appPath 直接给路径。",
+    "launchScript 统一为 Node 脚本，Windows/macOS/Linux 走同一份代码。"
+  ],
   "targets": [
     {
       "name": "codebuddy",
       "label": "CodeBuddy CN",
-      "exe": "C:\\Users\\harveyhfye\\AppData\\Local\\Programs\\CodeBuddy CN\\CodeBuddy CN.exe",
       "port": 9222,
-      "launchScript": "scripts/launch-codebuddy.cmd"
+      "platforms": {
+        "win32": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" },
+        "darwin": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" },
+        "linux": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" }
+      }
     },
     {
       "name": "workbuddy",
       "label": "WorkBuddy",
-      "exe": "C:\\Users\\harveyhfye\\AppData\\Local\\Programs\\WorkBuddy\\WorkBuddy.exe",
       "port": 9233,
-      "launchScript": "scripts/launch-workbuddy.cmd"
+      "platforms": {
+        "win32": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" },
+        "darwin": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" },
+        "linux": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" }
+      }
     },
     {
       "name": "vscode",
       "label": "Visual Studio Code",
-      "exe": "auto-detect",
       "port": 9244,
-      "launchScript": "scripts/launch-vscode.cmd",
-      "liveEnv": "VSCODE_LIVE"
+      "liveEnv": "VSCODE_LIVE",
+      "platforms": {
+        "win32": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" },
+        "darwin": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" },
+        "linux": { "exe": "auto-detect", "launchScript": "scripts/launch-target.mjs" }
+      }
     }
   ]
 }
