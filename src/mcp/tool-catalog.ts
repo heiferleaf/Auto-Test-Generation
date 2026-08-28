@@ -1,6 +1,8 @@
 // MCP Tool 注册表：名称与 design.md §6 / architecture §3-C 对齐。
 // 描述写行为（模型怎么调），不写需求编号。
 
+import { STEP_TYPE_LIST } from '../script/io';
+
 export type JsonSchema = {
   type: 'object';
   properties?: Record<string, unknown>;
@@ -26,6 +28,21 @@ const locatorProp = {
   description: '语义化 locator（role/name/text/testId/css/xpath）',
   additionalProperties: true,
 };
+
+// STEP_TYPE_LIST 从 script/io 复用（那里由 STEP_TYPES 生成）：
+// 全仓只有一处 join，描述与导入期校验不可能漂移。禁止在此手写字面量数组。
+
+/**
+ * 所有接受 Script JSON 的工具共用的一段约束说明。
+ *
+ * 为何要明说"不是 Playwright"：Agent 的步骤类型来自 Playwright 训练数据，
+ * 会写 press/type/dblclick 这类方法名。过去描述里没列合法值，只能靠猜，
+ * 而导入期又不校验，于是 script.import 一路绿灯、到 actions.execute_steps 才炸。
+ */
+const SCRIPT_JSON_RULES =
+  `步骤 type 是封闭集合，只接受: ${STEP_TYPE_LIST}；不在列表内的一律在导入期拒绝。`
+  + `这是本平台自有的 Script JSON 格式，不是 Playwright API —— 不要写 press/type/dblclick/check/uncheck/tap 这类 Playwright 方法名。`
+  + `键盘按键用 eval，输入值用 fill，勾选/双击/轻点用 click，下拉用 select，等待用 wait/waitUntil。`;
 
 export const TOOL_DEFS: ToolDef[] = [
   {
@@ -143,7 +160,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'actions.execute_steps',
-    description: '执行整份 Script（内核 runCli）。步骤已有 target 字段会被执行器遵守。',
+    description: '执行整份 Script（内核 runCli）。步骤已有 target 字段会被执行器遵守。' + SCRIPT_JSON_RULES,
     inputSchema: obj({
       script: { description: 'Script 对象或 JSON 字符串' },
       fromStepId: { type: ['string', 'null'] },
@@ -151,7 +168,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'script.import',
-    description: '校验并解析 Script JSON（文件路径或字符串）。不推进工作台；推进用 script.open。',
+    description: '校验并解析 Script JSON（文件路径或字符串）。不推进工作台；推进用 script.open。' + SCRIPT_JSON_RULES,
     inputSchema: obj({
       json: { type: 'string' },
       path: { type: 'string' },
@@ -159,7 +176,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'script.export',
-    description: '把 Script 对象序列化为 JSON 字符串。',
+    description: '把 Script 对象序列化为 JSON 字符串。' + SCRIPT_JSON_RULES,
     inputSchema: obj({
       script: { description: 'Script 对象' },
     }),
@@ -167,7 +184,8 @@ export const TOOL_DEFS: ToolDef[] = [
   {
     name: 'script.open',
     description:
-      '把 Script JSON 推进当前工作台会话（桥 loadScript + WS 广播 load-script）。不是文件导入，也不替代 UI 导入按钮。',
+      '把 Script JSON 推进当前工作台会话（桥 loadScript + WS 广播 load-script）。不是文件导入，也不替代 UI 导入按钮。'
+      + SCRIPT_JSON_RULES,
     inputSchema: obj({
       script: { description: 'Script 对象或 JSON 字符串' },
     }),
