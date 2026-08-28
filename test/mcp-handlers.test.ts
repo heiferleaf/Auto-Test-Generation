@@ -28,6 +28,7 @@ type StubAdapter = CdpAdapter & {
   screenshot: (opts?: unknown) => Promise<Buffer>;
   startRecording: () => void;
   stopRecording: () => Promise<InteractionEvent[]>;
+  pageText: (selector?: string) => Promise<string | null>;
 };
 
 function callsOf(deps: McpDeps): string[] {
@@ -57,6 +58,7 @@ function stubAdapter(over: Partial<StubAdapter> = {}): StubAdapter {
       return [{ role: 'button', name: 'Send', text: 'Send' }];
     },
     async query() { return { hit: true }; },
+    async pageText() { calls.push('pageText'); return null; },
     async refreshTargets() { calls.push('refresh'); return targets; },
     async screenshot() { return Buffer.from('png'); },
     startRecording() { calls.push('rec-start'); },

@@ -196,6 +196,12 @@ function windowsCandidates(name) {
     ],
     codebuddy: [join(local, 'Programs', 'CodeBuddy CN', 'CodeBuddy CN.exe')],
     workbuddy: [join(local, 'Programs', 'WorkBuddy', 'WorkBuddy.exe')],
+    // Chrome 走系统目录而非用户目录，故 ProgramFiles 与 ProgramFiles(x86) 都要试。
+    chrome: [
+      join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(process.env['ProgramFiles(x86)'] ?? pf, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(local, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    ],
   };
   return map[name] ?? [];
 }
@@ -208,6 +214,10 @@ function macCandidates(name) {
     ],
     codebuddy: ['/Applications/CodeBuddy CN.app', join(homedir(), 'Applications', 'CodeBuddy CN.app')],
     workbuddy: ['/Applications/WorkBuddy.app', join(homedir(), 'Applications', 'WorkBuddy.app')],
+    chrome: [
+      '/Applications/Google Chrome.app',
+      join(homedir(), 'Applications', 'Google Chrome.app'),
+    ],
   };
   return map[name] ?? [];
 }
@@ -217,6 +227,14 @@ function linuxCandidates(name) {
     vscode: ['/usr/bin/code', '/usr/share/code/code', '/snap/bin/code'],
     codebuddy: ['/usr/bin/codebuddy', '/opt/CodeBuddy CN/codebuddy'],
     workbuddy: ['/usr/bin/workbuddy', '/opt/WorkBuddy/workbuddy'],
+    // 发行版打包名不统一：google-chrome / google-chrome-stable / chromium 都要试。
+    chrome: [
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/snap/bin/chromium',
+    ],
   };
   return map[name] ?? [];
 }

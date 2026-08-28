@@ -112,6 +112,64 @@ describe('WebviewCdpTarget（方案 C 核心）', () => {
       expect(insert.params.text).toBe('你好');
     });
   });
+
+  // pageText 是断言兜底的落点，webview 路径最容易出问题：
+  // 内层 context 可能尚未就绪（真机上 WEBVIEW_NO_CONTEXT），且 innerText 在
+  // 未完成布局的文档上会返回空。取不到必须安静返回 null 交上层降级，不能抛。
+  describe('WebviewCdpTarget.pageText（整页文本兜底）', () => {
+    const withCtx = (handler: (msg: any) => any) => {
+      const r = makeTargetWithMock(handler);
+      r.ws.push({ method: 'Runtime.executionContextCreated', params: { context: { id: 3, auxData: { isDefault: false } } } });
+      return r;
+    };
+
+    it('返回内层 context 的整页文本（纯 div 文字也拿得到）', async () => {
+      let ctxId: number | undefined;
+      const { t } = withCtx((msg) => {
+        if (msg.method === 'Runtime.evaluate') {
+          ctxId = msg.params.contextId;
+          return { id: msg.id, result: { result: { type: 'string', value: '保存成功，共 3 条' } } };
+        }
+        return { id: msg.id, result: {} };
+      });
+      await expect(t.pageText()).resolves.toBe('保存成功，共 3 条');
+      expect(ctxId).toBe(3);
+    });
+
+    it('带 selector 时取子树文本，选择器被正确注入表达式', async () => {
+      let expr = '';
+      const { t } = withCtx((msg) => {
+        if (msg.method === 'Runtime.evaluate') {
+          expr = msg.params.expression;
+          return { id: msg.id, result: { result: { type: 'string', value: '搜索完成' } } };
+        }
+        return { id: msg.id, result: {} };
+      });
+      await expect(t.pageText('#result')).resolves.toBe('搜索完成');
+      expect(expr).toContain('"#result"');
+      expect(expr).toContain('querySelector');
+    });
+
+    it('evaluate 抛错（内层 context 未就绪）时返回 null，不把异常抛给断言层', async () => {
+      const { t } = withCtx((msg) => {
+        if (msg.method === 'Runtime.evaluate') {
+          return { id: msg.id, error: { message: 'Cannot find context' } };
+        }
+        return { id: msg.id, result: {} };
+      });
+      await expect(t.pageText()).resolves.toBeNull();
+    });
+
+    it('页面返回非字符串时不崩，统一转字符串', async () => {
+      const { t } = withCtx((msg) => {
+        if (msg.method === 'Runtime.evaluate') {
+          return { id: msg.id, result: { result: { type: 'number', value: 42 } } };
+        }
+        return { id: msg.id, result: {} };
+      });
+      await expect(t.pageText()).resolves.toBe('42');
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

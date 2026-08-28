@@ -218,6 +218,7 @@ describe('选择/断言/循环可执行', () => {
       async eval() { return true; },
       async snapshot() { return []; },
       async query() { return { visible: true, exists: true, text: 'ok' }; },
+      async pageText() { return null; },
     } as unknown as CdpAdapter;
 
     const script: Script = {

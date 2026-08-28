@@ -12,6 +12,7 @@ function stubAdapter(over: Partial<CdpAdapter> = {}): CdpAdapter {
     selectTarget() {}, async click() {}, async fill() {}, async select() {},
     async hover() {}, async wait() {}, async eval() { return null; },
     async snapshot() { return []; }, async query() { return null; },
+    async pageText() { return null; },
     ...over,
   } as CdpAdapter;
 }

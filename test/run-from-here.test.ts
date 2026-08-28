@@ -23,6 +23,7 @@ function makeMockAdapter(): CdpAdapter & { calls: string[] } {
     async eval(_c) { return null; },
     async snapshot() { return []; },
     async query(_l) { return null; },
+    async pageText() { return null; },
   };
 }
 

@@ -14,6 +14,7 @@ function stubAdapter(opts: { failAt?: string } = {}): CdpAdapter {
     async click() { if (opts.failAt === 'click') throw new Error('element not found'); },
     async fill() {}, async select() {}, async hover() {}, async wait() {},
     async eval() { return null; }, async snapshot() { return []; }, async query() { return null; },
+    async pageText() { return null; },
   } as CdpAdapter;
 }
 

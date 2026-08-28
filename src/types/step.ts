@@ -53,8 +53,9 @@ export type AssertionKind = typeof ASSERTION_KINDS[number];
 
 export type Assertion = {
   kind: AssertionKind;
-  locator?: Locator;   // exists/visible 必填；textContains 可选（缺省=整页文本，执行器搜 snapshot）
-  /** textContains/titleIs/urlMatches/expr 用；visionPrompt 用它承载提示词（决策 2）。 */
+  // exists/visible 必填；textContains 可选（缺省=整页文本；先搜快照控件，未命中回落到整页）
+  locator?: Locator;
+  /** textContains/titleIs/urlMatches/expr 用；visionPrompt 用它承载提示词。 */
   value?: string;
   /** 检测前等待毫秒数（供 Agent 推理/异步渲染留时间，如"等待 N 秒后检测元素值"）。 */
   waitMs?: number;

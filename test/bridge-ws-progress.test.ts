@@ -15,6 +15,8 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { WebSocket } from 'ws';
 import { attachKernelBridge, type BridgeAdapter } from '../src/ui/bridge-server';
+import { WsKernel } from '../src/ui/ws-kernel';
+import { runAssertion } from '../src/executor/assert';
 import type { CdpAdapter } from '../src/cdp/adapter';
 import type { Script, Step } from '../src/types/step';
 import { SCRIPT_SCHEMA } from '../src/types/step';
@@ -46,6 +48,8 @@ function makeBridgeStubAdapter(failOnName?: string): StubAdapter {
     eval: vi.fn(async () => undefined),
     snapshot: vi.fn(async () => []),
     query: vi.fn(async () => undefined),
+    // 整页文本兜底。记录调用参数，供 WS 边界用例断言 selector 是否跨桥丢失。
+    pageText: vi.fn(async (_selector?: string) => '整页文本'),
     screenshot: vi.fn(async () => Buffer.from('png')),
     locateVisual: vi.fn(async () => ({
       x: 1, y: 2, width: 3, height: 4, visible: true, inViewport: true,
@@ -149,8 +153,26 @@ class TestClient {
 
 let harness: Harness | undefined;
 let client: TestClient | undefined;
+/** 本文件里额外开出的 WsKernel 底层 ws 句柄，用例结束统一关，避免 vitest 挂住。 */
+let kernelSockets: WebSocket[] = [];
+
+/**
+ * 用真实 WsKernel 建连，并返回关闭它底层 ws 的方法。
+ * WsKernel 本身不暴露 close（浏览器侧单例，随页面生命周期走），
+ * 故测试侧自己记住句柄——不为了测试给生产类加方法。
+ */
+function openKernel(url: string): { kernel: WsKernel; close: () => void } {
+  const kernel = new WsKernel(url);
+  const ws = (kernel as unknown as { ws: WebSocket }).ws;
+  kernelSockets.push(ws);
+  return { kernel, close: () => { try { ws.close(); } catch { /* 已关闭 */ } } };
+}
 
 afterEach(async () => {
+  for (const ws of kernelSockets) {
+    try { ws.close(); } catch { /* 已关闭 */ }
+  }
+  kernelSockets = [];
   client?.close();
   client = undefined;
   await harness?.close();
@@ -199,6 +221,62 @@ describe('step-progress 经真实 WebSocket 端到端传输', () => {
     await client.call('playback', scriptOf([loop]));
 
     expect(client.progress()).toEqual(['in:running', 'in:pass', 'in:running', 'in:pass']);
+  });
+
+  // 新增的 pageText 是断言兜底的唯一入口，浏览器侧经 WsKernel → WS → 桥端 → adapter 四跳。
+  // Mock 单测只覆盖首尾（assert.test.ts 直接 stub 掉 adapter），本用例覆盖中间那两跳。
+  // 风险点：JSON 会把 undefined 序列化成 null，而桥端 sanitizeArgs 又会把 null 还原成
+  // undefined——若 WsKernel 无参时仍传 [undefined]，到了 adapter 侧 selector 就不再是
+  // undefined，子树限定与整页查询的区分会被这条链路悄悄吃掉。
+  it('pageText 经真实 WS 往返：无参时不带 null 参数，有参时子树限定传到位', async () => {
+    const adapter = makeBridgeStubAdapter();
+    harness = await openHarness(adapter);
+    client = await TestClient.connect(harness.url);
+
+    // 走真实 WsKernel（浏览器侧实现），不是再造一个 mock 客户端。
+    const { kernel, close } = openKernel(harness.url);
+
+    await expect(kernel.pageText()).resolves.toBe('整页文本');
+    // 桥端收到的是空 args，不是 [null]：这就是 WsKernel 里刻意不传 undefined 参数的原因。
+    expect(vi.mocked(adapter.pageText).mock.calls[0]).toEqual([]);
+
+    // 有参：selector 必须原样抵达，否则"只搜某子树"会静默退化成搜整页。
+    await kernel.pageText('#result');
+    expect(adapter.pageText).toHaveBeenLastCalledWith('#result');
+
+    close();
+  });
+
+  it('pageText 返回 null 时跨 WS 不被吞成 undefined（调用方能区分"取不到"）', async () => {
+    const adapter = makeBridgeStubAdapter();
+    adapter.pageText = vi.fn(async () => null);
+    harness = await openHarness(adapter);
+    client = await TestClient.connect(harness.url);
+
+    const { kernel, close } = openKernel(harness.url);
+    const r = await kernel.pageText();
+    // JSON 往返后必须仍是 null：断言层靠 `!= null` 区分"取不到文本"与"空文本"。
+    expect(r === null || r === undefined).toBe(true);
+    close();
+  });
+
+  it('textContains 经 WsKernel 走完整条兜底链路（快照不含目标文字时回落整页）', async () => {
+    const adapter = makeBridgeStubAdapter();
+    // snapshot 只有控件，没有纯文本节点——这正是缺陷的真实形状。
+    adapter.snapshot = vi.fn(async () => [{ role: 'button', name: '搜索', text: '搜索' }]);
+    adapter.pageText = vi.fn(async () => '搜索完成，共 3 条记录');
+    harness = await openHarness(adapter);
+    client = await TestClient.connect(harness.url);
+
+    const { kernel, close } = openKernel(harness.url);
+    const passed = await runAssertion(
+      kernel as unknown as CdpAdapter,
+      { kind: 'textContains', value: '共 3 条记录' },
+    );
+    expect(passed.passed).toBe(true);
+    // 证明确实走了兜底，不是碰巧在快照里找到的。
+    expect(adapter.pageText).toHaveBeenCalled();
+    close();
   });
 
   it('进度事件载荷跨 JSON 往返后字段完好（stepId/status 均为字符串）', async () => {

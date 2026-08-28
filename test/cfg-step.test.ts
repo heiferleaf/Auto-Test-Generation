@@ -27,6 +27,9 @@ function makeMockAdapter(): CdpAdapter & { calls: string[] } {
     // 否则 if 分支测试无法证伪实现。
     async snapshot() { return [{ role: 'text', name: 'always', text: 'always' }]; },
     async query(_l) { return null; },
+    // 整页兜底必须返回空：否则 FALSE_COND(textContains 'never') 会被兜底改成真，
+    // 两个条件就不可区分，if 分支测试失去证伪能力。
+    async pageText() { return ''; },
   };
 }
 
