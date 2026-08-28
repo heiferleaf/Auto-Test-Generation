@@ -34,16 +34,6 @@ import {
 } from '../script/version-store';
 import { VersionPanel } from './version-panel';
 import { WORDMARK_TEXT, mountWordmark } from './wordmark';
-import {
-  renderIntroLayer,
-  applyIntroProgress,
-  measureWordmarkLanding,
-  prefersReducedMotion,
-  INTRO_PROGRESS_MS,
-  INTRO_SETTLE_MS,
-  INTRO_TICK_MS,
-  type IntroPhase,
-} from './intro';
 
 /** 回放结果（与 cli.CliResult 同构，但由内核产生，UI 壳不依赖 cli 模块）。 */
 export type PlaybackResult = { ok: boolean; failedStepId?: string };
@@ -422,21 +412,6 @@ export class UiShell {
   /** 每步一张靶机截图（不进 Step JSON）。key = step.id。 */
   private stepShots = new Map<string, { png: string; rect?: VisualRect }>();
 
-  /**
-   * 进场动画进度（跨 render 存活的唯一真相源）。
-   * render() 首行 innerHTML='' 会抹掉一切 DOM 痕迹，且调用点高达 34 处，
-   * 所以"播到哪了"只能记在实例上；undefined=没播过（含降级跳过），
-   * 播完置 'done'，后续 render 一律不再重建进场层。
-   */
-  private introPhase?: IntroPhase | 'done';
-  /**
-   * 进场动画已耗时（ms）。进度条宽度由它推算，
-   * 因此 render() 中途重建进场层时进度能接着走，不会弹回 0。
-   */
-  private introElapsed = 0;
-  /** 进场动画的定时器句柄（推进期是 interval，收敛期换成 timeout）。 */
-  private introTimer: ReturnType<typeof setTimeout> | undefined;
-
   // ---- 嵌入式点选录制（spec §2.3）----
   /** 当前是否处于点选态（waitUntil/assert/选择组条件共用一套）。 */
   private pickMode = false;
@@ -483,13 +458,6 @@ export class UiShell {
       if (actionEl) {
         this.handleAction(actionEl.getAttribute('data-action')!, actionEl);
         return;
-      }
-      // 进场动画期间：点进场层（含「跳过」按钮）即跳过，走同一条收尾路径。
-      if (this.introPhase !== 'done' && this.introPhase !== undefined) {
-        if (el.closest('[data-intro]')) {
-          this.skipIntro();
-          return;
-        }
       }
       // 点叠加详情内部（输入框等）不要关层。
       if (el.closest('[data-detail]')) return;
@@ -1983,110 +1951,7 @@ export class UiShell {
     }, UI_MOTION_MS);
   }
 
-  /**
-   * 进场动画：首次 render 时开场，走完收敛后摘掉。
-   *
-   * 重播防护全靠 this.introPhase —— render() 会清空 innerHTML，
-   * 若这里改成"看 DOM 里有没有进场层"来判断，插入步骤、连接状态变化等
-   * 34 处调用点里的任何一次 render 都会让动画从头再放一遍。
-   */
-  private mountIntroLayer(root: HTMLElement): void {
-    // 播完 / 用户偏好减少动效：不再重建进场层，直接停在顶栏最终态。
-    if (this.introPhase === 'done') return;
-    if (this.introPhase === undefined) {
-      if (prefersReducedMotion()) {
-        this.introPhase = 'done';
-        return;
-      }
-      this.introPhase = 'opening';
-      this.startIntroTicker();
-    }
-    // 重建时按已耗时还原进度，而不是从 0 重来（否则中途 render 会视觉回跳）。
-    const progress = this.introProgress();
-    root.appendChild(renderIntroLayer(this.introPhase as IntroPhase, progress));
-  }
-
-  /** 进度百分比：由已耗时推算，不另存一份状态，避免两处对不上。 */
-  private introProgress(): number {
-    if (this.introPhase === 'settling') return 100;
-    return Math.min(100, (this.introElapsed / INTRO_PROGRESS_MS) * 100);
-  }
-
-  /**
-   * 收尾前把真实落点写进 CSS 变量。
-   *
-   * 顶栏之上可能压着横幅（演示提示 / 录制中 / 运行失败提醒），横幅有无与高度
-   * 都不固定，写死落点会让文字收敛到"没有横幅时的那个位置"，与字标差几十像素。
-   * 量不到（jsdom 未布局）则标 data-intro-landing="none"，CSS 只淡出不平移，
-   * 不会朝一个凭空算出来的坐标飞过去。
-   */
-  private applyIntroLanding(layer: HTMLElement): void {
-    const landing = measureWordmarkLanding(
-      this.mount,
-      this.mount.querySelector('[data-wordmark]') as HTMLElement | null,
-    );
-    if (!landing) {
-      layer.setAttribute('data-intro-landing', 'none');
-      return;
-    }
-    layer.style.setProperty('--intro-land-x', `${landing.x}px`);
-    layer.style.setProperty('--intro-land-y', `${landing.y}px`);
-    layer.setAttribute('data-intro-landing', 'measured');
-  }
-
-  /**
-   * 推进进度条。走完 → 切收敛态（就地改属性，不整树 render：
-   * 全量 render 会把正在过渡的节点换掉，过渡就断了）→ 过渡结束后摘掉进场层。
-   */
-  private startIntroTicker(): void {
-    this.clearIntroTimer();
-    this.introTimer = setInterval(() => {
-      this.introElapsed += INTRO_TICK_MS;
-      const layer = this.mount.querySelector('[data-intro]') as HTMLElement | null;
-      if (!layer) return;
-      applyIntroProgress(layer, this.introProgress());
-      if (this.introElapsed < INTRO_PROGRESS_MS) return;
-
-      // 进度满 → 收敛。改属性而非重建，保住 CSS transform 过渡。
-      this.introPhase = 'settling';
-      this.applyIntroLanding(layer);
-      layer.setAttribute('data-intro-state', 'settling');
-      applyIntroProgress(layer, 100);
-      this.clearIntroTimer();
-      this.introTimer = setTimeout(() => {
-        this.introTimer = undefined;
-        this.introPhase = 'done';
-        this.removeIntroLayer();
-      }, INTRO_SETTLE_MS);
-    }, INTRO_TICK_MS);
-  }
-
-  private clearIntroTimer(): void {
-    if (this.introTimer === undefined) return;
-    clearInterval(this.introTimer as ReturnType<typeof setInterval>);
-    clearTimeout(this.introTimer);
-    this.introTimer = undefined;
-  }
-
-  /** 摘掉进场层。动画自然结束与用户跳过共用这条收尾路径。 */
-  private removeIntroLayer(): void {
-    const layer = this.mount.querySelector('[data-intro]');
-    if (layer) layer.remove();
-  }
-
-  /** 跳过进场动画：直接进最终态，不等进度条走完。 */
-  skipIntro(): void {
-    this.clearIntroTimer();
-    this.introPhase = 'done';
-    this.removeIntroLayer();
-  }
-
   private onEscape(): void {
-    // 进场动画优先响应 Esc：它是当时最外层的东西，Esc 应该先掀掉它。
-    if (this.introPhase !== undefined && this.introPhase !== 'done') {
-      this.skipIntro();
-      return;
-    }
     if (this.pickMode) { this.exitPickMode(); return; }
     if (this.packMenuIds || this.selectedIds.size > 1) {
       this.clearCfgBlank();
@@ -2435,10 +2300,6 @@ export class UiShell {
     actions.appendChild(file);
     header.appendChild(actions);
     root.appendChild(header);
-
-    // 进场动画层必须在 header 之后挂：它覆盖全屏，z-index 更高，
-    // 且要晚于字标存在，才能把"放大态"和"顶栏最终态"当成同一段动画的首尾。
-    this.mountIntroLayer(root);
 
     // 运行失败 / 未连接提醒（spec §2.3.4：失败要有 notice，不能静默禁用按钮）
     const noticeText = (() => {

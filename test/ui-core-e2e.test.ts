@@ -9,7 +9,6 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { UiShell } from '../src/ui/shell';
-import { INTRO_PROGRESS_MS, INTRO_SETTLE_MS } from '../src/ui/intro';
 import type { Script, Step, Locator } from '../src/types/step';
 
 const CFG_CONNECTORS_JSON = readFileSync(
@@ -625,72 +624,5 @@ describe('工作台交互抛光（保存 / 顶栏 / 框选 / 双栏主次）', (
     expect(mount.querySelector('[data-action="cancel-edit"]')).toBeNull();
     expect(mount.querySelector('[data-inspector-close]')).toBeTruthy();
     expect(mount.querySelector('[data-assert-hint]')).toBeTruthy();
-  });
-});
-
-// 进场动画的用户路径：只用真实点击/按键驱动，不调内部方法。
-// 与 test/ui-intro-anim.test.ts 的分工：那边钉状态机细节，这边钉"用户真能这么用"。
-describe('顶栏品牌字进场动画（用户路径）', () => {
-  let kernel: AnyKernel;
-  beforeEach(() => {
-    kernel = makeMockKernel();
-    vi.useFakeTimers();
-    const impl = (q: string) => ({
-      matches: false, media: q, onchange: null,
-      addEventListener: () => {}, removeEventListener: () => {},
-      addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
-    });
-    (window as any).matchMedia = impl;
-  });
-  afterEach(() => { vi.useRealTimers(); });
-
-  const advance = (ms: number) => vi.advanceTimersByTimeAsync(ms);
-
-  it('打开页面：先进场层挡在前面，进度条在其中，顶栏字标也在（不是二选一）', () => {
-    const { mount } = bootShell(kernel, seed);
-    expect(mount.querySelector('[data-intro]')).toBeTruthy();
-    expect(mount.querySelector('[data-intro-progress]')).toBeTruthy();
-    // 顶栏字标必须同时存在：进场层只是覆盖，不能把字标顶掉，
-    // 否则收敛动画结束时会出现"字从无到有"的跳变。
-    expect(mount.querySelector('[data-wordmark]')).toBeTruthy();
-  });
-
-  it('等动画自然走完：进场层消失，顶栏字标留在原位可用', async () => {
-    const { mount } = bootShell(kernel, seed);
-    await advance(INTRO_PROGRESS_MS + INTRO_SETTLE_MS + 60);
-    expect(mount.querySelector('[data-intro]')).toBeNull();
-    expect(mount.querySelector('[data-wordmark]')?.textContent).toContain('测试步骤中台');
-  });
-
-  it('用户点「跳过」：立刻进最终态，不等进度条走完', async () => {
-    const { mount } = bootShell(kernel, seed);
-    const skip = mount.querySelector('[data-intro-skip]') as HTMLElement;
-    expect(skip).toBeTruthy();
-    click(skip);
-    await advance(INTRO_SETTLE_MS + 60);
-    expect(mount.querySelector('[data-intro]')).toBeNull();
-  });
-
-  it('动画期间顶栏「插入步骤」仍可点（进场层不吃掉业务点击）', () => {
-    const { mount } = bootShell(kernel, seed);
-    click(mount.querySelector('[data-action="insert"]'));
-    expect(mount.querySelector('[data-insert-type="wait"]')).toBeTruthy();
-  });
-
-  it('动画期间点顶栏按钮，动画不会被打断也不会重播', async () => {
-    const { mount } = bootShell(kernel, seed);
-    await advance(300);
-    click(mount.querySelector('[data-action="insert"]'));
-    // 触发了 render：进场层仍在（没被打断），且只有一层（没叠加）。
-    expect(mount.querySelectorAll('[data-intro]').length).toBe(1);
-    await advance(INTRO_PROGRESS_MS + INTRO_SETTLE_MS + 60);
-    expect(mount.querySelector('[data-intro]')).toBeNull();
-  });
-
-  it('按 Esc 跳过：不依赖鼠标也能退出动画', async () => {
-    const { mount } = bootShell(kernel, seed);
-    mount.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    await advance(INTRO_SETTLE_MS + 60);
-    expect(mount.querySelector('[data-intro]')).toBeNull();
   });
 });
