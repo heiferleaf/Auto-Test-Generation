@@ -100,6 +100,11 @@ const textContainsPassed = async (adapter: CdpAdapter, assertion: Assertion): Pr
   // 否则"只搜该 button"会被架空成"整页随便哪处有就算过"。
   if (hasLoc && !selector) return false;
 
+  // pageText 是可选增强（整页文本兜底），不是适配器的必需成员。
+  // 没实现它时必须降级回"只看 snapshot"，而不是让 textContains 整个崩掉——
+  // 那会让原本能通过的断言，因为少了一项兜底能力反而直接失败。
+  if (typeof adapter.pageText !== 'function') return false;
+  // 取文本抛错同理，只当作取不到，按未命中处理。
   const text = await adapter.pageText(selector).catch(() => null);
   return text != null && text.includes(want);
 };
