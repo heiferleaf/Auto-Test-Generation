@@ -7,6 +7,9 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { CdpAdapter, VisualCapable } from '../cdp/adapter';
 import type { Assertion, AssertionKind, Locator } from '../types/step';
+import { judgeOf, type AssertionContext, type VisionJudgeResult } from '../vision/judge';
+import { createOpenAICompatibleJudge } from '../vision/openai-compatible';
+import { visionConfigError } from '../vision/config';
 
 export class AssertionError extends Error {
   constructor(
@@ -18,10 +21,21 @@ export class AssertionError extends Error {
   }
 }
 
+/** 断言结果：passed 为是否通过，reason 为人可读依据（失败时给上层展示）。 */
+export type AssertionOutcome = { passed: boolean; reason?: string };
+
+/**
+ * 断言策略签名。第三参 ctx 是**可选**的宿主注入位（visionPrompt 需要判定函数）。
+ *
+ * 为什么加在末尾且可选：现有 handler 与全部调用点（executor / waitUntil / 测试）
+ * 都只传两个参数，加必填参数会破坏向后兼容；可选参数让旧策略零改动。
+ * ctx 整体可能为 null（跨 WS/JSON 边界 undefined→null），实现内必须 ?? {} 兜底。
+ */
 export type AssertionHandler = (
   adapter: CdpAdapter,
   assertion: Assertion,
-) => Promise<{ passed: boolean }>;
+  ctx?: AssertionContext | null,
+) => Promise<AssertionOutcome>;
 
 const noLoc = (loc: Locator | undefined): Locator => {
   if (!loc) throw new Error('该断言缺少 locator');
@@ -131,17 +145,80 @@ export const assertionHandlers: Record<AssertionKind, AssertionHandler> = {
     const diff = Math.abs(buf.length - base.length) / Math.max(base.length, 1);
     return { passed: diff <= 0.05 };
   },
+
+  // 截图 + 提示词断言（模型视觉判定）：screenshotMatches 的"多模态增强"版。
+  // 形制照 screenshotMatches：先拿截图，再交给判定者；判定者由宿主注入，
+  // 内核不绑定任何供应商（需求「以后的插件」原话要求）。
+  visionPrompt: async (adapter, assertion, ctx) => {
+    const a = assertion ?? {};
+    const prompt = (a.value ?? '').trim();
+
+    // 空提示词：调模型也问不出东西，直接失败并说明，别浪费一次调用。
+    if (!prompt) {
+      return { passed: false, reason: 'visionPrompt 缺少提示词（Assertion.value 为空）' };
+    }
+
+    const visual = adapter as Partial<VisualCapable>;
+    if (typeof visual.screenshot !== 'function') {
+      return { passed: false, reason: '当前适配器不支持截图（需 VisualCapable）' };
+    }
+
+    const buf = await visual.screenshot(
+      a.locator ? { element: a.locator } : {},
+    );
+    if (!buf || buf.length === 0) {
+      return { passed: false, reason: '截图为空，无法做视觉判定' };
+    }
+
+    // 判定函数优先级：宿主注入 > 按环境变量/本地配置构造的默认实现。
+    // 注入优先是为了让宿主能塞自己的网关或 mock，内核不写死供应商。
+    const judge = judgeOf(ctx) ?? createOpenAICompatibleJudge();
+    // 防御性兜底：当前 createOpenAICompatibleJudge() 恒返回对象，故此分支不可达。
+    // 保留它是因为 judge 可能来自宿主注入，而跨 WS/JSON 边界时 undefined 会变 null；
+    // 若将来默认构造改为"配置缺失则返回 undefined"，这里就是最后一道不静默造假的闸。
+    // 请勿当作死代码删掉，也不要指望它会命中。
+    if (!judge) {
+      const why = visionConfigError() ?? '视觉判定函数未注入';
+      return { passed: false, reason: `visionPrompt 未配置：${why}` };
+    }
+
+    let result: VisionJudgeResult;
+    try {
+      result = await judge.judge({ prompt, image: buf });
+    } catch (err) {
+      // 调用失败一律算失败并带原因 —— 静默跳过等于测试造假（用户拍板决策 3）。
+      return {
+        passed: false,
+        reason: `visionPrompt 调用失败：${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    // 外部边界兜底：模型/宿主可能返回 null 或非布尔 passed，
+    // 只有严格 true 才算通过，其余按失败处理并保留原因。
+    const r = (result ?? {}) as Partial<VisionJudgeResult>;
+    if (r.passed === true) {
+      return { passed: true, reason: r.reason };
+    }
+    return {
+      passed: false,
+      reason: r.reason ? `visionPrompt 判定不成立：${r.reason}` : 'visionPrompt 判定不成立',
+    };
+  },
 };
 
-/** 执行单条断言，返回是否通过。未知 kind 抛出含 /kind/i 的错误。 */
+/**
+ * 执行单条断言，返回是否通过。未知 kind 抛出含 /kind/i 的错误。
+ * @param ctx 可选宿主注入上下文（如视觉判定函数）；不传时行为与扩展前一致。
+ */
 export async function runAssertion(
   adapter: CdpAdapter,
   assertion: Assertion,
-): Promise<{ passed: boolean }> {
+  ctx?: AssertionContext | null,
+): Promise<AssertionOutcome> {
   const a = assertion ?? ({} as Assertion);
   const handler = assertionHandlers[a.kind];
   if (!handler) {
     throw new Error(`未知断言 kind: ${a.kind}`);
   }
-  return handler(adapter, a);
+  return handler(adapter, a, ctx ?? null);
 }

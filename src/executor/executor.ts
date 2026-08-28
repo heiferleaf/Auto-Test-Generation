@@ -5,6 +5,7 @@ import type { CdpAdapter } from '../cdp/adapter';
 import type { Script, Step, Locator } from '../types/step';
 import { runAssertion, AssertionError } from './assert';
 import { invokeAction } from './actions';
+import type { AssertionContext } from '../vision/judge';
 
 /**
  * 逐步进度回调（M3-R3）：叶子步骤开始/结束时上报，供 UI 实时回显与高亮跟随。
@@ -22,12 +23,14 @@ export type StepProgress = (stepId: string, status: 'running' | 'pass' | 'fail')
  *   从该步（含其子树）起继续执行其后所有兄弟。未传时从头执行（向后兼容）。
  *   语义：前序遍历到该 id 才置 started=true；未 started 的节点整棵跳过、不上报进度。
  *   限制：若 fromStepId 落在 if 未选中分支或不存在，则其本身不执行（无步可跑），不报错。
+ * @param ctx 可选宿主注入上下文（如视觉判定函数），透传给断言引擎；不传时行为不变。
  */
 export async function runScript(
   adapter: CdpAdapter,
   script: Script,
   onStep?: StepProgress,
   fromStepId?: string,
+  ctx?: AssertionContext | null,
 ): Promise<void> {
   // 进度上报是辅助能力：订阅方回调抛错不得中断脚本执行。
   const report: StepProgress = onStep
@@ -42,7 +45,7 @@ export async function runScript(
   // started：未指定 fromStepId 时一开始就执行；指定后等到前序命中该 id 才开始。
   const state = { started: fromStepId === undefined, fromStepId };
   for (const step of script.steps) {
-    await runNode(adapter, step, report, state);
+    await runNode(adapter, step, report, state, ctx ?? null);
   }
 }
 
@@ -70,7 +73,13 @@ function childrenOf(node: Step): Step[] {
   return children;
 }
 
-async function runNode(adapter: CdpAdapter, node: Step, onStep: StepProgress, state: { started: boolean; fromStepId?: string }): Promise<void> {
+async function runNode(
+  adapter: CdpAdapter,
+  node: Step,
+  onStep: StepProgress,
+  state: { started: boolean; fromStepId?: string },
+  ctx?: AssertionContext | null,
+): Promise<void> {
   // 「从此处运行」：命中起点 id（叶或组）即置 started；此后该节点及其后序节点正常执行。
   // 关键：未 started 时不能整棵跳过控制节点 —— fromStepId 可能在组内，
   //   故对 sequence/while 仍需下钻寻找起点，仅在叶子处 gate 执行。
@@ -85,7 +94,7 @@ async function runNode(adapter: CdpAdapter, node: Step, onStep: StepProgress, st
     if (!state.started) return;
     onStep(node.id, 'running');
     try {
-      await runStep(adapter, node);
+      await runStep(adapter, node, ctx ?? null);
     } catch (err) {
       onStep(node.id, 'fail');
       throw err;
@@ -96,7 +105,7 @@ async function runNode(adapter: CdpAdapter, node: Step, onStep: StepProgress, st
   switch (ctrl.kind) {
     case 'sequence':
       for (const child of childrenOf(node)) {
-        await runNode(adapter, child, onStep, state);
+        await runNode(adapter, child, onStep, state, ctx);
       }
       break;
     case 'if': {
@@ -106,13 +115,13 @@ async function runNode(adapter: CdpAdapter, node: Step, onStep: StepProgress, st
       if (state.started) onStep(node.id, 'running');
       try {
         const result = ctrl.condition
-          ? await runAssertion(adapter, ctrl.condition)
+          ? await runAssertion(adapter, ctrl.condition, ctx ?? null)
           : { passed: true };
         if (state.started) onStep(node.id, 'pass');
         const branches = childrenOf(node);
         // children[0]=then, children[1]=else
         const chosen = result.passed ? branches[0] : branches[1];
-        if (chosen) await runNode(adapter, chosen, onStep, state);
+        if (chosen) await runNode(adapter, chosen, onStep, state, ctx);
       } catch (err) {
         if (state.started) onStep(node.id, 'fail');
         if (err instanceof AssertionError) throw err;
@@ -130,7 +139,7 @@ async function runNode(adapter: CdpAdapter, node: Step, onStep: StepProgress, st
       //   一旦 started，后续每一轮整轮执行（含起点之前的步）。循环+fromStepId 不强求严格语义。
       for (let i = 0; i < count; i++) {
         for (const child of children) {
-          await runNode(adapter, child, onStep, state);
+          await runNode(adapter, child, onStep, state, ctx);
         }
       }
       break;
@@ -147,7 +156,11 @@ function containsId(node: Step, id: string): boolean {
   return false;
 }
 
-async function runStep(adapter: CdpAdapter, step: Step): Promise<void> {
+async function runStep(
+  adapter: CdpAdapter,
+  step: Step,
+  ctx?: AssertionContext | null,
+): Promise<void> {
   // 多窗口：切换到指定目标。
   if (step.target !== undefined) {
     adapter.selectTarget(step.target);
@@ -160,15 +173,17 @@ async function runStep(adapter: CdpAdapter, step: Step): Promise<void> {
       if (!assertion) {
         throw new AssertionError(step.id, `步骤 ${step.id} 缺少断言内容`);
       }
-      const result = await runAssertion(adapter, assertion);
+      const result = await runAssertion(adapter, assertion, ctx ?? null);
       if (!result.passed) {
-        throw new AssertionError(step.id, `断言失败 @ step ${step.id}: ${assertion.kind}`);
+        // reason 是判定者给的人读依据（尤其视觉判定）；带上它，避免只看到 kind 不知道为什么失败。
+        const why = result.reason ? `（${result.reason}）` : '';
+        throw new AssertionError(step.id, `断言失败 @ step ${step.id}: ${assertion.kind}${why}`);
       }
       return;
     }
 
     // 其余类型映射到 adapter 调用。
-    await invokeAction(adapter, step as Step & { type: Exclude<Step['type'], 'assert'> });
+    await invokeAction(adapter, step as Step & { type: Exclude<Step['type'], 'assert'> }, ctx ?? null);
   } catch (err) {
     // adapter 抛出的普通 Error 不带 stepId；统一附加上下文，供 CLI 报告 failedStepId。
     if (err instanceof AssertionError) {

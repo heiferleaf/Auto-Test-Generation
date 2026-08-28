@@ -25,6 +25,7 @@ import {
 } from './targets.js';
 import { WebviewCdpTarget } from './webview-session';
 import { probeLiveCdpPort, parseCdpProbeList } from '../ui/cdp-port';
+import { resolveHostJudge } from '../vision/host';
 
 export type { TargetInfo, TargetType } from './targets.js';
 
@@ -248,7 +249,8 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   ): Promise<{ ok: boolean; failedStepId?: string }> {
     // onStep 仅在同进程内调用（bridge-server 传入以转推给浏览器端）；
     // 跨 WS 的 WsKernel 不传此参数——函数不可序列化，详见 CODEBUDDY.md §4.1。
-    return runCli({ adapter: this, script, onStep, fromStepId });
+    // ctx 同理只在服务端进程内构造：apikey 从不出服务端，更不会进 Script JSON。
+    return runCli({ adapter: this, script, onStep, fromStepId, ctx: { judge: resolveHostJudge() } });
   }
 
   listTargets(): TargetInfo[] {

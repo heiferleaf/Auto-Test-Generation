@@ -10,6 +10,7 @@ import { runAssertion } from '../executor/assert';
 import { importScript, exportScript } from '../script/io';
 import { parseLoadScriptArg } from '../ui/bridge-server';
 import { Recorder, type InteractionEvent } from '../recorder/recorder';
+import { resolveHostJudge } from '../vision/host';
 import { asArgs, asOptionalNumber, asOptionalString, omitted } from './json-args';
 import { TOOL_NAMES } from './tool-catalog';
 
@@ -69,7 +70,11 @@ function withTarget(step: Step, targetId: string | undefined): Step {
 }
 
 async function runProbe(deps: McpDeps, step: Step): Promise<ToolResult> {
-  const res = await runCli({ adapter: deps.adapter, script: probeScript(step) });
+  const res = await runCli({
+    adapter: deps.adapter,
+    script: probeScript(step),
+    ctx: { judge: resolveHostJudge() },
+  });
   if (!res.ok) return fail(`步骤失败${res.failedStepId ? `（${res.failedStepId}）` : ''}`);
   return ok({ ok: true, stepId: step.id });
 }
@@ -228,7 +233,12 @@ export async function dispatchTool(name: string, rawArgs: unknown, deps: McpDeps
       case 'actions.execute_steps': {
         const script = readScriptArg(args);
         const fromStepId = asOptionalString(args.fromStepId);
-        const res = await runCli({ adapter: deps.adapter, script, fromStepId });
+        const res = await runCli({
+          adapter: deps.adapter,
+          script,
+          fromStepId,
+          ctx: { judge: resolveHostJudge() },
+        });
         return ok(res);
       }
       case 'script.import': {
@@ -254,7 +264,8 @@ export async function dispatchTool(name: string, rawArgs: unknown, deps: McpDeps
       }
       case 'assert.run': {
         const assertion = asAssertion(args);
-        const result = await runAssertion(deps.adapter, assertion);
+        // 宿主进程侧注入判定函数（apikey 只存在进程里，绝不进 Script JSON / 工具参数）。
+        const result = await runAssertion(deps.adapter, assertion, { judge: resolveHostJudge() });
         return ok(result);
       }
       case 'record.start': {

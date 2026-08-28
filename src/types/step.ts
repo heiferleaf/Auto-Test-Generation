@@ -38,15 +38,24 @@ export type Locator = {
   xpath?: string;
 };
 
-export type AssertionKind =
-  | 'exists' | 'visible' | 'textContains'
-  | 'titleIs' | 'urlMatches' | 'expr'
-  | 'elementVisibleInViewport' | 'screenshotMatches';
+// 与 STEP_TYPES / CONTROL_KINDS 同风格：运行时常量为唯一真相源，类型由其反推。
+// 理由：断言 kind 会跨 WS/JSON 边界（bridge-server 校验、MCP 入参），
+// 只有类型则运行时查不到全集，新增 kind 时极易只改一处而漂移。
+export const ASSERTION_KINDS = [
+  'exists', 'visible', 'textContains',
+  'titleIs', 'urlMatches', 'expr',
+  'elementVisibleInViewport', 'screenshotMatches',
+  // 截图 + 提示词断言（模型视觉判定）：提示词复用 value 字段，零 schema 变更。
+  'visionPrompt',
+] as const;
+
+export type AssertionKind = typeof ASSERTION_KINDS[number];
 
 export type Assertion = {
   kind: AssertionKind;
   locator?: Locator;   // exists/visible 必填；textContains 可选（缺省=整页文本，执行器搜 snapshot）
-  value?: string;      // textContains/titleIs/urlMatches/expr 用
+  /** textContains/titleIs/urlMatches/expr 用；visionPrompt 用它承载提示词（决策 2）。 */
+  value?: string;
   /** 检测前等待毫秒数（供 Agent 推理/异步渲染留时间，如"等待 N 秒后检测元素值"）。 */
   waitMs?: number;
 };
