@@ -17,6 +17,7 @@ import {
   INTRO_SAMPLE_STEP,
   INTRO_DAMPING,
   INTRO_MIN_POINTS,
+  INTRO_SWEEP_MS,
   INTRO_TIMELINE,
   INTRO_TOTAL_MS,
   sampleTextPointCloud,
@@ -205,14 +206,49 @@ describe('粒子运动（飘散靠弹簧，不是线性插值）', () => {
   const pts = sampleTextPointCloud(TEXT, INK);
   const big = layoutBigWord(pts, VIEWPORT);
   const landing = computeLanding(pts, { left: 16, top: 27 });
-  const particles = createParticles({ big, landing, viewport: VIEWPORT, random: () => 0.5 });
+  const particles = createParticles({ big, landing, random: () => 0.5 });
 
-  it('每颗粒子的弹簧刚度落在 0.04~0.10，错峰到达', () => {
+  it('每颗粒子的弹簧刚度落在 0.04~0.10，淡入错峰限制在浮现段内', () => {
     for (const p of particles) {
       expect(p.k).toBeGreaterThanOrEqual(0.04);
       expect(p.k).toBeLessThanOrEqual(0.1);
+      // delay 只决定谁先亮，不再是"起飞错峰"：上限就是浮现段本身。
+      // 取大了会变成"字一颗颗慢慢长出来"—— 那是另一种慢慢聚拢，用户明确不要。
       expect(p.delay).toBeGreaterThanOrEqual(0);
-      expect(p.delay).toBeLessThanOrEqual(350);
+      expect(p.delay).toBeLessThanOrEqual(INTRO_TIMELINE.emergeEnd);
+    }
+  });
+
+  it('粒子出生就站在大字坐标上，不是从全屏各处飞过来（用户第二轮反馈的回归防线）', () => {
+    // 上一版：x = rnd()*视口宽、y = rnd()*视口高，靠飞行汇聚成字 —— 用户嫌那段拖沓。
+    // 现在出生点就是大字坐标，只允许 ±1px 抖动免得像贴纸。这条断言锁死这一点。
+    let worst = 0;
+    // 换个真随机的序列，别让固定 0.5 把"全屏撒点"这种写法也蒙混过去
+    let seed = 12345;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    for (const p of createParticles({ big, landing, random: rnd })) {
+      const b = big[p.i];
+      worst = Math.max(worst, Math.abs(p.x - b.x), Math.abs(p.y - b.y));
+    }
+    expect(worst).toBeLessThanOrEqual(1);
+    // 反证：全屏撒点的偏移量是视口量级，绝不可能落在 1px 内
+    expect(Math.min(VIEWPORT.width, VIEWPORT.height)).toBeGreaterThan(100);
+  });
+
+  it('大字一开局就居中：出生点云的中心就是视口中心（不需要飞过来才居中）', () => {
+    for (const rndValue of [0, 0.5, 1]) {
+      const ps = createParticles({ big, landing, random: () => rndValue });
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const p of ps) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+      }
+      // ±1px 出生抖动，中心允许差 2px 内（全屏撒点的话中心仍会是视口中心，
+      // 所以这条只守住"居中"，"出生就贴大字"由上面那条 worst<=1 守住）
+      expect(Math.abs((minX + maxX) / 2 - VIEWPORT.width / 2)).toBeLessThan(2);
+      expect(Math.abs((minY + maxY) / 2 - VIEWPORT.height / 2)).toBeLessThan(2);
     }
   });
 
@@ -236,10 +272,11 @@ describe('粒子运动（飘散靠弹簧，不是线性插值）', () => {
   });
 
   it('飘散后能在剩余帧数内真正落到点上（交接才不会"没到位就消失"）', () => {
-    // 最苛刻的一颗：扫掠让它晚 180ms 才起飞，只剩 (2050-1330)/16.67 ≈ 43 帧。
-    // 真机 Chromium 实测过：常量刚度下这一颗到 2050ms 还差 12~16px，
-    // 交接时粒子云比顶栏字标虚胖一圈。这条断言就是那个缺陷的回归防线。
-    const frames = 43;
+    // 最苛刻的一颗：扫掠让它晚 INTRO_SWEEP_MS 才起飞，只剩 (2050-1420)/16.67 ≈ 37 帧。
+    // 帧数由时间轴直接算出来，别写死 —— 上一轮停留段拉长后这里从 43 帧掉到 37 帧，
+    // 旧的 0.2/0.45 参数残余差 2.52px 已经压不住 2px 验收线，是这条断言的由来。
+    const frames = Math.floor((INTRO_TIMELINE.convergeEnd - (INTRO_TIMELINE.holdEnd + INTRO_SWEEP_MS)) / (1000 / 60));
+    expect(frames).toBe(37);
     for (const k of [0.04, 0.07, 0.1]) {
       const p: Particle = { ...particles[0] };
       p.x = 700; p.y = 0; p.vx = 0; p.vy = 0; p.k = k; p.tx = 0; p.ty = 0;
@@ -259,8 +296,9 @@ describe('粒子运动（飘散靠弹簧，不是线性插值）', () => {
       p.x = 700; p.y = 0; p.vx = 0; p.vy = 0; p.k = 0.06; p.tx = 0; p.ty = 0;
       if (impulse) applyDisperseImpulse(p, { x: 0, y: 0 } as Pt, () => 0.5);
       const out: number[] = [];
-      for (let i = 0; i < 43; i++) {
-        const tune = convergeTuning(p.k, (i + 1) / 43);
+      const frames = Math.floor((INTRO_TIMELINE.convergeEnd - (INTRO_TIMELINE.holdEnd + INTRO_SWEEP_MS)) / (1000 / 60));
+      for (let i = 0; i < frames; i++) {
+        const tune = convergeTuning(p.k, (i + 1) / frames);
         stepParticle(p, tune.stiffness, tune.damping);
         out.push(p.x);
       }
@@ -310,12 +348,30 @@ describe('粒子运动（飘散靠弹簧，不是线性插值）', () => {
 describe('时长常量', () => {
   it('阶段顺序成立且总时长克制（不拖沓）', () => {
     const t = INTRO_TIMELINE;
-    expect(t.assembleEnd).toBeGreaterThan(0);
-    expect(t.holdEnd).toBeGreaterThan(t.assembleEnd);
+    expect(t.emergeEnd).toBeGreaterThan(0);
+    expect(t.holdEnd).toBeGreaterThan(t.emergeEnd);
     expect(t.convergeEnd).toBeGreaterThan(t.holdEnd);
     expect(t.fadeMs).toBeGreaterThan(0);
     expect(INTRO_TOTAL_MS).toBe(t.convergeEnd + t.fadeMs);
     expect(INTRO_TOTAL_MS).toBeLessThanOrEqual(3000);
+    // 用户第二轮要求：总时长 2250ms 一点不许变，只重排内部各段
+    expect(INTRO_TOTAL_MS).toBe(2250);
+  });
+
+  it('节奏是「浮现短、中央停留长、飘散收尾」（用户第二轮指定的结构）', () => {
+    const t = INTRO_TIMELINE;
+    const emerge = t.emergeEnd;
+    const hold = t.holdEnd - t.emergeEnd;
+    const converge = t.convergeEnd - t.holdEnd;
+    // 浮现只占个零头：大字一开局就在中央，不是慢慢聚拢过来
+    expect(emerge).toBeLessThanOrEqual(200);
+    // 中央停留是全场最长的一段
+    expect(hold).toBeGreaterThan(emerge);
+    expect(hold).toBeGreaterThan(converge - INTRO_SWEEP_MS);
+    expect(hold).toBeGreaterThan(1000);
+    // 上一次被否决的分配：汇聚 800 / 停留 350 / 收拢 900
+    expect(emerge).toBeLessThan(800);
+    expect(hold).toBeGreaterThan(350);
   });
 
   it('粒子数下限已导出（太少就不演）', () => {
@@ -448,6 +504,24 @@ describe('完整播放（含交接）', () => {
     expect(document.querySelector('[data-intro-overlay]')).toBeNull();
     expect(done).toBe(1);
     expect(host.isConnected).toBe(true); // 字标元素本身不受影响
+  });
+
+  it('开局头几帧大字就已经画在视口中央（不是从全屏各处往里聚）', () => {
+    stubWordmark(16, 83);
+    expect(playIntro({ rasterize: INK, random: () => 0.5, isReducedMotion: () => false })).toBe(true);
+    // 12 帧 ≈ 183ms，刚过浮现段（180ms）。此时粒子若还是全屏撒点，包围盒会是整个视口。
+    pump(12);
+    const calls = (getCtx.mock.results[0].value as unknown as { calls: { minX: number; maxX: number; minY: number; maxY: number } }).calls;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const expected = pointCloudBBox(layoutBigWord(sampleTextPointCloud(TEXT, INK), { width: vw, height: vh }))!;
+    // 颗粒有半径 + 停留期正弦漂移，放宽到 ±4px
+    expect((calls.minX + calls.maxX) / 2).toBeCloseTo(vw / 2, -1);
+    expect((calls.minY + calls.maxY) / 2).toBeCloseTo(vh / 2, -1);
+    expect(calls.maxX - calls.minX).toBeGreaterThan(expected.width - 8);
+    expect(calls.maxX - calls.minX).toBeLessThan(expected.width + 8);
+    // 反证：全屏撒点的宽度是视口宽（jsdom 1024），远大于大字宽
+    expect(calls.maxX - calls.minX).toBeLessThan(vw * 0.9);
   });
 
   it('动画期间 resize：重算落点继续演，不 abort', () => {

@@ -1,10 +1,13 @@
-// 开场粒子进场：大号品牌字由像素颗粒汇聚而成，再飘散、收拢到顶栏字标的真实位置。
+// 开场粒子进场：大号品牌字一开局就由像素颗粒站在视口中央，停留片刻后飘散、收拢到顶栏字标的真实位置。
 //
 // 四条硬约束（用户逐字提的验收标准，改动前先读）：
 //   1. 大字必须是粒子（像素颗粒）组成的，不是一整块文字元素，也不是 transform 缩放平移；
 //   2. 没有进度条；
 //   3. 没有跳过按钮；
 //   4. 归位是「先炸开再收拢」的飘散，不是生硬的线性过渡。
+//
+// 节奏也是用户定的（第二轮反馈）：大字一开局就在中央，不要"粒子从四面飞过来聚成大字"
+// —— 那一段是拖沓的来源。省下的时间全给中央停留，总时长 2250ms 不变。
 //
 // 挂在 document.body 而不是壳根：UiShell.render() 首行 innerHTML='' 全量重建，
 // 34 处调用点（连接变化、插入步骤、选中步骤）都会触发。挂壳内只能靠实例字段记"播没播过"
@@ -35,9 +38,11 @@ const INTRO_ALPHA_MIN = 90;
 export const INTRO_MIN_POINTS = 200;
 
 // ---- 时间轴（ms）----
+// 用户验收后要求重排：不要"粒子从四面八方飞过来聚成大字"，那一段观感是拖沓；
+// 大字要一开局就在视口中央，把省下来的时间给停留，总时长 2250ms 不变。
 export const INTRO_TIMELINE = {
-  assembleEnd: 800, // 汇聚成大字
-  holdEnd: 1150, // 大字停留，轻微呼吸
+  emergeEnd: 180, // 粒子出生就在大字坐标上，只做淡入错峰（不飞）
+  holdEnd: 1300, // 大字在中央停留，轻微呼吸
   convergeEnd: 2050, // 飘散 + 收拢到字标
   fadeMs: 200, // 画布淡出 / 字标淡入
 } as const;
@@ -48,21 +53,29 @@ export const INTRO_DAMPING = 0.86;
 const INTRO_STIFFNESS_MIN = 0.04;
 const INTRO_STIFFNESS_MAX = 0.1;
 // 收拢末段把弹簧拧硬、阻尼加重。原因：大字到顶栏有 700px 之遥，常量刚度下最晚起飞的那颗
-// （扫掠 +180ms，只剩 43 帧）到 2050ms 还差 20px 上下没到位 —— 真机 Chromium 实测粒子云
-// 比顶栏字标虚胖 42px。按进度平方加强后残差 < 1px；而冲量造成的外扩弧线发生在进度早期
-// （刚度还软），飘散的手感不受影响。
-const INTRO_STIFFNESS_END = 0.2;
-const INTRO_DAMPING_END = 0.45;
-// 飘散径向冲量（px/帧）。实测 43 帧内残差几乎与冲量无关（末段硬弹簧会全部吸收），
+// 到 2050ms 还差 20px 上下没到位 —— 真机 Chromium 实测粒子云比顶栏字标虚胖 42px。
+// 按进度平方加强后残差 < 1px；而冲量造成的外扩弧线发生在进度早期（刚度还软），
+// 飘散的手感不受影响。
+//
+// 第二轮改时间轴后这段又短了：停留拉长到 1300ms，最晚起飞的粒子只剩 37 帧
+// （旧轴 43 帧）。0.2/0.45 在这 37 帧下残差 2.52px，已经压不住 2px 的验收线。
+// 所以同时拧了两处：扫掠 180→120（多换 3 帧）+ 终值 0.2/0.45→0.3/0.35。
+// 参数搜索结果：冲量全区间（15.6~36.4）最差残差 1.02px，外扩弧线 56.2px 一点没少。
+const INTRO_STIFFNESS_END = 0.3;
+const INTRO_DAMPING_END = 0.35;
+// 飘散径向冲量（px/帧）。实测残差几乎与冲量无关（末段硬弹簧会全部吸收），
 // 所以取大值换观感：imp=9 只外扩 20~26px（几乎看不出炸开），imp=26 外扩 52~75px，
-// 落点残差仍是 0.74px。大字宽 1040px，外扩 60px 约 6%，是"飘散"而非"抖动"。
+// 落点残差仍是 1.0px 量级。大字宽约 1040px，外扩 60px 约 6%，是"飘散"而非"抖动"。
 const INTRO_IMPULSE = 26;
 const INTRO_TANGENT = 3; // 切向抖动幅度，让炸开不是规整的放射线
 const INTRO_BIG_RADIUS = 1.6; // 大字状态下颗粒的半边长（CSS px），留缝才看得见一颗颗
 const INTRO_LAND_RADIUS = 0.675; // 落到顶栏时的半边长（= wordmark.ts 的 1.35 设备像素 @dpr2）
-const INTRO_SWEEP_MS = 180; // 飘散按 x 坐标左→右扫掠错峰
-const INTRO_DELAY_MAX = 350; // 起飞错峰，形成"流入汇聚"而非整体位移
-const INTRO_FADE_IN_MS = 220; // 单颗粒子淡入
+export const INTRO_SWEEP_MS = 120; // 飘散按 x 坐标左→右扫掠错峰
+// 淡入错峰。注意语义：不是"起飞错峰"——粒子出生就站在大字上，delay 只决定谁先亮。
+// 取大了会变成"字一颗颗慢慢长出来"，那是另一种形式的慢慢聚拢，正是用户不要的。
+const INTRO_EMERGE_MS = 180;
+const INTRO_EMERGE_JITTER = 1; // 出生点在大字坐标上的 ±1px 抖动，免得整块字像贴纸一样死板
+const INTRO_FADE_IN_MS = 150; // 单颗粒子淡入
 const INTRO_BREATH_PX = 1.2; // HOLD 期间的漂移幅度
 const FRAME_MS = 1000 / 60;
 const MAX_CATCHUP_MS = 100; // 切后台回来别一次性补上百帧
@@ -144,7 +157,6 @@ export function computeLanding(points: Pt[], rect: { left: number; top: number }
 export interface ParticleSeed {
   big: Pt[];
   landing: Pt[];
-  viewport: { width: number; height: number };
   random?: () => number;
 }
 
@@ -162,21 +174,22 @@ export function createParticles(seed: ParticleSeed): Particle[] {
   for (let i = 0; i < big.length; i++) {
     parts.push({
       i,
-      // 起飞点散落在整个视口：汇聚时才看得出"从四面流进来"
-      x: rnd() * seed.viewport.width,
-      y: rnd() * seed.viewport.height,
+      // 出生就站在大字坐标上（只带 ±1px 抖动）：用户明确不要"从四面飞过来聚成大字"。
+      // 一开局大字就在视口中央，剩下的时间留给停留和飘散。
+      x: big[i].x + (rnd() - 0.5) * 2 * INTRO_EMERGE_JITTER,
+      y: big[i].y + (rnd() - 0.5) * 2 * INTRO_EMERGE_JITTER,
       vx: 0,
       vy: 0,
       k: INTRO_STIFFNESS_MIN + rnd() * (INTRO_STIFFNESS_MAX - INTRO_STIFFNESS_MIN),
       tx: big[i].x,
       ty: big[i].y,
-      delay: rnd() * INTRO_DELAY_MAX,
+      delay: rnd() * INTRO_EMERGE_MS,
       disperseAt: INTRO_TIMELINE.holdEnd + ((big[i].x - minX) / spanX) * INTRO_SWEEP_MS,
       phase: rnd() * Math.PI * 2,
       impulsed: false,
     });
   }
-  // 按起飞时间排序后绘制：alpha 沿数组单调，fillStyle 切换次数从「每颗一次」降到「每档一次」
+  // 按淡入时间排序后绘制：alpha 沿数组单调，fillStyle 切换次数从「每颗一次」降到「每档一次」
   return parts.sort((a, b) => a.delay - b.delay);
 }
 
@@ -297,7 +310,7 @@ export function playIntro(options: IntroOptions = {}): boolean {
   let big = layoutBigWord(points, { width: vw, height: vh });
   let landing = computeLanding(points, measured);
   let centroid = centroidOf(big);
-  const particles = createParticles({ big, landing, viewport: { width: vw, height: vh }, random });
+  const particles = createParticles({ big, landing, random });
 
   const resizeCanvas = () => {
     canvas.width = Math.round(vw * dpr);
@@ -355,9 +368,9 @@ export function playIntro(options: IntroOptions = {}): boolean {
         p.tx = landing[p.i].x;
         p.ty = landing[p.i].y;
         tuning = convergeTuning(p.k, (elapsed - p.disperseAt) / Math.max(1, t.convergeEnd - p.disperseAt));
-      } else if (elapsed >= t.assembleEnd) {
+      } else if (elapsed >= t.emergeEnd) {
         // 停留期：目标不动，叠一点正弦漂移，免得整块字僵住
-        const w = (elapsed - t.assembleEnd) / 90 + p.phase;
+        const w = (elapsed - t.emergeEnd) / 90 + p.phase;
         p.tx = big[p.i].x + Math.cos(w) * INTRO_BREATH_PX;
         p.ty = big[p.i].y + Math.sin(w) * INTRO_BREATH_PX;
       } else {
