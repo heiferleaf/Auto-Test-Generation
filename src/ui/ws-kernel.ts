@@ -9,6 +9,7 @@ import type { UiKernel, PlaybackResult, StepShotPlan } from './shell';
 import type { Script, Locator } from '../types/step';
 import type { ConnectOptions, VisualRect, TargetInfo, SerializedNode } from '../cdp/adapter';
 import type { InteractionEvent } from '../recorder/recorder';
+import type { RecordingCoverage } from '../recorder/coverage';
 
 type RpcReq = { id: number; method: string; args: unknown[] };
 type RpcRes = { id: number; ok: true; result?: unknown } | { id: number; ok: false; error: string };
@@ -114,6 +115,8 @@ export class WsKernel implements UiKernel {
   // ---- Recordable ----
   startRecording(): Promise<void> { return this.call('startRecording'); }
   stopRecording(): Promise<InteractionEvent[]> { return this.call('stopRecording'); }
+  /** 录制覆盖率对账（未注入的窗口、被丢弃的交互在这里报出来）。旧内核无此方法时调用方会跳过。 */
+  lastRecordingCoverage(): Promise<RecordingCoverage | null> { return this.call('lastRecordingCoverage'); }
 
   // ---- Pickable（spec §2.3，可选；旧内核不实现时 UI 侧按钮禁用）----
   startPick(): Promise<void> { return this.call('startPick'); }
