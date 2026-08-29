@@ -154,6 +154,29 @@ export type BridgeAdapter = CdpAdapter & {
   playback(script: Script, onStep?: StepProgress, fromStepId?: string): Promise<{ ok: boolean; failedStepId?: string }>;
 };
 
+/** 单步截图参数（浏览器侧随 playback 一并送来；必须 JSON 可序列化）。 */
+export type StepShot = { highlight?: Locator; target?: string };
+
+/**
+ * 逐步高亮截图：有 locator 时先画框再拍，无 locator 拍整页（wait / 整页 textContains 属这类）。
+ * 返回 base64 字符串（事件载荷走 pushEvent，不能用 Node Buffer）；失败返回 undefined ——
+ * 截图是辅助能力，拍不到不能中断运行，也不能让浏览器侧拿一张假图充数。
+ */
+async function captureStepShot(
+  adapter: BridgeAdapter,
+  plan?: StepShot | null,
+): Promise<string | undefined> {
+  try {
+    const opts = plan ?? {};
+    const buf = opts.highlight || opts.target
+      ? await adapter.screenshot({ highlight: opts.highlight, target: opts.target })
+      : await adapter.screenshot();
+    return Buffer.isBuffer(buf) ? buf.toString('base64') : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * 在已有 http server 上升级出 /kernel-ws 端点，桥接真机 adapter。
  *
@@ -257,9 +280,32 @@ export function attachKernelBridge(
           const script = assertRunnableScript(args[0]);
           // fromStepId 可选（第 2 参）；跨 WS 的 undefined 经 JSON 变 null，统一还原。
           const fromStepId = args[1] === null || args[1] === undefined ? undefined : String(args[1]);
+          // 逐步截图计划（第 3 参，可选）：stepId → 截图参数，由浏览器侧按步算好带过来。
+          // 桥端只负责"在正确的时机拍"，不自己猜该高亮哪个元素 —— 那是 UI 的真相源。
+          // 客户端送来的可能是任意 JSON：非对象一律当"没有计划"，不让坏数据进到截图参数里。
+          const raw = args[2];
+          const shotPlan = (
+            raw !== null && typeof raw === 'object' ? raw : {}
+          ) as Record<string, StepShot | undefined>;
           const res = await adapter.playback(
             script,
-            (stepId, status) => pushEvent('step-progress', { stepId, status }),
+            // 高亮截图的补拍时机就在这里：running 上报**先**把这一张拍完，执行器才放行执行该步
+            // （executor 会 await running 上报）。若改成浏览器侧收到事件后再异步补拍，
+            // 截图请求会和该步的点击/输入赛跑，真机上往往拍到执行**之后**的画面 ——
+            // 那时这一步要操作的元素可能已经变了或没了，框必然画不上，且全程静默不报错。
+            async (stepId, status) => {
+              if (status !== 'running') {
+                pushEvent('step-progress', { stepId, status });
+                return;
+              }
+              // 没有该步的计划就不拍：老调用方（不带计划）行为完全不变，也不做无谓的截图。
+              const plan = shotPlan[stepId];
+              const shot = plan === undefined ? undefined : await captureStepShot(adapter, plan);
+              pushEvent(
+                'step-progress',
+                shot === undefined ? { stepId, status } : { stepId, status, shot },
+              );
+            },
             fromStepId,
           );
           send({ id: req.id, ok: true, result: res });

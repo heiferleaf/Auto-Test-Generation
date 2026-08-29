@@ -18,7 +18,7 @@ import { Recorder, type InteractionEvent, sameFillLocator, shouldKeepRecordingEv
 import { ScriptEditor, isAtomicGroup } from '../editor/editor';
 import { parseShotsMap, shotToBase64, shotToDataUrl } from '../script/io';
 import { SCRIPT_SCHEMA } from '../types/step';
-import { CfgView } from './cfg-view';
+import { CfgView, SHOT_HINT_NONE } from './cfg-view';
 import { TYPE_LABEL, describeLocator, describeStepBrief } from './step-label';
 import { mapHighlightRect, viewportFromRect } from './highlight-map';
 import {
@@ -37,6 +37,38 @@ import { WORDMARK_TEXT, mountWordmark } from './wordmark';
 
 /** 回放结果（与 cli.CliResult 同构，但由内核产生，UI 壳不依赖 cli 模块）。 */
 export type PlaybackResult = { ok: boolean; failedStepId?: string };
+
+/**
+ * 逐步高亮截图计划：stepId → 该步截图参数。随 playback 一起交给内核，
+ * 由内核（桥端）在**执行该步之前**拍这一张 —— 拍完才放行执行（executor 会 await running 上报）。
+ *
+ * 为什么不能等浏览器收到 running 事件后再补拍：那样截图请求会和该步的点击/输入赛跑，
+ * 真机上往往拍到执行**之后**的画面，而这一步要操作的元素那时可能已经变了或没了，
+ * 高亮框必然画不上（且全程静默不报错）。这正是"Agent 脚本没有高亮、录制的有"的根因。
+ *
+ * 必须 JSON 可序列化：UiKernel 会被 WsKernel 跨 WebSocket 实现。
+ */
+export type StepShotPlan = Record<string, { highlight?: Locator; target?: string }>;
+
+/** 预演单步结论。**只有两种**：找到了 / 当前状态下不存在。后者不是失败。 */
+export type DryRunOutcome = 'found' | 'notYetPresent';
+
+export type DryRunStepResult = {
+  stepId: string;
+  outcome: DryRunOutcome;
+  /** 人读（也给 Agent 读）的结论说明，`notYetPresent` 时必须说清"为什么没有"。 */
+  message: string;
+  rect?: VisualRect;
+};
+
+export type DryRunReport = {
+  /** false = 预演根本没跑（未连接 / 内核不支持定位），此时看 notice。 */
+  ran: boolean;
+  notice?: string;
+  results: DryRunStepResult[];
+  foundCount: number;
+  notYetCount: number;
+};
 
 /** 手动可插入的步骤类型（spec §2.4 仅 3 类；click/fill 等仅由录制产生，循环走组操作）。 */
 type ManualStepType = 'wait' | 'waitUntil' | 'assert';
@@ -57,9 +89,10 @@ export type { StepRunStatus, StepProgressEvent } from '../types/step';
  * （`JSON.stringify(fn)` → undefined，真机上必然丢失），只能走 `on/off` 推送通道。
  */
 export type UiKernel = CdpAdapter & VisualCapable & Recordable & {
-  /** 按脚本回放（内核职责：真机驱动 adapter / 演示返回假结果）。签名保持单参。
-   *  fromStepId 可选「从此处运行」起点（spec §2.7），不传为从头跑（向后兼容）。 */
-  playback(script: Script, fromStepId?: string): Promise<PlaybackResult>;
+  /** 按脚本回放（内核职责：真机驱动 adapter / 演示返回假结果）。
+   *  fromStepId 可选「从此处运行」起点（spec §2.7），不传为从头跑（向后兼容）。
+   *  shotPlan 可选逐步截图计划（见 StepShotPlan）：执行到某步、**执行该步之前**拍一张。 */
+  playback(script: Script, fromStepId?: string, shotPlan?: StepShotPlan): Promise<PlaybackResult>;
   /** 订阅服务端主动推送事件（'recording' / 'step-progress' / 'pick' / 'load-script'）；可选。 */
   on?(event: string, cb: (data: unknown) => void): void;
   /** 退订；与 on 配对，供单次运行结束后清理。可选（旧内核可不实现）。 */
@@ -357,11 +390,6 @@ export class UiShell {
   private currentTargetId?: string;
   /** 截图流定时器句柄（Node 用 Timeout，浏览器用 number；用 any 兼容二者）。 */
   private frameTimer: any = undefined;
-  /**
-   * 导入/连接补拍的代际：新一次 backfill 会 ++，旧循环看到代际变化就停。
-   * 避免连续导入时上一轮截图写进新脚本的 stepId Map。
-   */
-  private shotBackfillGen = 0;
   /** 步骤列表容器缓存（增量 append 用，避免录制高频全量重渲染）。 */
   private stepsEl?: HTMLElement;
   /** CFG 图形化视图（M3-R4）：SRP 独立组件，仅依赖 Script/Step 类型（DIP）。 */
@@ -631,11 +659,22 @@ export class UiShell {
     const status = d.status;
     if (!stepId || !status) return;
     this.sawProgress = true;
-    if (status === 'running') {
-      this.showStoredShot(stepId);
-    }
+    // 该步的高亮截图由内核在执行该步之前拍好随事件下发（跨 WS 边界：null 当没有，不靠默认值）。
+    const shot = (d as { shot?: unknown }).shot;
+    const fresh = typeof shot === 'string' && shot.length > 0;
+    if (fresh) this.storedStepShot(stepId, shot as string);
+    if (fresh || status === 'running') this.showStoredShot(stepId);
     this.setStepStatus(stepId, status);
   };
+
+  /**
+   * 记下某一步的高亮截图。旧内核不逐步截图时收不到 shot，此处不会被调用 ——
+   * 那一步就保持「未运行，暂无截图」，不给假图充数。
+   */
+  private storedStepShot(stepId: string, png: string): void {
+    this.stepShots.set(stepId, { png });
+    this.cfgView?.setShot(stepId, true);
+  }
 
   // 注：CFG 节点状态**不另开** WS 订阅。状态经 `setStepStatus` 单点分发
   // （列表项 + CFG 视图共用同一个 stepStatus Map），故只需一处订阅、无顺序问题。
@@ -655,8 +694,8 @@ export class UiShell {
     this.connected = true;
     this.runNoticeText = undefined;
     this.render();
-    // 已载入的脚本（含先导入后连接）按叶子补拍，已有录制图的 stepId 不覆盖。
-    void this.backfillStepShots();
+    // 刻意不补拍：截图只跟执行走（执行到某步、执行该步之前拍），
+    // 连接时靶机还在初始状态，那时拍第 N 步只能拍到一张没有该元素的误导性图。
   }
 
   async disconnect(): Promise<void> {
@@ -722,6 +761,7 @@ export class UiShell {
           control: { kind: 'sequence', name: describeStepBrief({ ...last, params: { ...last.params, value: ev.params?.value } }) },
         });
         this.cfgView?.update(this.script);
+        this.syncAllCfgShots();
         void this.captureStepShot(last.id, shotLocatorOf(last), ev.target);
         this.selectStep(last.id);
         return;
@@ -1457,6 +1497,17 @@ export class UiShell {
     }
   }
 
+  /**
+   * 把"哪些步已有高亮截图"全量回填到 CFG 卡片（节点重建后调用）。
+   * 与 syncAllCfgStatuses 同构：卡片提示与 stepShots 保持同一真相源，不由视图各算一套。
+   */
+  private syncAllCfgShots(): void {
+    if (!this.cfgView) return;
+    for (const s of this.flattenSteps()) {
+      this.cfgView.setShot(s.id, this.stepShots.has(s.id));
+    }
+  }
+
   /** 把选中态同步到两个兄弟视图（列表项 + CFG 节点）。 */
   private syncSelectedDom(stepId: string): void {
     // 列表项：先清旧、再置新。
@@ -1507,9 +1558,13 @@ export class UiShell {
     // 只需这一处订阅 —— CFG 节点状态由 setStepStatus 单点分发，不另开订阅。
     this.kernel.on?.('step-progress', this.onProgress);
 
+    // 未连接就没有靶机可拍，不传计划（保持 playback 两参调用，也不让内核做无谓的截图尝试）。
+    const shotPlan = this.connected ? this.buildShotPlan() : undefined;
     let res: PlaybackResult = { ok: false };
     try {
-      res = (await this.kernel.playback(this.getScript(), fromStepId)) ?? { ok: false };
+      res = (shotPlan === undefined
+        ? await this.kernel.playback(this.getScript(), fromStepId)
+        : await this.kernel.playback(this.getScript(), fromStepId, shotPlan)) ?? { ok: false };
     } catch (err) {
       // playback 抛错（桥校验失败、WS 断开、if 条件崩）以前会让 res 未赋值，
       // 后面读 res.ok 再抛一次，void runAll() 吞掉 → 用户点「运行全部」零反馈。
@@ -1559,11 +1614,95 @@ export class UiShell {
     return this.runAll();
   }
 
+  /**
+   * 非破坏性预演：只验证每一步的 locator 在当前界面状态下能不能定位到，**不执行任何操作**。
+   *
+   * 用途：Agent 刚生成完脚本时先过一遍，快速知道"哪些元素现在就找得到"。
+   * 适用范围（刻意如此，不是缺陷）：只对当前界面状态下就存在的元素有效。第 1 步通常有效；
+   * 第 3 步那种"前两步跑完才出现"的元素，预演必然找不到 —— 那是预期行为，报成
+   * `notYetPresent` 并说明原因，**绝不能报成错误**，否则会把 Agent 带偏。
+   *
+   * 副作用约定：全程只调 `kernel.locateVisual`（只读取 bounding box）。
+   * 不点击、不填值、不切窗口、不调 playback、不截图，被测软件状态前后完全一致。
+   *
+   * 已知限制（刻意不绕过）：`locateVisual` 作用于当前选中的窗口，故跨窗口步骤
+   * （step.target 指向别的窗口）会被判成 `notYetPresent`。为它调 selectTarget
+   * 就等于产生副作用，与"非破坏性"相悖 —— 宁可结论保守，也不动靶机。
+   */
+  async dryRun(): Promise<DryRunReport> {
+    const empty: DryRunReport = { ran: false, results: [], foundCount: 0, notYetCount: 0 };
+    if (!this.connected) return { ...empty, notice: '未连接靶机，无法预演（先连上靶机再试）' };
+    if (typeof this.kernel.locateVisual !== 'function') {
+      return { ...empty, notice: '当前内核不支持视觉定位，无法预演' };
+    }
+
+    const results: DryRunStepResult[] = [];
+    for (const step of this.flattenSteps()) {
+      if (step.children?.length) continue;
+      const loc = shotLocatorOf(step);
+      // 整页断言（textContains）与纯等待没有"要操作的元素"，谈不上定位，跳过。
+      if (!loc) continue;
+      results.push(await this.probeStep(step, loc));
+    }
+    return {
+      ran: true,
+      results,
+      foundCount: results.filter((r) => r.outcome === 'found').length,
+      notYetCount: results.filter((r) => r.outcome === 'notYetPresent').length,
+    };
+  }
+
+  /** 预演单步：只定位、不操作。定位失败（含内核抛错）一律算"当前状态下不存在"，不算失败。 */
+  private async probeStep(step: Step, loc: Locator): Promise<DryRunStepResult> {
+    const what = describeLocator(loc) || step.id;
+    try {
+      // 跨 WS 边界兜底：不依赖解构默认值，显式 ?? {}（§4.1 清单 1）。
+      const rect = (await this.kernel.locateVisual(loc)) ?? {};
+      if (rect.visible && rect.width > 0 && rect.height > 0) {
+        return { stepId: step.id, outcome: 'found', message: `已确认存在：${what}`, rect };
+      }
+    } catch (err) {
+      // 定位服务不可用等原因：如实带进文案，但不中断预演、也不把它报成脚本的错。
+      const why = err instanceof Error ? err.message : String(err);
+      return {
+        stepId: step.id,
+        outcome: 'notYetPresent',
+        message: `当前状态下无法确认「${what}」（${why}）；若该元素需前序步骤执行后才出现，属预期行为`,
+      };
+    }
+    return {
+      stepId: step.id,
+      outcome: 'notYetPresent',
+      message: `该元素需前序步骤执行后才出现，无法在预演阶段验证：${what}`,
+    };
+  }
+
   private resetRunStatus(): void {
     this.stepStatus.clear();
     this.lastFailedStepId = undefined;
     // 重置图上所有节点状态为 pending（避免上一轮 pass/fail 残留，§4 测试「重跑」）。
     this.cfgView?.update(this.script);
+    // update 会整树重建，卡片上的"未运行，暂无截图"标记随之丢失，必须按 stepShots 回填，
+    // 否则跑第二轮时上一轮已拍到的步骤会被误标成没图。
+    this.syncAllCfgShots();
+  }
+
+  /**
+   * 逐步截图计划：每个叶子步骤一张，高亮它要操作的那个元素。
+   * 组节点跳过（它不是"要操作的元素"）；无 locator 的步骤（纯等待 / 整页断言）也要拍整页，
+   * 这样舞台的逐步流才不会断档。
+   */
+  private buildShotPlan(): StepShotPlan {
+    const plan: StepShotPlan = {};
+    for (const step of this.flattenSteps()) {
+      if (step.children?.length) continue;
+      const entry: { highlight?: Locator; target?: string } = {};
+      const loc = shotLocatorOf(step);
+      if (loc) entry.highlight = loc;
+      if (step.target) entry.target = step.target;
+      plan[step.id] = entry;
+    }
+    return plan;
   }
 
   private setStepStatus(stepId: string, status: StepRunStatus): void {
@@ -1690,26 +1829,10 @@ export class UiShell {
         : await this.kernel.screenshot();
       const png = pngBase64(buf);
       if (!png || png.length < 8) return;
-      this.stepShots.set(stepId, { png });
+      this.storedStepShot(stepId, png);
       if (this.selectedStepId === stepId) this.showStoredShot(stepId);
     } catch (err) {
       console.warn('[UiShell] 步骤截图失败:', err instanceof Error ? err.message : err);
-    }
-  }
-
-  /**
-   * 导入或连接后给叶子步补拍：有 locator 走录制同款 highlight 截图，
-   * 无 locator（wait / 整页 textContains）拍未高亮整页，舞台才有逐步流。
-   * 已有图的 id 不覆盖（录制当场拍的比事后整页更接近操作瞬间）。
-   */
-  private async backfillStepShots(): Promise<void> {
-    if (!this.connected) return;
-    const gen = ++this.shotBackfillGen;
-    for (const step of this.flattenSteps()) {
-      if (gen !== this.shotBackfillGen) return;
-      if (step.children?.length) continue;
-      if (this.stepShots.has(step.id)) continue;
-      await this.captureStepShot(step.id, shotLocatorOf(step), step.target);
     }
   }
 
@@ -1725,7 +1848,7 @@ export class UiShell {
     if (!shot) {
       if (img) img.remove();
       this.clearHighlight();
-      if (hint) hint.textContent = '该步尚无截图';
+      if (hint) hint.textContent = SHOT_HINT_NONE;
       return;
     }
     if (!img) {
@@ -1837,7 +1960,9 @@ export class UiShell {
     this.detailOpen = false;
     this.packMenuIds = undefined;
     this.render();
-    void this.backfillStepShots();
+    // 导入不补拍：截图在执行时逐步拍。内嵌/侧车带来的图已在上面 hydrateShots 灌入，
+    // 这里把"哪些步有图"同步到卡片，免得卡片把带了图的步骤误标成「未运行，暂无截图」。
+    this.syncAllCfgShots();
   }
 
   /**
@@ -2383,6 +2508,8 @@ export class UiShell {
     this.cfgMount = cfgTree;
     this.cfgView.update(this.script);
     this.syncAllCfgStatuses();
+    // update 整树重建后卡片回到"无图"默认态，按 stepShots 回填一次（顺序必须在 update 之后）。
+    this.syncAllCfgShots();
     if (this.selectedStepId) this.cfgView.setSelected(this.selectedStepId, this.selectedIds);
     if (this.shouldShowPackOverlay()) {
       const menu = document.createElement('div');
@@ -2576,5 +2703,6 @@ export class UiShell {
     }
     this.cfgView.update(this.script);
     this.syncAllCfgStatuses();
+    this.syncAllCfgShots();
   }
 }

@@ -26,7 +26,15 @@ export type ControlKind = typeof CONTROL_KINDS[number];
 export type StepRunStatus = 'pending' | 'running' | 'pass' | 'fail';
 
 /** 运行进度事件载荷（服务端经 'step-progress' 推送）。 */
-export type StepProgressEvent = { stepId: string; status: StepRunStatus };
+export type StepProgressEvent = {
+  stepId: string;
+  status: StepRunStatus;
+  /**
+   * 该步的**高亮截图**（base64 PNG，无 data: 前缀），由桥端在**执行该步之前**拍好随事件下发。
+   * 可选：旧内核不实现逐步截图时没有此字段，UI 侧不得因此报错，更不得伪造图片充数。
+   */
+  shot?: string;
+};
 
 export type Locator = {
   role?: string;       // 语义角色，如 'button'

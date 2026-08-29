@@ -208,10 +208,32 @@ describe('UI 主链路 e2e（DOM 事件委托入口）', () => {
     });
   });
 
-  it('已连接时导入 Agent 脚本：点步骤后舞台出现该步截图（用户导入路径）', async () => {
+  it('导入 Agent 脚本后未运行：卡片提示暂无截图；点运行全部后舞台才出现该步截图', async () => {
     const { shell, mount } = bootShell(kernel);
     await shell.connect();
     shell.importScript(AGENT_JSON);
+    // 导入不再批量补拍：没跑过的步骤诚实显示「未运行，暂无截图」，
+    // 而不是给一张靶机初始状态的误导性图。
+    expect(Object.keys(shell.getStepShots())).toEqual([]);
+    const card = mount.querySelector('[data-cfg-node="agent-fill-chat"]');
+    expect(card?.getAttribute('data-cfg-shot')).toBe('none');
+    expect(card?.querySelector('[data-cfg-shot-hint]')?.textContent).toBe('未运行，暂无截图');
+
+    // 走用户路径点「运行全部」：内核在执行每步之前回传该步截图（逐步拍，与录制同语义）
+    const progressCbs: Array<(d: unknown) => void> = [];
+    kernel.on = vi.fn((event: string, cb: (d: unknown) => void) => {
+      if (event === 'step-progress') progressCbs.push(cb);
+    });
+    kernel.off = vi.fn();
+    kernel.playback = vi.fn(async (script: Script) => {
+      for (const s of script.steps) {
+        const shot = Buffer.from(`PNG-${s.id}`).toString('base64');
+        for (const cb of progressCbs) cb({ stepId: s.id, status: 'running', shot });
+        for (const cb of progressCbs) cb({ stepId: s.id, status: 'pass' });
+      }
+      return { ok: true };
+    });
+    click(mount.querySelector('[data-action="run-all"]'));
     await vi.waitFor(() => {
       expect(shell.getStepShots()['agent-fill-chat']).toBeTruthy();
       expect(shell.getStepShots()['agent-click-send']).toBeTruthy();

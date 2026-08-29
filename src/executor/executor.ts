@@ -14,7 +14,19 @@ import type { AssertionContext } from '../vision/judge';
  * 函数无法 JSON 序列化（真机上回调必然丢失）。故进度源必须在 Node 进程内产生，
  * 再由 bridge-server 经单向推送通道下发给浏览器端。详见 CODEBUDDY.md §4.1。
  */
-export type StepProgress = (stepId: string, status: 'running' | 'pass' | 'fail') => void;
+/**
+ * 返回值允许是 Promise，且**只有 `running` 会被 await**（见 runNode）。
+ *
+ * 为什么必须等：逐步高亮截图挂在 running 上报上（桥端在这一步执行**之前**拍一张）。
+ * 不等的话，截图请求会和该步的执行动作赛跑 —— 真机上常常拍到执行**之后**的画面，
+ * 那时这一步要操作的元素可能已经变了或没了，高亮框必然画不上，且单测看不出来。
+ *
+ * 返回类型用 `unknown` 而不是 `void | Promise<void>`：既有调用方里有
+ * `(id, st) => seen.push(x)` 这种顺手把回调体写成表达式的写法（返回 number），
+ * 收窄成 void 会把它们全打成类型错误 —— 那些写法本身没有错，返回值我们并不关心。
+ * 同步回调返回 undefined，`await` 它是无操作，故既有调用方行为完全不变。
+ */
+export type StepProgress = (stepId: string, status: 'running' | 'pass' | 'fail') => unknown;
 
 /**
  * 执行整个脚本：对每条顶层 step 调递归 runNode。
@@ -34,9 +46,9 @@ export async function runScript(
 ): Promise<void> {
   // 进度上报是辅助能力：订阅方回调抛错不得中断脚本执行。
   const report: StepProgress = onStep
-    ? (id, st) => {
+    ? async (id, st) => {
         try {
-          onStep(id, st);
+          await onStep(id, st);
         } catch (err) {
           console.warn('[executor] 进度回调抛错（已忽略）:', err instanceof Error ? err.message : err);
         }
@@ -92,7 +104,8 @@ async function runNode(
   if (!ctrl || atomicGroup) {
     // 叶子：未到起点则跳过（不执行、不上报进度）。
     if (!state.started) return;
-    onStep(node.id, 'running');
+    // 必须 await：这一步的高亮截图挂在 running 上报上，拍完才允许动靶机。
+    await onStep(node.id, 'running');
     try {
       await runStep(adapter, node, ctx ?? null);
     } catch (err) {
@@ -112,7 +125,8 @@ async function runNode(
       // 未 started 且起点不在本 if 子树时，整棵跳过 —— 避免无谓地求值条件（副作用/可能失败）。
       if (!state.started && state.fromStepId && !containsId(node, state.fromStepId)) break;
       // 求值条件前先标 running：snapshot/定位可能很慢，不能让「运行全部」看起来没反应。
-      if (state.started) onStep(node.id, 'running');
+      // 同样要 await：选择组条件的高亮截图也挂在这一次上报上。
+      if (state.started) await onStep(node.id, 'running');
       try {
         const result = ctrl.condition
           ? await runAssertion(adapter, ctrl.condition, ctx ?? null)

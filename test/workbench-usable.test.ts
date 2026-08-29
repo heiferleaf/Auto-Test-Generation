@@ -157,10 +157,8 @@ describe('步骤截图，不实时刷帧', () => {
     expect(img?.src).toContain('base64');
   });
 
-  it('选中没有截图的步骤时清掉上一张图，提示该步尚无截图', async () => {
+  it('选中没有截图的步骤时清掉上一张图，提示「未运行，暂无截图」', async () => {
     const kernel = makeKernel();
-    // 连接后会给已有叶子补拍；这里先让补拍失败，才能留下「尚无截图」的步。
-    kernel.screenshot.mockRejectedValue(new Error('no-frame'));
     const mount = document.createElement('div');
     document.body.appendChild(mount);
     const script: Script = {
@@ -169,22 +167,23 @@ describe('步骤截图，不实时刷帧', () => {
     };
     const shell = new UiShell({ kernel, mount, script });
     await shell.connect();
-    await vi.waitFor(() => {
-      expect(kernel.screenshot.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // 导入不补拍：两步此刻都没有图
+    expect(Object.keys(shell.getStepShots())).toEqual([]);
+    // 只跑 a 一步（内核回传该步执行前拍的图），b 仍未运行 → 保留「暂无截图」
+    kernel.playback = vi.fn(async () => {
+      kernel.emit('step-progress', {
+        stepId: 'a', status: 'running', shot: Buffer.from('PNG-A').toString('base64'),
+      });
+      kernel.emit('step-progress', { stepId: 'a', status: 'pass' });
+      return { ok: true };
     });
-    kernel.screenshot.mockReset();
-    kernel.screenshot.mockResolvedValue(Buffer.from('PNG-BYTES-FOR-STEP-SHOT'));
-    await shell.startRecording();
-    kernel.emit('recording', { type: 'click', locator: { name: 'a' } });
-    await vi.waitFor(() => {
-      expect(Object.keys(shell.getStepShots()).length).toBeGreaterThan(0);
-    });
-    const recordedId = [...Object.keys(shell.getStepShots())][0];
-    shell.selectStep(recordedId);
+    await shell.runAll();
+    expect(Object.keys(shell.getStepShots())).toEqual(['a']);
+    shell.selectStep('a');
     expect(mount.querySelector('img.ui-shell-frame-img')).toBeTruthy();
     shell.selectStep('b');
     expect(mount.querySelector('img.ui-shell-frame-img')).toBeNull();
-    expect(mount.querySelector('[data-frame]')?.textContent).toContain('该步尚无截图');
+    expect(mount.querySelector('[data-frame]')?.textContent).toContain('未运行，暂无截图');
     expect(mount.querySelector('[data-highlight]')).toBeNull();
   });
 });

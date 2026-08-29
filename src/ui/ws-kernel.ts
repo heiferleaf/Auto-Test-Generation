@@ -5,7 +5,7 @@
 // 注意：浏览器无法运行 Node 的 Buffer；screenshot 结果在桥端转为 base64 字符串回传，
 // 本端以 { __base64: string } 形式返回，调用方（演示）按字符串处理即可。
 
-import type { UiKernel, PlaybackResult } from './shell';
+import type { UiKernel, PlaybackResult, StepShotPlan } from './shell';
 import type { Script, Locator } from '../types/step';
 import type { ConnectOptions, VisualRect, TargetInfo, SerializedNode } from '../cdp/adapter';
 import type { InteractionEvent } from '../recorder/recorder';
@@ -120,7 +120,10 @@ export class WsKernel implements UiKernel {
   cancelPick(): Promise<void> { return this.call('cancelPick'); }
 
   // ---- UiKernel.playback ----
-  playback(script: Script, fromStepId?: string): Promise<PlaybackResult> {
-    return this.call('playback', script, fromStepId);
+  playback(script: Script, fromStepId?: string, shotPlan?: StepShotPlan): Promise<PlaybackResult> {
+    const args: unknown[] = [script, fromStepId, shotPlan];
+    // 不传尾部 undefined 参数：JSON.stringify 会把它变 null，使桥端默认参数失效（§4.1）。
+    while (args.length > 1 && args[args.length - 1] === undefined) args.pop();
+    return this.call('playback', ...args);
   }
 }

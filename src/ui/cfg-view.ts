@@ -214,6 +214,12 @@ import { describeStepBrief, TYPE_LABEL } from './step-label';
 /** 流图画布点阵间距：铺满 pan 世界，不要密成整页钉板。 */
 const CFG_DOT_GAP_PX = 20;
 
+/**
+ * 步骤卡片在无高亮截图时显示的文案（单一真相源：卡片与舞台共用，避免两处措辞漂移）。
+ * 说"未运行"而不是"尚无截图"：截图是在执行该步之前拍的，没跑到这一步就没有图，这是预期状态。
+ */
+export const SHOT_HINT_NONE = '未运行，暂无截图';
+
 function cfgDotsReducedMotion(): boolean {
   try {
     if (typeof matchMedia !== 'function') return true;
@@ -658,6 +664,16 @@ export class CfgView {
       lab.setAttribute('data-locator-text', 'true');
       lab.textContent = ' ' + this.nodeActionText(node);
       inner.appendChild(lab);
+      // 「未运行，暂无截图」提示：没跑过的步骤必须让人一眼看出来，
+      // 不能给一张靶机初始状态的图冒充该步的高亮截图（那正是"Agent 脚本没高亮"的误导来源）。
+      // 默认"无图"；已有图的步骤由 shell 在重建后统一 setShot 回填（与 setStatus 同款的原地更新），
+      // 故此处不另存一份"谁有图"的状态 —— 避免与 shell 的 stepShots 形成第二个真相源。
+      el.setAttribute('data-cfg-shot', 'none');
+      const shotHint = document.createElement('span');
+      shotHint.className = 'ui-shell-cfg-shot-hint';
+      shotHint.setAttribute('data-cfg-shot-hint', 'true');
+      shotHint.textContent = SHOT_HINT_NONE;
+      inner.appendChild(shotHint);
       el.appendChild(inner);
     }
 
@@ -1045,6 +1061,19 @@ export class CfgView {
     el.classList.remove('is-pending', 'is-running', 'is-pass', 'is-fail');
     el.classList.add(`is-${status}`);
     if (status === 'running') this.panNodeIntoView(el);
+  }
+
+  /**
+   * 标记该步是否已有高亮截图（原地更新，不整树重建）。
+   * 无图时卡片显示「未运行，暂无截图」：没跑过的步骤给不出该步的图，
+   * 显示提示比给一张靶机初始状态的图诚实。
+   */
+  setShot(stepId: string, hasShot: boolean): void {
+    const el = this.nodeEls.get(stepId);
+    if (!el) return;
+    el.setAttribute('data-cfg-shot', hasShot ? 'has' : 'none');
+    const hint = el.querySelector('[data-cfg-shot-hint]');
+    if (hint) hint.textContent = hasShot ? '' : SHOT_HINT_NONE;
   }
 
   /** 运行中把当前步平滑移到画布中心（200–300ms），不要 jump。 */

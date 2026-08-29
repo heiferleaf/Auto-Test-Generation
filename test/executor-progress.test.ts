@@ -59,6 +59,28 @@ describe('executor 逐步进度钩子', () => {
     expect(seen).toEqual(['a:running', 'a:pass', 'b:running', 'b:pass']);
   });
 
+  // 「拍完再执行」的闸门：逐步高亮截图挂在 running 上报上，执行器必须等它完成。
+  // 不等的话，截图请求会和该步的执行动作赛跑 —— 真机上常常拍到执行**之后**的画面，
+  // 第 N 步的元素那时可能已经变了/没了，高亮框必然画不上（而单测看不出来）。
+  it('running 上报返回 Promise 时，执行器等它完成才执行该步', async () => {
+    const adapter = makeStubAdapter();
+    const seen: string[] = [];
+    (adapter as unknown as { click: unknown }).click = vi.fn(async (l: Locator) => {
+      seen.push(`click:${l.name}`);
+    });
+    const onStep: StepProgress = async (stepId, status) => {
+      if (status !== 'running') return;
+      seen.push(`shot-start:${stepId}`);
+      await new Promise((r) => setTimeout(r, 5));
+      seen.push(`shot-end:${stepId}`);
+    };
+    await runScript(adapter, scriptOf([clickStep('a', 'A'), clickStep('b', 'B')]), onStep);
+    expect(seen).toEqual([
+      'shot-start:a', 'shot-end:a', 'click:A',
+      'shot-start:b', 'shot-end:b', 'click:B',
+    ]);
+  });
+
   it('步骤抛错时回调 fail，且后续步骤不再回调', async () => {
     const adapter = makeStubAdapter('B');
     const seen: string[] = [];
