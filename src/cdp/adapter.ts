@@ -201,6 +201,12 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
   private lastCoverage: RecordingCoverage | null = null;
   /** 上一次 screenshot 的高亮绘制结果（画没画上、为什么没画上）。 */
   private lastHighlight: HighlightPaintResult | null = null;
+  /** drain 重入锁：drainIncremental 由 250ms 定时器触发，若上次还没结束又到点，直接跳过，
+   * 不叠加——否则挂死的 target 会让计时器不断地堆积 pending evaluate。 */
+  private drainBusy = false;
+  /** 单个 target drain 的硬超时：evaluate 既不 resolve 也不 reject（注入层卡死/上下文失效）
+   * 时，.catch 捕获不到，必须靠 race 一个定时器把它判死，否则整体串行 await 会卡死。 */
+  private readonly drainTimeoutMs = 3000;
 
   async connect(opts?: ConnectOptions): Promise<void> {
     // WS 边界：opts 可能是 null；已连接时 playback/runCli 会再调 connect() 且不带 port，
@@ -484,24 +490,42 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     }
   }
 
+  /** 带硬超时的 evaluate：注入层卡死时 evaluate 会既不 resolve 也不 reject，
+   * .catch 捕获不到这种挂起，必须用 Promise.race 一个定时器把它判死，返回 null。 */
+  private withDrainTimeout<T>(target: import('./webview-session').CdpTarget, expr: string): Promise<T | null> {
+    return Promise.race<T | null>([
+      target.evaluate<T>(expr).catch(() => null),
+      new Promise<T | null>((resolve) => setTimeout(() => resolve(null), this.drainTimeoutMs)),
+    ]);
+  }
+
   /** 增量取回：drain 每个 target 缓冲，新增事件追加到 recorded 并推给 onEvent。 */
   private async drainIncremental(): Promise<void> {
     if (!this.recording || !this.recordingListener) return;
-    for (const t of this.targets) {
-      const buf = await t.target.evaluate<any[]>(RECORD_DRAIN).catch(() => []);
-      if (!Array.isArray(buf)) continue;
-      for (const e of buf) {
-        const ev: InteractionEvent = { ...(e as InteractionEvent), target: t.info.id };
-        // 跨 250ms drain 窗口合并同一输入框的 fill（spec §2.2.2）。
-        const prevLast = this.recorded[this.recorded.length - 1];
-        const prevLen = this.recorded.length;
-        this.recorded = mergeRecordingEvent(this.recorded, ev);
-        if (this.recorded.length === prevLen && this.recorded[this.recorded.length - 1] === prevLast) {
-          continue;
-        }
-        const last = this.recorded[this.recorded.length - 1];
-        emitRecordingEvent(this.recordingListener, last);
-      }
+    if (this.drainBusy) return;
+    this.drainBusy = true;
+    try {
+      // 并行 drain 全部 target：任一 target 卡死靠 withDrainTimeout 判死，不拖垮其它。
+      await Promise.allSettled(
+        this.targets.map(async (t) => {
+          const buf = await this.withDrainTimeout<any[]>(t.target, RECORD_DRAIN);
+          if (!Array.isArray(buf)) return;
+          for (const e of buf) {
+            const ev: InteractionEvent = { ...(e as InteractionEvent), target: t.info.id };
+            // 跨 250ms drain 窗口合并同一输入框的 fill（spec §2.2.2）。
+            const prevLast = this.recorded[this.recorded.length - 1];
+            const prevLen = this.recorded.length;
+            this.recorded = mergeRecordingEvent(this.recorded, ev);
+            if (this.recorded.length === prevLen && this.recorded[this.recorded.length - 1] === prevLast) {
+              continue;
+            }
+            const last = this.recorded[this.recorded.length - 1];
+            emitRecordingEvent(this.recordingListener!, last);
+          }
+        }),
+      );
+    } finally {
+      this.drainBusy = false;
     }
   }
 
@@ -521,12 +545,19 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
       void t.target.evaluate(REC_ACTIVE_OFF).catch(() => undefined);
     }
     const out: InteractionEvent[] = [];
-    for (const t of this.targets) {
-      const buf = await t.target.evaluate<any[]>(RECORD_DRAIN).catch(() => []);
-      if (Array.isArray(buf)) {
-        for (const e of buf) out.push({
+    // 并行取回全部 target 缓冲：任一 target 卡死靠 withDrainTimeout 判死，不拖垮停止流程。
+    const settled = await Promise.allSettled(
+      this.targets.map(async (t) => {
+        const buf = await this.withDrainTimeout<any[]>(t.target, RECORD_DRAIN);
+        return { id: t.info.id, buf: Array.isArray(buf) ? buf : [] };
+      }),
+    );
+    for (const r of settled) {
+      if (r.status !== 'fulfilled') continue;
+      for (const e of r.value.buf) {
+        out.push({
           ...(e as InteractionEvent),
-          target: t.info.id,
+          target: r.value.id,
           locator: sanitizeLocator((e as InteractionEvent).locator) ?? (e as InteractionEvent).locator,
         });
       }
