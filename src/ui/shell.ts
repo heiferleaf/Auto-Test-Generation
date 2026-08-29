@@ -559,11 +559,6 @@ export class UiShell {
         if (id) this.openInspector(id);
         break;
       }
-      case 'select-target': {
-        const sel = el as HTMLSelectElement;
-        if (sel.value) this.selectTarget(sel.value);
-        break;
-      }
       case 'unpack': {
         const id = el.getAttribute('data-step-id') ?? this.selectedStepId ?? [...this.selectedIds][0] ?? '';
         const step = id ? this.findStep(id) : undefined;
@@ -2358,31 +2353,8 @@ export class UiShell {
     dot.className = 'rec-dot' + (this.recording ? ' on' : '');
     brand.appendChild(dot);
 
-    // CDP 目标下拉：单窗口没用，多 webview 才需要。标签是「当前窗口」不是产品名。
-    let targets: { id: string; type?: string; title?: string }[] = [];
-    try { targets = (this.listTargets() ?? []) as { id: string; type?: string; title?: string }[]; } catch { targets = []; }
-    if (this.connected && targets.length > 1 && !this.recording) {
-      const lab = document.createElement('label');
-      lab.className = 'ui-shell-target-label';
-      lab.setAttribute('data-target-label', 'true');
-      const labText = document.createElement('span');
-      labText.textContent = '当前窗口';
-      lab.appendChild(labText);
-      const sel = document.createElement('select');
-      sel.className = 'ui-shell-target-select';
-      sel.setAttribute('data-action', 'select-target');
-      sel.setAttribute('data-target-select', 'true');
-      targets.forEach((t) => {
-        const opt = document.createElement('option');
-        opt.value = t.id;
-        opt.textContent = `${t.title ?? t.id} (${t.type})`;
-        if (t.id === this.currentTargetId) opt.selected = true;
-        sel.appendChild(opt);
-      });
-      sel.addEventListener('change', () => this.selectTarget(sel.value));
-      lab.appendChild(sel);
-      brand.appendChild(lab);
-    }
+    // 注：原顶栏「当前窗口」target 下拉已移除——点选态改为向全部 target 注入（见
+    // src/cdp/adapter.ts 点选态说明），无需手动切窗口；手动 snapshot 默认取首层。
     header.appendChild(brand);
 
     // 操作栏进顶栏第二行，不再钉在窗口底。data-action 名不变。
