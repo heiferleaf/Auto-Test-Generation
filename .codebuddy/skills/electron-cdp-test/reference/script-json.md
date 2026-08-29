@@ -32,6 +32,8 @@
 
 ## 步骤类型
 
+**这是封闭集合，只有这 10 种。** 不在列表内的 type 一律被拒绝（导入期就报错，不会等到执行）。
+
 | type | 用途 | 关键 params |
 |---|---|---|
 | `click` | 点击元素 | — |
@@ -42,6 +44,22 @@
 | `waitUntil` | 等条件成立 | `{ "assertion": {...}, "timeoutMs": 5000 }` |
 | `assert` | 断言 | `{ "assertion": {...} }` |
 | `snapshot` | 取快照 | — |
+| `eval` | 在页面里执行 JS | `{ "code": "..." }` |
+| `repeat` | 重复执行子步骤 | `children` + `control.loopCount` |
+
+### 不是 Playwright API
+
+本平台格式与 Playwright 没有任何关系。**别把 Playwright 的方法名写进来** —— 这是最常见的错：
+
+| 写了这个 ❌ | 改成 |
+|---|---|
+| `press` / `type` | 要按键 → `eval`（`code` 里派发事件）；要填文本 → `fill` 直接给最终值 |
+| `dblclick` | `eval`，或两次 `click` |
+| `check` / `uncheck` | `click` 那个 checkbox |
+| `goto` / `reload` | `eval`（`location.href = ...` / `location.reload()`） |
+| `waitForSelector` | `waitUntil` + `{ "assertion": { "kind": "exists", ... } }` |
+
+导入时若命中这类名字，报错里会带上对应的改写建议。
 
 ## Locator（定位元素）
 
@@ -66,11 +84,21 @@
 { "kind": "exists", "locator": { "role": "button", "name": "发送" } }
 ```
 
-| kind | 含义 |
-|---|---|
-| `textContains` | 快照文本中包含指定文字（会搜索嵌套节点的文字） |
-| `visible` | 元素可见（按快照的 rect 面积判定） |
-| `exists` | 元素存在 |
+**同样是封闭集合，只有这 9 种。**
+
+| kind | 含义 | 用 `value` / `locator` |
+|---|---|---|
+| `textContains` | 快照文本中包含指定文字（会搜索嵌套节点的文字） | `value` = 要找的文字；`locator` 可选（缺省搜整页） |
+| `visible` | 元素可见（按快照的 rect 面积判定） | `locator` 必填 |
+| `exists` | 元素存在 | `locator` 必填 |
+| `titleIs` | 窗口标题等于指定值 | `value` |
+| `urlMatches` | 地址匹配 | `value` |
+| `expr` | 页面内 JS 表达式求值为真 | `value` = 表达式 |
+| `elementVisibleInViewport` | 元素在视口内可见（滚动位置影响结果） | `locator` 必填 |
+| `screenshotMatches` | 截图比对 | `value` |
+| `visionPrompt` | 截图交给视觉模型判定（最后手段，见 SKILL.md） | `value` = 给模型的提示词 |
+
+所有断言都支持可选 `waitMs`：检测前先等 N 毫秒，给异步渲染留时间。
 
 **`textContains` 的 `value` 必须是操作产生的新结果上那句独特的话**，不能是刚输入的内容。
 

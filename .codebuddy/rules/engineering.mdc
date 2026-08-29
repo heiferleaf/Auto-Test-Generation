@@ -48,6 +48,11 @@ set VSCODE_LIVE=1 && npm test -- test/integration-vscode.test.ts
 
 - **MCP 已落地**（M4 第一刀，`npm run mcp` → `src/mcp/main.ts`）。改动 MCP 前先确认 Tool 语义仍与 `docs/design/design.md` §5 对齐。
 - **MCP stdio 的 stdout 只走 JSON-RPC**，任何启动方式都不得往 stdout 打横幅/日志（npm 不加 `--silent` 会注入 4 行横幅，导致客户端连上却显示 0 tool）。诊断一律打 stderr。
+- **配置文件位置（踩过坑，2026-08-28 查官方文档确认）**：项目级只认 `<项目根>/.mcp.json`（带点号；无点号的 `mcp.json` 是废弃格式）。**放 `.codebuddy/mcp.json` 完全不生效** —— 该路径不在搜索列表里，且同一作用域不合并多文件，只读优先级最高的第一个，所以写错位置等于静默失效。用户级是 `~/.codebuddy/.mcp.json`。
+- **不支持 `${workspaceFolder}`**：变量语法只认 `${VAR}` / `${VAR:-default}`，且变量名须以大写字母或下划线开头。官方 server 字段表也**没有 `cwd`**，相对路径基准是启动进程的 cwd。**一律写绝对路径最稳。**
+- 项目级首次连接需审批；非交互（`-p`）用 `codebuddy --settings '{"enableAllProjectMcpServers": true}'` 放行。
+- 验证：`codebuddy mcp list` 能列出已生效的 server；要测 stdio 握手可 spawn 后发 `initialize` + `tools/list`，看 stdout 是否只有 JSON-RPC。
+- **Agent 侧硬约束**：MCP 工具没连上时**不许改用命令行替代**（跑启动脚本、执行 npm 命令）。工具不可用就如实告诉用户，见 skill 第 0 步。
 
 ## Windows / 编码环境坑（本机 PowerShell + fnm 实测）
 
