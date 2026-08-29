@@ -783,20 +783,22 @@ export class PlaywrightCdpAdapter implements CdpAdapter, VisualCapable, Recordab
     const entry = o.target ? findTarget(this.targets, o.target) : undefined;
     const paintTarget = entry?.target ?? this.currentTarget();
     // 层不匹配：框画得进 webview 的内层 context，但 Playwright 拍不到这一层（scopeFor 会抛
-    // CDP_SCREENSHOT_WEBVIEW_UNSUPPORTED 并回退主窗口）—— 框在图上看不到，用户只觉得「没高亮」。
-    // 原来这个回退被 catch 静默吞掉。现在层不匹配就干脆不画框，并把原因交给宿主侧。
+    // CDP_SCREENSHOT_WEBVIEW_UNSUPPORTED 并回退主窗口）—— 存档图上看不到框。
+    // 但录制回显 / 执行实时高亮看的是软件窗口本身，框画进 webview 用户直接就看到，
+    // 与「截图能否拍到」是两件事。所以**始终画框**（用户看得到），层不匹配只作为
+    // 存档图无框的诊断原因留痕，不再因截图层问题连实时框都不画。
     const layerMismatch = !!o.highlight && highlightLayerMismatch(entry);
     let painted = false;
     if (o.highlight) {
       if (layerMismatch) {
+        // 框照画（用户看软件窗口可见），仅记录原因：若本次截图回退主窗口，图里会无框。
         this.noteHighlight({
           ok: false,
           reason: 'layer-mismatch',
-          detail: `高亮目标 ${o.target} 是 webview：框能画进去，但截图只能拍主窗口`,
+          detail: `高亮目标 ${o.target} 是 webview：框已画进软件窗口（用户可见），但截图只能拍主窗口，存档图可能无框`,
         });
-      } else {
-        painted = await this.paintHighlight(paintTarget, o.highlight);
       }
+      painted = await this.paintHighlight(paintTarget, o.highlight);
     }
     try {
     let scope: Page;
