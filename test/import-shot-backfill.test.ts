@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
-// 导入/连接后补拍逐步截图。Agent JSON 可带可选 shots（同一份 v1，不是第二种格式）；
-// 未连接导入带 shots 时舞台就能出图。无配图且已连接时仍按叶子补拍。
+// 导入/连接**不再**补拍逐步截图：截图改到执行该步之前再拍（与录制语义一致），
+// 逐步拍的契约见 test/shot-timing.test.ts。
+// 本文件守的是：任何时刻导入都不拍（这是"未连接时不拍"约定在新语义下的延续），
+// 只有脚本自带的可选 shots / 侧车 *.shots.json 才会在导入时进 getStepShots。
 
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -62,8 +64,6 @@ function click(el: Element | null) {
   el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
-const PNG = Buffer.from('PNG-BYTES-FOR-IMPORT-SHOT').toString('base64');
-
 describe('导入脚本后补截图流（§2.9）', () => {
   beforeEach(() => { document.body.innerHTML = ''; });
 
@@ -106,60 +106,38 @@ describe('导入脚本后补截图流（§2.9）', () => {
     expect(shell.getStepShots()['s1']).toBe(tiny);
   });
 
-  it('已连接时导入带 locator 的 Agent 脚本：叶子步进入 getStepShots，有 locator 的调用 highlight', async () => {
+  it('已连接时导入带 locator 的 Agent 脚本：一张都不拍（截图留到执行该步之前再拍）', async () => {
     const kernel = makeKernel();
-    const { shell, mount } = boot(kernel);
+    const { shell } = boot(kernel);
     await shell.connect();
     shell.importScript(AGENT_JSON);
-    await vi.waitFor(() => {
-      const shots = shell.getStepShots();
-      expect(shots['agent-fill-chat']).toBe(PNG);
-      expect(shots['agent-click-send']).toBe(PNG);
-      expect(shots['agent-wait-token']).toBe(PNG);
-    });
-    const highlightCalls = (kernel.screenshot as ReturnType<typeof vi.fn>).mock.calls.filter((c: unknown[]) => {
-      const opts = (c[0] ?? {}) as { highlight?: { css?: string; name?: string } };
-      return !!opts.highlight;
-    });
-    expect(highlightCalls.some((c: unknown[]) => {
-      const opts = (c[0] ?? {}) as { highlight?: { css?: string } };
-      return typeof opts.highlight?.css === 'string' && opts.highlight.css.length > 0;
-    })).toBe(true);
-    expect(highlightCalls.some((c: unknown[]) => {
-      const opts = (c[0] ?? {}) as { highlight?: { name?: string } };
-      return opts.highlight?.name === '发送';
-    })).toBe(true);
-    // waitUntil 无 locator：整页未高亮截图（screenshot() 无 highlight）
-    expect((kernel.screenshot as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => {
-      const opts = c[0] as { highlight?: unknown } | undefined;
-      return opts === undefined || opts.highlight === undefined;
-    })).toBe(true);
-    click(mount.querySelector('[data-cfg-node="agent-fill-chat"]'));
-    expect(mount.querySelector('img.ui-shell-frame-img')).toBeTruthy();
+    // 让任何"导入即拍"的异步尾巴都跑完，再断言确实没拍
+    await new Promise((r) => setTimeout(r, 0));
+    expect(Object.keys(shell.getStepShots())).toEqual([]);
+    expect(kernel.screenshot).not.toHaveBeenCalled();
   });
 
-  it('先导入再连接：连接后同样补拍', async () => {
+  it('先导入再连接：连接后同样不补拍（截图时机只跟执行走）', async () => {
     const kernel = makeKernel();
     const { shell } = boot(kernel);
     shell.importScript(AGENT_JSON);
     expect(Object.keys(shell.getStepShots())).toEqual([]);
     await shell.connect();
-    await vi.waitFor(() => {
-      expect(shell.getStepShots()['agent-click-send']).toBeTruthy();
-    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(Object.keys(shell.getStepShots())).toEqual([]);
+    expect(kernel.screenshot).not.toHaveBeenCalled();
   });
 
   it('导出 JSON 含可选 shots 根字段，步骤上仍没有 png', async () => {
     const kernel = makeKernel();
     const { shell } = boot(kernel);
     await shell.connect();
-    shell.importScript(AGENT_JSON);
-    await vi.waitFor(() => {
-      expect(shell.getStepShots()['agent-fill-chat']).toBeTruthy();
-    });
+    const tiny = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    shell.importScript(AGENT_JSON, JSON.stringify({ shots: { 'agent-fill-chat': tiny } }));
     const exported = JSON.parse(shell.exportScript()) as Script & { shots?: Record<string, string> };
     expect(exported.shots?.['agent-fill-chat']).toMatch(/base64/i);
     expect(exported.steps.every((s) => !('png' in s) && !('shots' in s))).toBe(true);
+    expect(kernel.screenshot).not.toHaveBeenCalled();
   });
 });
 

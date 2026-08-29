@@ -291,6 +291,68 @@ describe('step-progress 经真实 WebSocket 端到端传输', () => {
     expect(first!.data).toEqual({ stepId: 'a', status: 'running' });
   });
 
+  // 高亮截图的补拍时机：截图必须由桥端在**该步执行之前**拍，随 running 事件回传。
+  // 这条顺序就是全部意义 —— 反过来的话，拍到的是执行后的画面，第 N 步的元素已经变了/没了，
+  // 高亮框必然画不上（正是"Agent 脚本没有高亮"的根因）。
+  it('传 shotPlan 时每步 running 事件带 shot，且截图发生在该步动作之前', async () => {
+    const adapter = makeBridgeStubAdapter();
+    adapter.screenshot = vi.fn(async (opts?: { highlight?: { name?: string } }) => {
+      adapter.calls.push(`screenshot:${opts?.highlight?.name ?? 'page'}`);
+      return Buffer.from('png-bytes');
+    });
+    harness = await openHarness(adapter);
+    client = await TestClient.connect(harness.url);
+
+    const plan = { a: { highlight: { name: 'A' } }, b: { highlight: { name: 'B' } } };
+    await client.call(
+      'playback',
+      scriptOf([clickStep('a', 'A'), clickStep('b', 'B')]),
+      undefined,
+      plan,
+    );
+
+    expect(adapter.calls).toEqual(['screenshot:A', 'click:A', 'screenshot:B', 'click:B']);
+    const running = client.events.filter((e) => {
+      const d = e.data as { status?: string };
+      return e.event === 'step-progress' && d.status === 'running';
+    });
+    expect(running).toHaveLength(2);
+    const shots = running.map((e) => (e.data as { shot?: string }).shot);
+    expect(shots.every((s) => typeof s === 'string' && s.length > 0)).toBe(true);
+    // base64 能还原成桥端拍到的字节，证明图真的到了浏览器端
+    expect(Buffer.from(shots[0] as string, 'base64').toString()).toBe('png-bytes');
+  });
+
+  it('不传 shotPlan 时不拍图，running 载荷保持 { stepId, status }（旧路径不受影响）', async () => {
+    const adapter = makeBridgeStubAdapter();
+    harness = await openHarness(adapter);
+    client = await TestClient.connect(harness.url);
+
+    await client.call('playback', scriptOf([clickStep('a', 'A')]));
+
+    expect(adapter.screenshot).not.toHaveBeenCalled();
+    expect(client.events.find((e) => e.event === 'step-progress')?.data)
+      .toEqual({ stepId: 'a', status: 'running' });
+  });
+
+  it('桥端截图失败时运行不被中断（截图是辅助能力）', async () => {
+    const adapter = makeBridgeStubAdapter();
+    adapter.screenshot = vi.fn(async () => { throw new Error('截图失败'); });
+    harness = await openHarness(adapter);
+    client = await TestClient.connect(harness.url);
+
+    const res = await client.call(
+      'playback',
+      scriptOf([clickStep('a', 'A')]),
+      undefined,
+      { a: { highlight: { name: 'A' } } },
+    );
+
+    expect((res.result as { ok: boolean }).ok).toBe(true);
+    expect(adapter.calls).toEqual(['click:A']);
+    expect(client.progress()).toEqual(['a:running', 'a:pass']);
+  });
+
   it('客户端传 null script 时，桥端回明确错误而非静默 failedStepId:undefined（§4.1）', async () => {
     const adapter = makeBridgeStubAdapter();
     harness = await openHarness(adapter);

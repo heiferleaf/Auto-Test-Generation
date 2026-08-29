@@ -296,6 +296,9 @@
     .ui-shell-cfg-kind { color: var(--text); font-weight: 500; }
     .ui-shell-cfg-label { color: var(--text); }
     .ui-shell-cfg-leaf ~ .ui-shell-cfg-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+    /* 「未运行，暂无截图」：没跑过的步骤要在卡片上看得出来，不能拿初始状态的图冒充该步截图 */
+    .ui-shell-cfg-shot-hint { margin-left: 6px; color: var(--muted); font-size: 11px; opacity: .8; }
+    .ui-shell-cfg-node[data-cfg-shot="has"] .ui-shell-cfg-shot-hint { display: none; }
     .ui-shell-cfg-node:hover { border-color: var(--muted); transform: translateY(-1px); }
     .ui-shell-cfg-node.is-selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring), 0 6px 16px rgba(0,0,0,.34); }
     .ui-shell-cfg-node.is-unknown { border-style: dashed; border-color: var(--unknown); }
