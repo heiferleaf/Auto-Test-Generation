@@ -14,6 +14,7 @@ import { UiShell, type UiKernel } from './shell';
 import type { Locator } from '../cdp/adapter';
 import { WsKernel } from './ws-kernel';
 import { resolveCdpPort } from './cdp-port';
+import { playIntro } from './intro';
 
 /** 浏览器内演示内核：行为与单测 MockKernel 同构，但独立存在（测试文件不进浏览器）。 */
 class DemoKernel implements UiKernel {
@@ -131,6 +132,11 @@ function boot() {
 
   // 先渲染骨架（含可能的降级横幅）
   shell.render();
+
+  // 开场粒子进场必须在 render() 之后挂：落点坐标是实测 .ui-shell-wordmark 矩形算的，
+  // 元素得先存在才量得到。进场层挂在 body 上，后续 render() 重建也冲不掉它。
+  // 条件不满足（减少动效 / 无 2d 上下文 / 量不到矩形）时 playIntro 自己走降级，这里不关心返回值。
+  playIntro();
 
   // 演示模式才放两条种子步，让无靶机时也能看见 CFG 形态。
   // 真机工作台必须空脚本起步：click/fill 只能来自靶机录制（spec §2.2）。
