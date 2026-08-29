@@ -13,7 +13,7 @@ import type { StepProgress } from '../executor/executor';
 import type { UiKernel } from './shell';
 import type { Script, Locator } from '../types/step';
 import { STEP_TYPES, CONTROL_KINDS } from '../types/step';
-import { importScript as loadScriptJson } from '../script/io';
+import { importScript as loadScriptJson, stepTypeErrorMessage } from '../script/io';
 
 type RpcReq = { id: number; method: keyof UiKernel | 'loadScript'; args: unknown[] };
 type RpcRes = { id: number; ok: true; result?: unknown } | { id: number; ok: false; error: string };
@@ -70,11 +70,10 @@ function assertStepNode(node: unknown, path: string): void {
   }
 
   // type 必须在已知集合内：未知 type 会一路流到 invokeAction 才崩在动作分发层。
+  // 措辞与映射提示用 script/io.ts 的共享函数（导入期同一个），不在此另写一份 ——
+  // 否则两边文案会漂移，Agent 在导入期和执行期看到的是两套说法。
   if (typeof s.type !== 'string' || !STEP_TYPE_SET.has(s.type)) {
-    throw new Error(
-      `playback 的 script.${path}.type 不是已知步骤类型（实际: ${String(s.type)}）；` +
-      `合法值: ${STEP_TYPES.join('/')}`,
-    );
+    throw new Error(`playback 的 script.${stepTypeErrorMessage(path, s.type)}`);
   }
 
   // control 可省略（叶子步骤）；给了就必须是合法控制结构。
